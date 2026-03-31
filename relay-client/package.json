@@ -4,7 +4,7 @@
   "description": "Relay deploy CLI — sync and deploy apps to a self-hosted Relay agent",
   "type": "commonjs",
   "bin": {
-    "relay": "./relay.js"
+    "relay": "relay.js"
   },
   "scripts": {
     "start": "node relay.js"
@@ -19,13 +19,19 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/Relay-CI/Relay.git"
+    "url": "git+https://github.com/Relay-CI/Relay.git"
   },
   "homepage": "https://github.com/Relay-CI/Relay",
   "bugs": {
     "url": "https://github.com/Relay-CI/Relay/issues"
   },
-  "keywords": ["relay", "deploy", "self-hosted", "ci", "cd"],
+  "keywords": [
+    "relay",
+    "deploy",
+    "self-hosted",
+    "ci",
+    "cd"
+  ],
   "license": "MIT",
   "publishConfig": {
     "access": "public"
