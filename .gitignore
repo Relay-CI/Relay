@@ -28,7 +28,6 @@ relayd/ui-src/node_modules
 __pycache__/
 */__pycache__/
 **/__pycache__/
-scripts/
 
 # Root-level duplicate Go files (real code lives in relayd/ and station/)
 /*.go
