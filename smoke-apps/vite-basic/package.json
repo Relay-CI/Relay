@@ -1,0 +1,11 @@
+{
+  "name": "relay-smoke-vite-basic",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "vite": "^7.1.9"
+  }
+}

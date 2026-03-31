@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Relay Admin — Layout Mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Space Grotesk', sans-serif;
+    background: #111;
+    color: #ccc;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 32px 24px 64px;
+    gap: 48px;
+  }
+
+  .page-title { color: #f5f0e8; font-size: 1.5rem; font-weight: 700; letter-spacing: -0.03em; }
+  .page-sub { color: #7a7268; font-size: 0.9rem; margin-top: 6px; }
+  .label { font-size: 0.68rem; font-weight: 700; letter-spacing: 0.2em; text-transform: uppercase; color: #7a7268; margin-bottom: 12px; }
+
+  /* === SHELL === */
+  .shell {
+    width: 100%;
+    max-width: 1100px;
+    height: 620px;
+    background: #0e0c0a;
+    border-radius: 16px;
+    border: 1px solid rgba(245,240,232,0.08);
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    overflow: hidden;
+    box-shadow: 0 40px 120px rgba(0,0,0,0.6);
+  }
+
+  /* === SIDEBAR === */
+  .sidebar {
+    background: #0a0907;
+    border-right: 1px solid rgba(245,240,232,0.06);
+    display: flex;
+    flex-direction: column;
+    padding: 20px 14px;
+    gap: 6px;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px 16px;
+    border-bottom: 1px solid rgba(245,240,232,0.06);
+    margin-bottom: 8px;
+  }
+  .brand-icon {
+    width: 32px; height: 32px;
+    border-radius: 9px;
+    background: linear-gradient(135deg, rgba(198,91,47,0.28), rgba(230,140,70,0.15));
+    border: 1px solid rgba(198,91,47,0.3);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 13px; color: #e8764a;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .brand-text { font-size: 0.95rem; font-weight: 700; color: #f0ece4; letter-spacing: -0.02em; }
+  .brand-sub { font-size: 0.68rem; color: #7a7268; margin-top: 1px; }
+
+  .project-chip {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(245,240,232,0.07);
+    cursor: pointer;
+    margin-bottom: 4px;
+  }
+  .project-chip-name { font-size: 0.82rem; font-weight: 600; color: #f0ece4; }
+  .project-chip-meta { font-size: 0.68rem; color: #7a7268; margin-top: 1px; }
+  .project-chip-chevron { color: #7a7268; font-size: 10px; }
+
+  .nav-section-label {
+    font-size: 0.62rem; font-weight: 700; letter-spacing: 0.18em;
+    text-transform: uppercase; color: #5a5248;
+    padding: 4px 10px; margin-top: 8px;
+  }
+
+  .nav-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 12px;
+    border-radius: 9px;
+    color: #8a7e72;
+    font-size: 0.84rem; font-weight: 500;
+    cursor: pointer;
+  }
+  .nav-item.active {
+    background: linear-gradient(90deg, rgba(198,91,47,0.14), rgba(230,140,70,0.06));
+    border: 1px solid rgba(198,91,47,0.18);
+    color: #f0ece4;
+  }
+  .nav-icon {
+    width: 16px; height: 16px;
+    opacity: 0.7;
+    flex-shrink: 0;
+  }
+  .nav-item.active .nav-icon { opacity: 1; color: #e8764a; }
+
+  .sidebar-footer {
+    margin-top: auto;
+    padding-top: 16px;
+    border-top: 1px solid rgba(245,240,232,0.06);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .status-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 0.72rem; font-weight: 600;
+    padding: 5px 10px; border-radius: 99px;
+    background: rgba(198,91,47,0.12);
+    border: 1px solid rgba(198,91,47,0.22);
+    color: #e8764a;
+  }
+  .dot { width: 6px; height: 6px; border-radius: 99px; background: currentColor; }
+  .logout-btn {
+    font-size: 0.72rem; color: #5a5248; cursor: pointer;
+    padding: 4px 8px; border-radius: 6px;
+    background: transparent; border: 1px solid transparent;
+  }
+
+  /* === MAIN === */
+  .main {
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* Topbar */
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 24px;
+    border-bottom: 1px solid rgba(245,240,232,0.06);
+    flex-shrink: 0;
+  }
+  .breadcrumb {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 0.82rem; color: #7a7268;
+  }
+  .breadcrumb-sep { color: #3a3530; }
+  .breadcrumb-active { color: #f0ece4; font-weight: 600; }
+  .topbar-actions { display: flex; align-items: center; gap: 8px; }
+  .topbar-pill {
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 12px; border-radius: 8px;
+    border: 1px solid rgba(245,240,232,0.08);
+    background: rgba(255,255,255,0.03);
+    font-size: 0.75rem; color: #8a7e72;
+  }
+  .topbar-btn {
+    padding: 6px 12px; border-radius: 8px;
+    border: 1px solid rgba(198,91,47,0.2);
+    background: rgba(198,91,47,0.1);
+    font-size: 0.75rem; color: #e8764a; font-weight: 600;
+    cursor: pointer;
+  }
+
+  /* Content */
+  .content {
+    flex: 1; overflow-y: auto;
+    padding: 20px 24px;
+    display: flex; flex-direction: column; gap: 16px;
+  }
+
+  /* Context bar */
+  .context-bar {
+    display: flex; gap: 8px;
+  }
+  .env-chip {
+    flex: 1; padding: 12px 14px;
+    border-radius: 10px;
+    background: rgba(255,255,255,0.02);
+    border: 1px solid rgba(245,240,232,0.07);
+    cursor: pointer;
+  }
+  .env-chip.active {
+    background: linear-gradient(135deg, rgba(198,91,47,0.1), rgba(230,140,70,0.05));
+    border-color: rgba(198,91,47,0.22);
+  }
+  .env-top { display: flex; align-items: center; justify-content: space-between; }
+  .env-name { font-size: 0.78rem; font-weight: 700; color: #f0ece4; }
+  .env-branch { font-size: 0.68rem; color: #7a7268; font-family: 'IBM Plex Mono', monospace; margin-top: 3px; }
+  .env-status {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 0.65rem; font-weight: 700; padding: 2px 7px;
+    border-radius: 99px;
+    background: rgba(198,91,47,0.12); border: 1px solid rgba(198,91,47,0.2);
+    color: #e8764a;
+  }
+  .env-status.ok {
+    background: rgba(80,200,140,0.12); border-color: rgba(80,200,140,0.2); color: #60d49a;
+  }
+
+  /* Grid */
+  .grid-two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .grid-three { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+
+  /* Metric cards */
+  .metric-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .metric {
+    padding: 14px 16px; border-radius: 10px;
+    background: rgba(255,255,255,0.025);
+    border: 1px solid rgba(245,240,232,0.07);
+  }
+  .metric.accent {
+    background: linear-gradient(135deg, rgba(198,91,47,0.1), rgba(230,140,70,0.05));
+    border-color: rgba(198,91,47,0.18);
+  }
+  .metric-label { font-size: 0.65rem; font-weight: 700; letter-spacing: 0.15em; text-transform: uppercase; color: #7a7268; }
+  .metric-val { font-size: 1.6rem; font-weight: 700; color: #f0ece4; letter-spacing: -0.04em; margin-top: 6px; line-height: 1; }
+  .metric-meta { font-size: 0.7rem; color: #7a7268; margin-top: 4px; }
+  .metric.accent .metric-val { color: #e8764a; }
+
+  /* Section card */
+  .section-card {
+    background: rgba(255,255,255,0.02);
+    border: 1px solid rgba(245,240,232,0.07);
+    border-radius: 12px;
+    padding: 16px 18px;
+  }
+  .section-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .section-title { font-size: 0.88rem; font-weight: 700; color: #f0ece4; }
+  .section-eyebrow { font-size: 0.62rem; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; color: #7a7268; margin-bottom: 3px; }
+
+  /* Table */
+  .mini-table { width: 100%; border-collapse: collapse; }
+  .mini-table th { font-size: 0.65rem; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #5a5248; padding: 0 0 8px; text-align: left; border-bottom: 1px solid rgba(245,240,232,0.06); }
+  .mini-table td { font-size: 0.75rem; color: #c0b8b0; padding: 8px 0; border-bottom: 1px solid rgba(245,240,232,0.04); }
+  .mini-table td:first-child { color: #e8764a; font-family: 'IBM Plex Mono', monospace; font-size: 0.7rem; }
+  .chip-sm {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 0.62rem; font-weight: 700; padding: 2px 7px; border-radius: 99px;
+  }
+  .chip-ok { background: rgba(80,200,140,0.12); border: 1px solid rgba(80,200,140,0.2); color: #60d49a; }
+  .chip-warn { background: rgba(198,91,47,0.12); border: 1px solid rgba(198,91,47,0.2); color: #e8764a; }
+
+  /* Row card */
+  .row { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-radius: 8px; background: rgba(255,255,255,0.02); border: 1px solid rgba(245,240,232,0.05); }
+  .row + .row { margin-top: 6px; }
+  .row-title { font-size: 0.8rem; font-weight: 600; color: #f0ece4; }
+  .row-meta { font-size: 0.7rem; color: #7a7268; margin-top: 2px; font-family: 'IBM Plex Mono', monospace; }
+
+  .annotation {
+    background: rgba(198,91,47,0.08);
+    border: 1px dashed rgba(198,91,47,0.25);
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 0.72rem;
+    color: #c07050;
+    line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+
+<div style="text-align:center">
+  <div class="page-title">Relay Admin — Redesign Preview</div>
+  <div class="page-sub">Full component restructure · Warm dark palette · Space Grotesk + IBM Plex Mono</div>
+</div>
+
+<!-- Full shell mockup -->
+<div style="width:100%;max-width:1100px">
+  <div class="label">Full dashboard mockup</div>
+  <div class="shell">
+
+    <!-- SIDEBAR -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-icon">R</div>
+        <div>
+          <div class="brand-text">Relay</div>
+          <div class="brand-sub">Control Room</div>
+        </div>
+      </div>
+
+      <div class="project-chip">
+        <div>
+          <div class="project-chip-name">my-app</div>
+          <div class="project-chip-meta">3 envs · 2 services</div>
+        </div>
+        <div class="project-chip-chevron">⌄</div>
+      </div>
+
+      <div class="nav-section-label">Navigation</div>
+
+      <div class="nav-item active">
+        <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="1" width="6" height="6" rx="1.5"/><rect x="9" y="1" width="6" height="6" rx="1.5"/><rect x="1" y="9" width="6" height="6" rx="1.5"/><rect x="9" y="9" width="6" height="6" rx="1.5"/></svg>
+        Overview
+      </div>
+      <div class="nav-item">
+        <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4h12M2 8h8M2 12h5"/><circle cx="13" cy="11" r="2.5"/><path d="M13 8.5V8"/></svg>
+        Deployments
+      </div>
+      <div class="nav-item">
+        <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 5v3l2 2"/></svg>
+        Activity
+      </div>
+      <div class="nav-item">
+        <svg class="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 3h12v2H2zM4 7h8M4 10h5"/><circle cx="12" cy="12" r="2.5"/><path d="M12 9.5V9"/></svg>
+        Settings
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="status-badge">
+          <div class="dot"></div>
+          Agent live
+        </div>
+        <div class="logout-btn">Log out</div>
+      </div>
+    </aside>
+
+    <!-- MAIN -->
+    <main class="main">
+      <!-- Topbar -->
+      <div class="topbar">
+        <div class="breadcrumb">
+          <span>my-app</span>
+          <span class="breadcrumb-sep">/</span>
+          <span class="breadcrumb-active">Overview</span>
+        </div>
+        <div class="topbar-actions">
+          <div class="topbar-pill">
+            <span>↻</span>
+            <span>47 deploys</span>
+          </div>
+          <div class="topbar-btn">↻ Refresh</div>
+        </div>
+      </div>
+
+      <!-- Scrollable content -->
+      <div class="content">
+
+        <!-- Metric row -->
+        <div class="metric-row">
+          <div class="metric">
+            <div class="metric-label">Environments</div>
+            <div class="metric-val">3</div>
+            <div class="metric-meta">project contexts</div>
+          </div>
+          <div class="metric accent">
+            <div class="metric-label">Services</div>
+            <div class="metric-val">2</div>
+            <div class="metric-meta">live companions</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">Latest Deploy</div>
+            <div class="metric-val" style="font-size:1.1rem;color:#60d49a;">SUCCESS</div>
+            <div class="metric-meta">3m ago</div>
+          </div>
+        </div>
+
+        <!-- Context bar -->
+        <div class="context-bar">
+          <div class="env-chip active">
+            <div class="env-top">
+              <div class="env-name">prod</div>
+              <div class="env-status ok"><div class="dot"></div>success</div>
+            </div>
+            <div class="env-branch">main</div>
+          </div>
+          <div class="env-chip">
+            <div class="env-top">
+              <div class="env-name">staging</div>
+              <div class="env-status"><div class="dot"></div>idle</div>
+            </div>
+            <div class="env-branch">develop</div>
+          </div>
+          <div class="env-chip">
+            <div class="env-top">
+              <div class="env-name">preview</div>
+              <div class="env-status ok"><div class="dot"></div>success</div>
+            </div>
+            <div class="env-branch">feat/auth</div>
+          </div>
+        </div>
+
+        <!-- Two-col grid -->
+        <div class="grid-two">
+          <!-- Live contexts -->
+          <div class="section-card">
+            <div class="section-header">
+              <div>
+                <div class="section-eyebrow">Environment Surface</div>
+                <div class="section-title">Live contexts</div>
+              </div>
+            </div>
+            <div class="row">
+              <div>
+                <div class="row-title">prod / main</div>
+                <div class="row-meta">https://my-app.example.com</div>
+              </div>
+              <span class="chip-sm chip-ok"><span class="dot" style="width:5px;height:5px;background:currentColor;border-radius:99px;"></span>success</span>
+            </div>
+            <div class="row">
+              <div>
+                <div class="row-title">staging / develop</div>
+                <div class="row-meta">No preview URL</div>
+              </div>
+              <span class="chip-sm chip-warn"><span class="dot" style="width:5px;height:5px;background:currentColor;border-radius:99px;"></span>idle</span>
+            </div>
+          </div>
+
+          <!-- Recent deploys table -->
+          <div class="section-card">
+            <div class="section-header">
+              <div>
+                <div class="section-eyebrow">Deployment History</div>
+                <div class="section-title">Recent deploys</div>
+              </div>
+            </div>
+            <table class="mini-table">
+              <thead>
+                <tr><th>ID</th><th>Status</th><th>Context</th><th>Age</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>a1b2c3d4</td>
+                  <td><span class="chip-sm chip-ok">success</span></td>
+                  <td style="color:#c0b8b0;">prod/main</td>
+                  <td style="color:#c0b8b0;">3m</td>
+                </tr>
+                <tr>
+                  <td>9f8e7d6c</td>
+                  <td><span class="chip-sm chip-warn">running</span></td>
+                  <td style="color:#c0b8b0;">staging/dev</td>
+                  <td style="color:#c0b8b0;">12m</td>
+                </tr>
+                <tr>
+                  <td>5a4b3c2d</td>
+                  <td><span class="chip-sm chip-ok">success</span></td>
+                  <td style="color:#c0b8b0;">prod/main</td>
+                  <td style="color:#c0b8b0;">2h</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- Login screen -->
+<div style="width:100%;max-width:480px">
+  <div class="label">Login screen</div>
+  <div style="background:#0e0c0a;border-radius:16px;border:1px solid rgba(245,240,232,0.08);padding:32px;box-shadow:0 40px 120px rgba(0,0,0,0.5);font-family:'Space Grotesk',sans-serif;">
+    <div style="width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,rgba(198,91,47,0.28),rgba(230,140,70,0.15));border:1px solid rgba(198,91,47,0.3);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;color:#e8764a;font-family:'IBM Plex Mono',monospace;margin-bottom:20px;">R</div>
+    <div style="font-size:0.65rem;font-weight:700;letter-spacing:0.22em;text-transform:uppercase;color:#7a7268;margin-bottom:8px;">Secure Agent Access</div>
+    <div style="font-size:1.6rem;font-weight:700;color:#f0ece4;letter-spacing:-0.04em;margin-bottom:8px;">Relay Control Room</div>
+    <div style="font-size:0.83rem;color:#7a7268;line-height:1.6;margin-bottom:20px;">Dashboard sessions are stored in an HttpOnly cookie. The token never lives in browser storage.</div>
+    <div style="padding:11px 14px;border-radius:10px;border:1px solid rgba(245,240,232,0.08);background:rgba(255,255,255,0.03);color:#5a5248;font-size:0.84rem;margin-bottom:10px;">Paste relay token</div>
+    <div style="padding:12px 16px;border-radius:10px;background:linear-gradient(90deg,#c65b2f,#e07840);color:#fff8f2;font-weight:700;font-size:0.9rem;text-align:center;cursor:pointer;">Enter Dashboard</div>
+    <div style="display:flex;align-items:center;gap:8px;margin-top:14px;font-size:0.75rem;color:#7a7268;">
+      Token source
+      <span style="padding:4px 10px;border-radius:99px;border:1px solid rgba(245,240,232,0.08);background:rgba(255,255,255,0.03);font-family:'IBM Plex Mono',monospace;font-size:0.7rem;">data/token.txt</span>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

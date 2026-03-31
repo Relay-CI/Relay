@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: ['**']
+
+jobs:
+  # ── relayd + dashboard bundle ───────────────────────────────────────────────
+  build-relayd:
+    name: Build relayd
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: relayd/ui-src/package-lock.json
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: relayd/go.mod
+          cache-dependency-path: relayd/go.sum
+
+      - name: Build dashboard bundle
+        working-directory: relayd/ui-src
+        run: npm ci && npm run build
+
+      - name: Build relayd (linux/amd64)
+        working-directory: relayd
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: go build -trimpath -o ../dist/relayd .
+
+      - name: Test relayd
+        working-directory: relayd
+        env:
+          CGO_ENABLED: "0"
+        run: go test ./...
+
+  # ── station (Linux) ─────────────────────────────────────────────────────────
+  build-station-linux:
+    name: Build station (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: relayd/go.mod
+          cache-dependency-path: station/go.sum
+
+      - name: Build station (linux/amd64)
+        working-directory: station
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: go build -trimpath -o ../dist/station .
+
+      - name: Test station
+        working-directory: station
+        env:
+          CGO_ENABLED: "0"
+        run: go test ./...
+
+  # ── station (Windows) ───────────────────────────────────────────────────────
+  build-station-windows:
+    name: Build station (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: relayd/go.mod
+          cache-dependency-path: station/go.sum
+
+      - name: Build station.exe
+        working-directory: station
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: go build -trimpath -o ..\dist\station.exe .
+
+  # ── relay CLI (Node) ────────────────────────────────────────────────────────
+  lint-cli:
+    name: Lint relay CLI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: relay-client/package-lock.json
+
+      - name: Install deps
+        working-directory: relay-client
+        run: npm install
+
+      - name: Check syntax
+        working-directory: relay-client
+        run: node --check relay.js

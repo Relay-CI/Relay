@@ -1,0 +1,45 @@
+# Relay project ignores
+
+# build artifacts
+dist/
+build/
+target/
+*.exe~
+
+# Go binaries (compiled outputs)
+relayd/relayd
+relayd/relayd.exe
+station/station
+station/station.exe
+station/vessel
+station/vessel.exe
+station/nativec_linux
+station/vessel-linux
+
+# Next.js / Node.js
+.next/
+node_modules/
+site/.next/
+relay-client/node_modules/
+relayd/ui-src/node_modules/
+
+# Runtime data (created by relayd at startup)
+data/
+*.db
+*.log
+
+# Local project config (written by relay init)
+.relay.json
+
+# Go workspace
+go.work
+go.work.sum
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/settings.json
+*.swp

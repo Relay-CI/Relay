@@ -1,0 +1,20 @@
+{
+  "name": "astro-static",
+  "description": "Astro static site buildpack plugin",
+  "priority": 900,
+  "detect": {
+    "files_any": ["astro.config.mjs", "astro.config.js", "astro.config.ts"],
+    "package_deps_any": ["astro"]
+  },
+  "plan": {
+    "kind": "astro-static",
+    "service_port": 80,
+    "build_image": "node:22",
+    "run_image": "nginx:alpine",
+    "install_cmd": "npm install",
+    "build_cmd": "npm run build",
+    "dockerfile_template": "FROM {{ .BuildImage }} AS builder\nWORKDIR /app\nCOPY package.json ./\nCOPY package-lock.json* pnpm-lock.yaml* yarn.lock* ./\nRUN {{ .InstallCmd }}\nCOPY . .\nRUN {{ .BuildCmd }}\n\nFROM {{ .RunImage }}\nCOPY --from=builder /app/dist /usr/share/nginx/html\nCOPY default.conf /etc/nginx/conf.d/default.conf\nEXPOSE {{ .ServicePort }}\n",
+    "write_default_conf": true,
+    "cleanup_paths": ["node_modules", "dist"]
+  }
+}

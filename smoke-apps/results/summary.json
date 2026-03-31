@@ -1,0 +1,308 @@
+﻿[
+    {
+        "framework":  "static",
+        "attempt":  1,
+        "app":  "smoke-static",
+        "dir":  "static-basic",
+        "port":  3111,
+        "exit_code":  0,
+        "success":  true,
+        "duration_seconds":  20.29,
+        "buildpack":  "static",
+        "deploy_id":  null,
+        "preview_url":  "http://127.0.0.1:3111",
+        "http_status":  "200",
+        "upload_summary":  {
+
+                           },
+        "log_file":  "C:\\Users\\aloys\\Downloads\\relay\\smoke-apps\\results\\static-attempt1.log"
+    },
+    {
+        "framework":  "static",
+        "attempt":  2,
+        "app":  "smoke-static",
+        "dir":  "static-basic",
+        "port":  3111,
+        "exit_code":  0,
+        "success":  true,
+        "duration_seconds":  6.96,
+        "buildpack":  "static",
+        "deploy_id":  null,
+        "preview_url":  "http://127.0.0.1:3111",
+        "http_status":  "200",
+        "upload_summary":  {
+
+                           },
+        "log_file":  "C:\\Users\\aloys\\Downloads\\relay\\smoke-apps\\results\\static-attempt2.log"
+    },
+    {
+        "framework":  "node",
+        "attempt":  1,
+        "app":  "smoke-node",
+        "dir":  "node-basic",
+        "port":  3112,
+        "exit_code":  1,
+        "success":  false,
+        "duration_seconds":  10.32,
+        "buildpack":  "node-generic",
+        "deploy_id":  null,
+        "preview_url":  "http://127.0.0.1:3112",
+        "http_status":  null,
+        "upload_summary":  {
+
+                           },
+        "log_file":  "C:\\Users\\aloys\\Downloads\\relay\\smoke-apps\\results\\node-attempt1.log"
+    },
+    {
+        "framework":  "node",
+        "attempt":  2,
+        "app":  "smoke-node",
+        "dir":  "node-basic",
+        "port":  3112,
+        "exit_code":  1,
+        "success":  false,
+        "duration_seconds":  6.17,
+        "buildpack":  "node-generic",
+        "deploy_id":  null,
+        "preview_url":  "http://127.0.0.1:3112",
+        "http_status":  null,
+        "upload_summary":  {
+
+                           },
+        "log_file":  "C:\\Users\\aloys\\Downloads\\relay\\smoke-apps\\results\\node-attempt2.log"
+    },
+    {
+        "framework":  "vite",
+        "attempt":  1,
+        "app":  "smoke-vite",
+        "dir":  "vite-basic",
+        "port":  3113,
+        "exit_code":  0,
+        "success":  true,
+        "duration_seconds":  12.47,
+        "buildpack":  "node-vite",
+        "deploy_id":  null,
+        "preview_url":  "http://127.0.0.1:3113",
+        "http_status":  "200",
+        "upload_summary":  {
+
+                           },
+        "log_file":  "C:\\Users\\aloys\\Downloads\\relay\\smoke-apps\\results\\vite-attempt1.log"
+    },
+    {
+        "framework":  "vite",
+        "attempt":  2,
+        "app":  "smoke-vite",
+        "dir":  "vite-basic",
+        "port":  3113,
+        "exit_code":  0,
+        "success":  true,
+        "duration_seconds":  7.34,
+        "buildpack":  "node-vite",
+        "deploy_id":  null,
+        "preview_url":  "http://127.0.0.1:3113",
+        "http_status":  "200",
+        "upload_summary":  {
+
+                           },
+        "log_file":  "C:\\Users\\aloys\\Downloads\\relay\\smoke-apps\\results\\vite-attempt2.log"
+    },
+    {
+        "framework":  "go",
+        "attempt":  1,
+        "app":  "smoke-go",
+        "dir":  "go-basic",
+        "port":  3114,
+        "exit_code":  0,
+        "success":  true,
+        "duration_seconds":  19.67,
+        "buildpack":  "go",
+        "deploy_id":  null,
+        "preview_url":  "http://127.0.0.1:3114",
+        "http_status":  "200",
+        "upload_summary":  {
+
+                           },
+        "log_file":  "C:\\Users\\aloys\\Downloads\\relay\\smoke-apps\\results\\go-attempt1.log"
+    },
+    {
+        "framework":  "go",
+        "attempt":  2,
+        "app":  "smoke-go",
+        "dir":  "go-basic",
+        "port":  3114,
+        "exit_code":  0,
+        "success":  true,
+        "duration_seconds":  7.89,
+        "buildpack":  "go",
+        "deploy_id":  null,
+        "preview_url":  "http://127.0.0.1:3114",
+        "http_status":  "200",
+        "upload_summary":  {
+
+                           },
+        "log_file":  "C:\\Users\\aloys\\Downloads\\relay\\smoke-apps\\results\\go-attempt2.log"
+    },
+    {
+        "framework":  "python",
+        "attempt":  1,
+        "app":  "smoke-python",
+        "dir":  "python-basic",
+        "port":  3115,
+        "exit_code":  0,
+        "success":  true,
+        "duration_seconds":  21.13,
+        "buildpack":  "python",
+        "deploy_id":  null,
+        "preview_url":  "http://127.0.0.1:3115",
+        "http_status":  "200",
+        "upload_summary":  {
+
+                           },
+        "log_file":  "C:\\Users\\aloys\\Downloads\\relay\\smoke-apps\\results\\python-attempt1.log"
+    },
+    {
+        "framework":  "python",
+        "attempt":  2,
+        "app":  "smoke-python",
+        "dir":  "python-basic",
+        "port":  3115,
+        "exit_code":  0,
+        "success":  true,
+        "duration_seconds":  8.6,
+        "buildpack":  "python",
+        "deploy_id":  null,
+        "preview_url":  "http://127.0.0.1:3115",
+        "http_status":  "200",
+        "upload_summary":  {
+
+                           },
+        "log_file":  "C:\\Users\\aloys\\Downloads\\relay\\smoke-apps\\results\\python-attempt2.log"
+    },
+    {
+        "framework":  "dotnet",
+        "attempt":  1,
+        "app":  "smoke-dotnet",
+        "dir":  "dotnet-basic",
+        "port":  3116,
+        "exit_code":  0,
+        "success":  true,
+        "duration_seconds":  28.58,
+        "buildpack":  "dotnet",
+        "deploy_id":  null,
+        "preview_url":  "http://127.0.0.1:3116",
+        "http_status":  "200",
+        "upload_summary":  {
+
+                           },
+        "log_file":  "C:\\Users\\aloys\\Downloads\\relay\\smoke-apps\\results\\dotnet-attempt1.log"
+    },
+    {
+        "framework":  "dotnet",
+        "attempt":  2,
+        "app":  "smoke-dotnet",
+        "dir":  "dotnet-basic",
+        "port":  3116,
+        "exit_code":  0,
+        "success":  true,
+        "duration_seconds":  8.43,
+        "buildpack":  "dotnet",
+        "deploy_id":  null,
+        "preview_url":  "http://127.0.0.1:3116",
+        "http_status":  "200",
+        "upload_summary":  {
+
+                           },
+        "log_file":  "C:\\Users\\aloys\\Downloads\\relay\\smoke-apps\\results\\dotnet-attempt2.log"
+    },
+    {
+        "framework":  "java",
+        "attempt":  1,
+        "app":  "smoke-java",
+        "dir":  "java-basic",
+        "port":  3117,
+        "exit_code":  0,
+        "success":  true,
+        "duration_seconds":  34.71,
+        "buildpack":  "java",
+        "deploy_id":  null,
+        "preview_url":  "http://127.0.0.1:3117",
+        "http_status":  "200",
+        "upload_summary":  {
+
+                           },
+        "log_file":  "C:\\Users\\aloys\\Downloads\\relay\\smoke-apps\\results\\java-attempt1.log"
+    },
+    {
+        "framework":  "java",
+        "attempt":  2,
+        "app":  "smoke-java",
+        "dir":  "java-basic",
+        "port":  3117,
+        "exit_code":  0,
+        "success":  true,
+        "duration_seconds":  8.67,
+        "buildpack":  "java",
+        "deploy_id":  null,
+        "preview_url":  "http://127.0.0.1:3117",
+        "http_status":  "200",
+        "upload_summary":  {
+
+                           },
+        "log_file":  "C:\\Users\\aloys\\Downloads\\relay\\smoke-apps\\results\\java-attempt2.log"
+    },
+    {
+        "framework":  "rust",
+        "attempt":  1,
+        "app":  "smoke-rust",
+        "dir":  "rust-basic",
+        "port":  3118,
+        "exit_code":  0,
+        "success":  true,
+        "duration_seconds":  13.84,
+        "buildpack":  "rust",
+        "deploy_id":  null,
+        "preview_url":  "http://127.0.0.1:3118",
+        "http_status":  "200",
+        "upload_summary":  {
+
+                           },
+        "log_file":  "C:\\Users\\aloys\\Downloads\\relay\\smoke-apps\\results\\rust-attempt1.log"
+    },
+    {
+        "framework":  "rust",
+        "attempt":  2,
+        "app":  "smoke-rust",
+        "dir":  "rust-basic",
+        "port":  3118,
+        "exit_code":  0,
+        "success":  true,
+        "duration_seconds":  9.06,
+        "buildpack":  "rust",
+        "deploy_id":  null,
+        "preview_url":  "http://127.0.0.1:3118",
+        "http_status":  "200",
+        "upload_summary":  {
+
+                           },
+        "log_file":  "C:\\Users\\aloys\\Downloads\\relay\\smoke-apps\\results\\rust-attempt2.log"
+    },
+    {
+        "framework":  "cpp",
+        "attempt":  1,
+        "app":  "smoke-cpp",
+        "dir":  "cpp-basic",
+        "port":  3119,
+        "exit_code":  0,
+        "success":  true,
+        "duration_seconds":  32.75,
+        "buildpack":  "c-cpp",
+        "deploy_id":  null,
+        "preview_url":  "http://127.0.0.1:3119",
+        "http_status":  "200",
+        "upload_summary":  {
+
+                           },
+        "log_file":  "C:\\Users\\aloys\\Downloads\\relay\\smoke-apps\\results\\cpp-attempt1.log"
+    }
+]

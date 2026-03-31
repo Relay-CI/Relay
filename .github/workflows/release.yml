@@ -1,0 +1,201 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag (e.g. v0.2.0)'
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  # ── Build Linux binaries (cross-compile for amd64 + arm64) ─────────────────
+  build-linux:
+    name: Build Linux (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: relayd/ui-src/package-lock.json
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: relayd/go.mod
+          cache-dependency-path: |
+            relayd/go.sum
+            station/go.sum
+
+      - name: Build dashboard bundle
+        working-directory: relayd/ui-src
+        run: npm ci && npm run build
+
+      - name: Build relayd (linux/${{ matrix.arch }})
+        working-directory: relayd
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+        run: go build -trimpath -ldflags="-s -w" -o ../dist/linux-${{ matrix.arch }}/relayd .
+
+      - name: Build station (linux/${{ matrix.arch }})
+        working-directory: station
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+        run: go build -trimpath -ldflags="-s -w" -o ../dist/linux-${{ matrix.arch }}/station .
+
+      - name: Create tarball
+        run: |
+          cd dist/linux-${{ matrix.arch }}
+          tar czf relay-linux-${{ matrix.arch }}.tar.gz relayd station
+          echo "ASSET=dist/linux-${{ matrix.arch }}/relay-linux-${{ matrix.arch }}.tar.gz" >> $GITHUB_ENV
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relay-linux-${{ matrix.arch }}
+          path: dist/linux-${{ matrix.arch }}/relay-linux-${{ matrix.arch }}.tar.gz
+
+  # ── Build Windows binary (includes station-linux WSL2 sidecar) ─────────────
+  build-windows:
+    name: Build Windows (amd64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: relayd/ui-src/package-lock.json
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: relayd/go.mod
+          cache-dependency-path: |
+            relayd/go.sum
+            station/go.sum
+
+      - name: Build all (Windows + station-linux sidecar)
+        shell: pwsh
+        run: .\scripts\build.ps1 -OutputDir dist\windows-amd64
+
+      - name: Create zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\windows-amd64\* -DestinationPath dist\windows-amd64\relay-windows-amd64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relay-windows-amd64
+          path: dist\windows-amd64\relay-windows-amd64.zip
+
+  # ── Publish GitHub Release ──────────────────────────────────────────────────
+  release:
+    name: Publish Release
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Relay ${{ steps.version.outputs.tag }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.tag, '-') }}
+          generate_release_notes: true
+          files: |
+            artifacts/relay-linux-amd64/relay-linux-amd64.tar.gz
+            artifacts/relay-linux-arm64/relay-linux-arm64.tar.gz
+            artifacts/relay-windows-amd64/relay-windows-amd64.zip
+          body: |
+            ## Install
+
+            ### CLI (npm — all platforms)
+            ```bash
+            npm install -g @relay-ci/relay
+            relay agent install
+            relayd
+            ```
+
+            ### Linux (amd64) — manual
+            ```bash
+            curl -L https://github.com/Relay-CI/Relay/releases/download/${{ steps.version.outputs.tag }}/relay-linux-amd64.tar.gz | tar xz
+            sudo mv relayd station /usr/local/bin/
+            ```
+
+            ### Linux (arm64 / Raspberry Pi) — manual
+            ```bash
+            curl -L https://github.com/Relay-CI/Relay/releases/download/${{ steps.version.outputs.tag }}/relay-linux-arm64.tar.gz | tar xz
+            sudo mv relayd station /usr/local/bin/
+            ```
+
+            ### Windows — manual
+            Download `relay-windows-amd64.zip`, extract, and run `relayd.exe`.  
+            Double-click `station.exe` for the Station Desktop UI.
+
+            > No Go installation required — these are prebuilt binaries.
+
+  # ── Publish to npm ──────────────────────────────────────────────────────────
+  publish-npm:
+    name: Publish to npm
+    needs: [release]
+    runs-on: ubuntu-latest
+    environment: npm-publish   # optional: add approval gate in repo Settings → Environments
+    permissions:
+      id-token: write          # required for OIDC trusted publishing
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'   # OIDC publishing requires Node ≥ 22.14.0
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set package version
+        working-directory: relay-client
+        run: |
+          VERSION="${{ steps.version.outputs.tag }}"
+          VERSION="${VERSION#v}"
+          npm version "$VERSION" --no-git-tag-version
+
+      - name: Publish
+        working-directory: relay-client
+        # No token needed — npm CLI detects OIDC and exchanges it automatically
+        run: npm publish --access public

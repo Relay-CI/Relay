@@ -1,0 +1,197 @@
+﻿[
+    {
+        "feature":  "Run + startup (time-to-first-byte)",
+        "vessel":  {
+                       "cmd":  "C:\\Users\\aloys\\Downloads\\relay\\vessel\\vessel.exe run --app bench-run --port 4300 C:\\Users\\aloys\\Downloads\\relay\\smoke-apps\\go-basic .\\\\go-smoke.exe",
+                       "ok":  true,
+                       "note":  "HTTP 200",
+                       "ms":  528
+                   },
+        "docker":  {
+                       "cmd":  "docker run -d --name bench-run-d -p 4301:4301 --mount type=bind,source=C:\\Users\\aloys\\Downloads\\relay\\smoke-apps\\go-basic,target=/app -w /app golang:1.22-alpine go run main.go",
+                       "ok":  true,
+                       "note":  "HTTP 200",
+                       "ms":  4325
+                   }
+    },
+    {
+        "feature":  "List containers",
+        "vessel":  {
+                       "cmd":  "C:\\Users\\aloys\\Downloads\\relay\\vessel\\vessel.exe list",
+                       "ok":  true,
+                       "note":  "id found in list",
+                       "ms":  145
+                   },
+        "docker":  {
+                       "cmd":  "docker ps",
+                       "ok":  true,
+                       "note":  "found in ps",
+                       "ms":  116
+                   }
+    },
+    {
+        "feature":  "Read logs",
+        "vessel":  {
+                       "cmd":  "C:\\Users\\aloys\\Downloads\\relay\\vessel\\vessel.exe logs \u003cid\u003e",
+                       "ok":  true,
+                       "note":  "logs command OK",
+                       "ms":  130
+                   },
+        "docker":  {
+                       "cmd":  "docker logs bench-run-d",
+                       "ok":  true,
+                       "note":  "logs command OK",
+                       "ms":  106
+                   }
+    },
+    {
+        "feature":  "Inspect / status",
+        "vessel":  {
+                       "cmd":  "C:\\Users\\aloys\\Downloads\\relay\\vessel\\vessel.exe status \u003cid\u003e",
+                       "ok":  true,
+                       "note":  "fields present",
+                       "ms":  167
+                   },
+        "docker":  {
+                       "cmd":  "docker inspect bench-run-d",
+                       "ok":  true,
+                       "note":  "JSON returned",
+                       "ms":  105
+                   }
+    },
+    {
+        "feature":  "Env var injection",
+        "vessel":  {
+                       "cmd":  "C:\\Users\\aloys\\Downloads\\relay\\vessel\\vessel.exe run -e KEY=VAL",
+                       "ok":  true,
+                       "note":  "PORT respected (HTTP 200 on 4300)",
+                       "ms":  528
+                   },
+        "docker":  {
+                       "cmd":  "docker run -d -e PORT=\u003cport\u003e ...",
+                       "ok":  true,
+                       "note":  "PORT was bound (HTTP 200)",
+                       "ms":  4325
+                   }
+    },
+    {
+        "feature":  "Stop container",
+        "vessel":  {
+                       "cmd":  "C:\\Users\\aloys\\Downloads\\relay\\vessel\\vessel.exe stop \u003cid\u003e",
+                       "ok":  true,
+                       "note":  "exit 0",
+                       "ms":  3135
+                   },
+        "docker":  {
+                       "cmd":  "docker stop \u003ccontainer\u003e",
+                       "ok":  true,
+                       "note":  "exit 0",
+                       "ms":  389
+                   }
+    },
+    {
+        "feature":  "Restart on crash",
+        "vessel":  {
+                       "cmd":  "C:\\Users\\aloys\\Downloads\\relay\\vessel\\vessel.exe run --restart always ...",
+                       "ok":  true,
+                       "note":  "restarted in 527ms",
+                       "ms":  527
+                   },
+        "docker":  {
+                       "cmd":  "docker run --restart=always ...",
+                       "ok":  true,
+                       "note":  "native --restart=always",
+                       "ms":  0
+                   }
+    },
+    {
+        "feature":  "Snapshot save + load",
+        "vessel":  {
+                       "cmd":  "C:\\Users\\aloys\\Downloads\\relay\\vessel\\vessel.exe snapshot save/load",
+                       "ok":  true,
+                       "note":  "save+load OK (15ms + 14ms)",
+                       "ms":  29
+                   },
+        "docker":  {
+                       "cmd":  "docker commit \u003ccontainer\u003e \u003cimage\u003e; docker save \u003cimage\u003e | docker load",
+                       "ok":  true,
+                       "note":  "docker commit OK",
+                       "ms":  6234
+                   }
+    },
+    {
+        "feature":  "Blue-green proxy",
+        "vessel":  {
+                       "cmd":  "C:\\Users\\aloys\\Downloads\\relay\\vessel\\vessel.exe proxy start/swap",
+                       "ok":  true,
+                       "note":  "start=20ms swap=16ms | both probes 200",
+                       "ms":  36
+                   },
+        "docker":  {
+                       "cmd":  "nginx -s reload (manual)",
+                       "ok":  false,
+                       "note":  "no native equiv (needs nginx/traefik)",
+                       "ms":  0
+                   }
+    },
+    {
+        "feature":  "Build step",
+        "vessel":  {
+                       "cmd":  "C:\\Users\\aloys\\Downloads\\relay\\vessel\\vessel.exe build \u003cdir\u003e \u003ccmd\u003e",
+                       "ok":  true,
+                       "note":  "npm install OK",
+                       "ms":  585
+                   },
+        "docker":  {
+                       "cmd":  "docker build -t bench-build .",
+                       "ok":  true,
+                       "note":  "npm install OK",
+                       "ms":  1463
+                   }
+    },
+    {
+        "feature":  "Port listing",
+        "vessel":  {
+                       "cmd":  "C:\\Users\\aloys\\Downloads\\relay\\vessel\\vessel.exe port",
+                       "ok":  true,
+                       "note":  "1 port entries",
+                       "ms":  15
+                   },
+        "docker":  {
+                       "cmd":  "docker port \u003ccontainer\u003e",
+                       "ok":  true,
+                       "note":  "docker port (per-container)",
+                       "ms":  0
+                   }
+    },
+    {
+        "feature":  "OCI image pull",
+        "vessel":  {
+                       "cmd":  "C:\\Users\\aloys\\Downloads\\relay\\vessel\\vessel.exe image pull alpine:3.19",
+                       "ok":  true,
+                       "note":  "first pull 13ms, cached 11ms",
+                       "ms":  13
+                   },
+        "docker":  {
+                       "cmd":  "docker pull alpine:3.19",
+                       "ok":  true,
+                       "note":  "pulled in 4.6s",
+                       "ms":  4585
+                   }
+    },
+    {
+        "feature":  "Run from image/snapshot",
+        "vessel":  {
+                       "cmd":  "C:\\Users\\aloys\\Downloads\\relay\\vessel\\vessel.exe run --image \u003csnap\u003e .\\go-smoke.exe",
+                       "ok":  true,
+                       "note":  "HTTP 200 via hardlink snapshot",
+                       "ms":  542
+                   },
+        "docker":  {
+                       "cmd":  "docker run \u003cimage\u003e",
+                       "ok":  true,
+                       "note":  "docker run \u003cimage\u003e",
+                       "ms":  0
+                   }
+    }
+]
