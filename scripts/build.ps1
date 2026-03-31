@@ -30,6 +30,7 @@ try {
     Write-Host "Building dashboard bundle..."
     Push-Location (Join-Path $repoRoot "relayd/ui-src")
     try {
+        & npm install --prefer-offline
         & npm run build
     } finally {
         Pop-Location

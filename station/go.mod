@@ -1,6 +1,6 @@
 module station
 
-go 1.23.8
+go 1.23
 
 require (
 	gioui.org v0.9.0
