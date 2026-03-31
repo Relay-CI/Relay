@@ -48,12 +48,18 @@ try {
     Push-Location (Join-Path $repoRoot "station")
     try {
         & go build "-o" (Join-Path $OutputDir "station$ext") .
+        if (-Not (Test-Path (Join-Path $OutputDir "station$ext"))) {
+            throw "Station build failed: output file station$ext missing"
+        }
         if ($GOOS -eq "windows") {
             $linuxArch = if ($GOARCH -eq "arm64") { "arm64" } else { "amd64" }
             $env:GOOS = "linux"
             $env:GOARCH = $linuxArch
             Write-Host "Building station Linux sidecar for WSL2 (linux/$linuxArch)..."
             & go build "-o" (Join-Path $OutputDir "station-linux") .
+            if (-Not (Test-Path (Join-Path $OutputDir "station-linux"))) {
+                throw "Station Linux sidecar build failed: station-linux missing"
+            }
             $env:GOOS = $GOOS
             $env:GOARCH = $GOARCH
         }

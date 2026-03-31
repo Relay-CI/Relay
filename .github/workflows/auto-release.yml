@@ -137,9 +137,15 @@ jobs:
         shell: pwsh
         run: .\scripts\build.ps1 -OutputDir dist\windows-amd64
 
+      - name: Verify windows binaries
+        shell: pwsh
+        run: |
+          dir dist\windows-amd64
+          if (-not (Test-Path dist\windows-amd64\station.exe)) { throw "station.exe missing in dist output" }
+
       - name: Package zip
         shell: pwsh
-        run: Compress-Archive -Path dist\windows-amd64\* -DestinationPath dist\windows-amd64\relay-windows-amd64.zip
+        run: Compress-Archive -Path dist\windows-amd64\relayd.exe,dist\windows-amd64\station.exe,dist\windows-amd64\station-linux -DestinationPath dist\windows-amd64\relay-windows-amd64.zip
 
       - uses: actions/upload-artifact@v4
         with:
