@@ -98,7 +98,7 @@ jobs:
           GOOS: linux
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: "0"
-        run: go mod tidy && go build -trimpath -ldflags="-s -w" -o ../dist/linux-${{ matrix.arch }}/station .
+        run: go build -mod=mod -trimpath -ldflags="-s -w" -o ../dist/linux-${{ matrix.arch }}/station .
 
       - name: Package tarball
         run: |

@@ -61,7 +61,7 @@ jobs:
           GOOS: linux
           GOARCH: amd64
           CGO_ENABLED: "0"
-        run: go build -trimpath -o ../dist/station .
+        run: go build -mod=mod -trimpath -o ../dist/station .
 
       - name: Test station
         working-directory: station
@@ -80,16 +80,13 @@ jobs:
         with:
           go-version-file: station/go.mod
           cache-dependency-path: station/go.sum
-      - name: go mod tidy (station)
-        working-directory: station
-        run: go mod tidy
       - name: Build station.exe
         working-directory: station
         env:
           GOOS: windows
           GOARCH: amd64
           CGO_ENABLED: "0"
-        run: go build -trimpath -o ..\dist\station.exe .
+        run: go build -mod=mod -trimpath -o ..\dist\station.exe .
 
   # ── relay CLI (Node) ────────────────────────────────────────────────────────
   lint-cli:

@@ -47,7 +47,7 @@ try {
     Write-Host "Building station for $GOOS/$GOARCH..."
     Push-Location (Join-Path $repoRoot "station")
     try {
-        & go build "-o" (Join-Path $OutputDir "station$ext") .
+        & go build "-mod=mod" "-o" (Join-Path $OutputDir "station$ext") .
         if (-Not (Test-Path (Join-Path $OutputDir "station$ext"))) {
             throw "Station build failed: output file station$ext missing"
         }
@@ -56,7 +56,7 @@ try {
             $env:GOOS = "linux"
             $env:GOARCH = $linuxArch
             Write-Host "Building station Linux sidecar for WSL2 (linux/$linuxArch)..."
-            & go build "-o" (Join-Path $OutputDir "station-linux") .
+            & go build "-mod=mod" "-o" (Join-Path $OutputDir "station-linux") .
             if (-Not (Test-Path (Join-Path $OutputDir "station-linux"))) {
                 throw "Station Linux sidecar build failed: station-linux missing"
             }
