@@ -75,7 +75,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version-file: relayd/go.mod
+          go-version-file: station/go.mod
           cache-dependency-path: |
             relayd/go.sum
             station/go.sum
@@ -128,7 +128,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version-file: relayd/go.mod
+          go-version-file: station/go.mod
           cache-dependency-path: |
             relayd/go.sum
             station/go.sum
