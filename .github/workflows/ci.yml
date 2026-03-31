@@ -12,11 +12,11 @@ jobs:
     name: Build relayd
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: relayd/ui-src/package-lock.json
 
@@ -48,7 +48,7 @@ jobs:
     name: Build station (linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-go@v5
         with:
@@ -74,13 +74,15 @@ jobs:
     name: Build station (windows)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: station/go.mod
           cache-dependency-path: station/go.sum
-
+      - name: go mod tidy (station)
+        working-directory: station
+        run: go mod tidy
       - name: Build station.exe
         working-directory: station
         env:
@@ -94,11 +96,11 @@ jobs:
     name: Lint relay CLI
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: relay-client/package-lock.json
 
