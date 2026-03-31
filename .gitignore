@@ -11,17 +11,28 @@ relayd/relayd
 relayd/relayd.exe
 station/station
 station/station.exe
-station/vessel
-station/vessel.exe
+station/station-linux
 station/nativec_linux
-station/vessel-linux
 
 # Next.js / Node.js
 .next/
 node_modules/
-site/.next/
+# hide site from git so site folder won't be pushed
+site/
+
 relay-client/node_modules/
-relayd/ui-src/node_modules/
+relayd/ui-src/node_modules
+
+# Internal tooling
+.superpowers/
+
+# Root-level duplicate Go files (real code lives in relayd/ and station/)
+/*.go
+/*.test
+relay.sln
+relay_demo.py
+
+
 
 # Runtime data (created by relayd at startup)
 data/
