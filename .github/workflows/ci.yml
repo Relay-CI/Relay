@@ -52,7 +52,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: relayd/go.mod
+          go-version-file: station/go.mod
           cache-dependency-path: station/go.sum
 
       - name: Build station (linux/amd64)
@@ -78,7 +78,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: relayd/go.mod
+          go-version-file: station/go.mod
           cache-dependency-path: station/go.sum
 
       - name: Build station.exe
