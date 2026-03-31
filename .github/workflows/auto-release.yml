@@ -10,18 +10,20 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
-  bump-and-tag:
-    name: Bump version and tag
+  # ── Step 1: Bump version, commit, tag ──────────────────────────────────────
+  bump:
+    name: Bump version
     runs-on: ubuntu-latest
-    # Skip if this push was itself a version bump commit (avoids infinite loop)
     if: "!startsWith(github.event.head_commit.message, 'chore: release v')"
+    outputs:
+      tag: ${{ steps.bump.outputs.tag }}
+      new_version: ${{ steps.bump.outputs.new_version }}
     steps:
       - uses: actions/checkout@v5
         with:
-          # Use a PAT so the pushed tag triggers downstream workflows
-          token: ${{ secrets.RELEASE_TOKEN || github.token }}
           fetch-depth: 0
 
       - uses: actions/setup-node@v5
@@ -32,37 +34,174 @@ jobs:
         id: bump
         working-directory: relay-client
         run: |
-          # Use the highest existing git tag as the source of truth (not package.json)
-          # This prevents collisions when tags are pushed manually
           LATEST_TAG=$(git tag --list 'v*' --sort=-version:refname | head -n1)
-          if [ -z "$LATEST_TAG" ]; then
-            CURRENT="0.0.0"
-          else
-            CURRENT="${LATEST_TAG#v}"
-          fi
-          echo "Latest tag: $LATEST_TAG → version: $CURRENT"
-
-          # Split into major.minor.patch and bump patch
+          CURRENT=${LATEST_TAG#v}
+          [ -z "$CURRENT" ] && CURRENT="0.0.0"
           IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
           PATCH=$((PATCH + 1))
           NEW="$MAJOR.$MINOR.$PATCH"
-          echo "New version: $NEW"
-
-          # Keep package.json in sync
           npm version "$NEW" --no-git-tag-version
-
           echo "new_version=$NEW" >> $GITHUB_OUTPUT
           echo "tag=v$NEW" >> $GITHUB_OUTPUT
 
-      - name: Commit version bump
+      - name: Commit and tag
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add relay-client/package.json
           git commit -m "chore: release v${{ steps.bump.outputs.new_version }}"
           git push origin main
-
-      - name: Create and push tag
-        run: |
           git tag ${{ steps.bump.outputs.tag }}
           git push origin ${{ steps.bump.outputs.tag }}
+
+  # ── Step 2a: Build Linux binaries ──────────────────────────────────────────
+  build-linux:
+    name: Build Linux (${{ matrix.arch }})
+    needs: bump
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.bump.outputs.tag }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: relayd/ui-src/package-lock.json
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: relayd/go.mod
+          cache-dependency-path: |
+            relayd/go.sum
+            station/go.sum
+
+      - name: Build dashboard
+        working-directory: relayd/ui-src
+        run: npm ci && npm run build
+
+      - name: Build relayd
+        working-directory: relayd
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+        run: go build -trimpath -ldflags="-s -w" -o ../dist/linux-${{ matrix.arch }}/relayd .
+
+      - name: Build station
+        working-directory: station
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "0"
+        run: go mod tidy && go build -trimpath -ldflags="-s -w" -o ../dist/linux-${{ matrix.arch }}/station .
+
+      - name: Package tarball
+        run: |
+          cd dist/linux-${{ matrix.arch }}
+          tar czf relay-linux-${{ matrix.arch }}.tar.gz relayd station
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relay-linux-${{ matrix.arch }}
+          path: dist/linux-${{ matrix.arch }}/relay-linux-${{ matrix.arch }}.tar.gz
+
+  # ── Step 2b: Build Windows binaries ────────────────────────────────────────
+  build-windows:
+    name: Build Windows (amd64)
+    needs: bump
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.bump.outputs.tag }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: relayd/ui-src/package-lock.json
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: relayd/go.mod
+          cache-dependency-path: |
+            relayd/go.sum
+            station/go.sum
+
+      - name: Build all
+        shell: pwsh
+        run: .\scripts\build.ps1 -OutputDir dist\windows-amd64
+
+      - name: Package zip
+        shell: pwsh
+        run: Compress-Archive -Path dist\windows-amd64\* -DestinationPath dist\windows-amd64\relay-windows-amd64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relay-windows-amd64
+          path: dist\windows-amd64\relay-windows-amd64.zip
+
+  # ── Step 3: Create GitHub Release with binaries ─────────────────────────────
+  release:
+    name: Publish GitHub Release
+    needs: [bump, build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.bump.outputs.tag }}
+          name: Relay ${{ needs.bump.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            artifacts/relay-linux-amd64/relay-linux-amd64.tar.gz
+            artifacts/relay-linux-arm64/relay-linux-arm64.tar.gz
+            artifacts/relay-windows-amd64/relay-windows-amd64.zip
+          body: |
+            ## Install
+
+            ### CLI (npm — all platforms)
+            ```bash
+            npm install -g @relay-org/relay
+            relay agent install
+            relayd
+            ```
+
+            ### Linux — manual
+            ```bash
+            curl -L https://github.com/Relay-CI/Relay/releases/download/${{ needs.bump.outputs.tag }}/relay-linux-amd64.tar.gz | tar xz
+            sudo mv relayd station /usr/local/bin/
+            ```
+
+            ### Windows — manual
+            Download `relay-windows-amd64.zip`, extract, run `relayd.exe`.
+
+  # ── Step 4: Publish to npm via OIDC ────────────────────────────────────────
+  publish-npm:
+    name: Publish npm
+    needs: [bump, release]
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.bump.outputs.tag }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Publish
+        working-directory: relay-client
+        run: npm publish --access public
