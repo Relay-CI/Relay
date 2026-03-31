@@ -25,6 +25,10 @@ relayd/ui-src/node_modules
 
 # Internal tooling
 .superpowers/
+__pycache__/
+*/__pycache__/
+**/__pycache__/
+scripts/
 
 # Root-level duplicate Go files (real code lives in relayd/ and station/)
 /*.go

@@ -1,0 +1,10 @@
+# relay runtime state (never commit)
+data/
+*.log
+
+# common junk
+node_modules/
+dist/
+.next/
+.turbo/
+coverage/
