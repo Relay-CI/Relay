@@ -1,76 +1,74 @@
 
 
-# relay-deploy — Relay Node Client (CLI)
+# relay — Relay CLI
 
-A zero-dependency Node 18+ CLI that deploys a local folder to a Relay Agent using the **sync API** (no GitHub required). It:
-- starts a sync session
-- computes a file manifest (sha256)
-- uploads only the changed files
-- triggers a build + container swap on the agent
-- optionally streams deploy logs over SSE
+[![npm](https://img.shields.io/npm/v/@relay-org/relay)](https://www.npmjs.com/package/@relay-org/relay)
+[![license](https://img.shields.io/npm/l/@relay-org/relay)](LICENSE)
+
+Zero-dependency Node 18+ CLI for the [Relay](https://github.com/Relay-CI/Relay) self-hosted deployment platform.
+
+- Syncs only changed files (sha256 diff)
+- Auto-detects buildpacks (Node, Go, Python, Rust, .NET, Java, C/C++, WASM, static)
+- Streams build + deploy logs in real time
+- Downloads `relayd` + `station` agent binaries automatically
 
 ## Requirements
 
-- Node **18+** (uses built-in `fetch`)
-- A running Relay Agent (`relayd`) + token
-- Works on Windows/macOS/Linux
+- Node **18+**
+- A running `relayd` agent + token
+- Works on Windows / macOS / Linux
 
 ## Install
 
-### Option A: run directly
-Keep `relay-deploy.js` in your repo and run with Node:
 ```bash
-node relay-deploy.js deploy --url http://127.0.0.1:8080 --token YOURTOKEN --app myapp --env preview --branch main --dir . --stream
-````
-
-### Option B: make it a proper CLI (recommended)
-
-Add to `package.json`:
-
-```json
-{
-  "bin": {
-    "relay-deploy": "./relay-deploy.js"
-  }
-}
+npm install -g @relay-org/relay
 ```
 
-Then install globally or use `npx` from a local package:
+## Quick Start
 
 ```bash
-npm i -g .
-# now:
-relay-deploy deploy --url http://127.0.0.1:8080 --token YOURTOKEN --app myapp --env preview --branch main --dir . --stream
+# 1. Download and install the agent binaries (one-time)
+relay agent install
+
+# 2. Start the agent on your server
+relayd
+
+# 3. Init your project (writes .relay.json)
+relay init
+
+# 4. Deploy
+relay deploy --stream
 ```
-
-## Quickstart
-
-### 1) Init local config (optional)
-
-Writes `.relay.json` in the current directory:
-
-```bash
-node relay-deploy.js init --url http://127.0.0.1:8080 --token YOURTOKEN --app myapp --env preview --branch main --dir .
-```
-
-### 2) Deploy
-
-```bash
-node relay-deploy.js deploy --dir . --stream
-```
-
-If you used `init`, you can omit most flags.
 
 ## Commands
 
+```
+relay init                         Interactive setup → writes .relay.json
+relay deploy [--stream]            Sync + build + rollout
+relay status                       Latest deploy status
+relay logs <id>                    Stream build logs
+relay list                         Recent deploys
+relay projects                     All projects and environments
+relay rollback                     Roll back to previous image
+relay start / stop / restart       Control a running container
+relay secrets list/add/rm          Manage app secrets
+relay plugin list/install/remove   Manage server-side buildpack plugins
+relay agent install [--version v]  Download relayd + station binaries
+relay agent status                 Show installed agent version and path
+```
+
+## Usage
+
 ### `deploy`
 
-Syncs your local directory to the agent workspace and triggers a deploy.
+```bash
+relay deploy --stream
+```
 
-Example:
+With explicit flags (overrides `.relay.json`):
 
 ```bash
-node relay-deploy.js deploy \
+relay deploy \
   --url http://127.0.0.1:8080 \
   --token YOURTOKEN \
   --app myapp \
@@ -95,47 +93,38 @@ These override defaults from config files / agent buildpacks:
 
 ### `init`
 
-Writes `.relay.json` into your current directory:
-
 ```bash
-node relay-deploy.js init --url http://127.0.0.1:8080 --token YOURTOKEN --app myapp --env preview --branch main --dir .
+relay init
+# or with flags:
+relay init --url http://127.0.0.1:8080 --token YOURTOKEN --app myapp --env preview
 ```
 
 ### `start` / `stop` / `restart`
 
-Controls the currently deployed container for an app/env/branch:
-
 ```bash
-node relay-deploy.js restart --app myapp --env preview --branch main
+relay restart --app myapp --env preview --branch main
 ```
 
-### `plugin list`
-
-Lists server-installed buildpack plugins:
+### `plugin list / install / remove`
 
 ```bash
-relay plugin list --url http://127.0.0.1:8080 --token YOURTOKEN
+relay plugin list
+relay plugin install ./plugins/astro-static.json
+relay plugin remove astro-static
 ```
 
-### `plugin install`
+> Plugin install/remove requires `RELAY_ENABLE_PLUGIN_MUTATIONS=true` on the agent.
 
-Uploads a JSON buildpack plugin definition to the server:
+### `agent install`
+
+Downloads the correct `relayd` + `station` binaries for your platform from GitHub Releases:
 
 ```bash
-relay plugin install ./plugins/astro-static.json --url http://127.0.0.1:8080 --token YOURTOKEN
+relay agent install           # latest
+relay agent install --version v0.1.7
 ```
 
-Server note:
-
-- plugin install/remove requires `RELAY_ENABLE_PLUGIN_MUTATIONS=true` on the agent
-
-### `plugin remove`
-
-Removes a server-installed buildpack plugin:
-
-```bash
-relay plugin remove astro-static --url http://127.0.0.1:8080 --token YOURTOKEN
-```
+Installs to `~/.relay/bin/` and prints the PATH line to add.
 
 ## Flags
 

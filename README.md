@@ -15,7 +15,7 @@ Self-hosted deployment platform — sync changed files, auto-detect buildpacks, 
 ### CLI
 
 ```bash
-npm install -g @relay-ci/relay
+npm install -g @relay-org/relay
 ```
 
 ### Agent binaries (on your server)
