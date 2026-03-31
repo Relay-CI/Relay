@@ -32,17 +32,23 @@ jobs:
         id: bump
         working-directory: relay-client
         run: |
-          # Read current version from package.json
-          CURRENT=$(node -p "require('./package.json').version")
-          echo "Current version: $CURRENT"
+          # Use the highest existing git tag as the source of truth (not package.json)
+          # This prevents collisions when tags are pushed manually
+          LATEST_TAG=$(git tag --list 'v*' --sort=-version:refname | head -n1)
+          if [ -z "$LATEST_TAG" ]; then
+            CURRENT="0.0.0"
+          else
+            CURRENT="${LATEST_TAG#v}"
+          fi
+          echo "Latest tag: $LATEST_TAG → version: $CURRENT"
 
-          # Split into major.minor.patch
+          # Split into major.minor.patch and bump patch
           IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
           PATCH=$((PATCH + 1))
           NEW="$MAJOR.$MINOR.$PATCH"
           echo "New version: $NEW"
 
-          # Write back to package.json
+          # Keep package.json in sync
           npm version "$NEW" --no-git-tag-version
 
           echo "new_version=$NEW" >> $GITHUB_OUTPUT
