@@ -20,7 +20,7 @@ jobs:
           cache: 'npm'
           cache-dependency-path: relayd/ui-src/package-lock.json
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: relayd/go.mod
           cache-dependency-path: relayd/go.sum
@@ -50,7 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: station/go.mod
           cache-dependency-path: station/go.sum
@@ -76,7 +76,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: station/go.mod
           cache-dependency-path: station/go.sum
