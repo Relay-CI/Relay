@@ -1244,6 +1244,7 @@ func (s *Server) buildStationSnapshot(repoDir, dockerfilePath, snapshotName stri
 	}
 	defer os.RemoveAll(buildDir)
 
+	fmt.Fprintf(logw, "[build] running station build-dockerfile\n")
 	if err := runLoggedCommandWithTimeout(
 		repoDir,
 		logw,
@@ -1254,6 +1255,7 @@ func (s *Server) buildStationSnapshot(repoDir, dockerfilePath, snapshotName stri
 	); err != nil {
 		return nil, fmt.Errorf("station build-dockerfile failed: %w", err)
 	}
+	fmt.Fprintf(logw, "[build] station build-dockerfile done\n")
 
 	// Windows WSL2 fast-save: if the build wrote output to a WSL2-internal
 	// directory, save the snapshot there via hardlinks (ext4 → ext4, instant).
@@ -1277,6 +1279,7 @@ func (s *Server) buildStationSnapshot(repoDir, dockerfilePath, snapshotName stri
 
 	// Standard path: save snapshot on Windows, then sync to WSL2.
 	_ = os.RemoveAll(stationSnapshotDir(snapshotName))
+	fmt.Fprintf(logw, "[build] running station snapshot save\n")
 	if err := runLoggedCommandWithTimeout(
 		repoDir,
 		logw,
@@ -1287,6 +1290,7 @@ func (s *Server) buildStationSnapshot(repoDir, dockerfilePath, snapshotName stri
 	); err != nil {
 		return nil, fmt.Errorf("station snapshot save failed: %w", err)
 	}
+	fmt.Fprintf(logw, "[build] station snapshot save done\n")
 	if runtime.GOOS == "windows" {
 		if distro := stationWSLDistro(); distro != "" {
 			syncSnapshotToWSL2(distro, snapshotName, logw)
