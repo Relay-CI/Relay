@@ -49,6 +49,86 @@ Examples:
 	sudo relayd service install --user relay --group relay --data-dir /var/lib/relayd
 `
 
+const relaydRunUsage = `relayd — Relay agent
+
+Usage:
+	relayd [--addr :8080] [--port 8080] [--data-dir ./data] [--socket /path/to/relay.sock] [--no-socket]
+	relayd version
+	relayd service <...>
+
+Examples:
+	relayd
+	relayd --port 9090
+	relayd --addr 0.0.0.0:9090
+	relayd --data-dir /var/lib/relayd --socket /var/lib/relayd/relay.sock
+`
+
+type relaydRunConfig struct {
+	Addr          string
+	DataDir       string
+	SocketPath    string
+	DisableSocket bool
+	ShowVersion   bool
+}
+
+func parseRelaydRunArgs(args []string) (relaydRunConfig, error) {
+	var cfg relaydRunConfig
+	for i := 0; i < len(args); i++ {
+		a := strings.TrimSpace(args[i])
+		switch {
+		case a == "version" || a == "--version" || a == "-version":
+			cfg.ShowVersion = true
+		case a == "--help" || a == "-h" || a == "help":
+			return cfg, fmt.Errorf("%s", relaydRunUsage)
+		case a == "--no-socket":
+			cfg.DisableSocket = true
+		case a == "--addr":
+			i++
+			if i >= len(args) {
+				return cfg, fmt.Errorf("--addr requires a value")
+			}
+			cfg.Addr = strings.TrimSpace(args[i])
+		case strings.HasPrefix(a, "--addr="):
+			cfg.Addr = strings.TrimSpace(strings.TrimPrefix(a, "--addr="))
+		case a == "--port":
+			i++
+			if i >= len(args) {
+				return cfg, fmt.Errorf("--port requires a value")
+			}
+			port := strings.TrimSpace(args[i])
+			if _, err := strconv.Atoi(port); err != nil {
+				return cfg, fmt.Errorf("invalid --port value %q", port)
+			}
+			cfg.Addr = ":" + port
+		case strings.HasPrefix(a, "--port="):
+			port := strings.TrimSpace(strings.TrimPrefix(a, "--port="))
+			if _, err := strconv.Atoi(port); err != nil {
+				return cfg, fmt.Errorf("invalid --port value %q", port)
+			}
+			cfg.Addr = ":" + port
+		case a == "--data-dir":
+			i++
+			if i >= len(args) {
+				return cfg, fmt.Errorf("--data-dir requires a value")
+			}
+			cfg.DataDir = strings.TrimSpace(args[i])
+		case strings.HasPrefix(a, "--data-dir="):
+			cfg.DataDir = strings.TrimSpace(strings.TrimPrefix(a, "--data-dir="))
+		case a == "--socket":
+			i++
+			if i >= len(args) {
+				return cfg, fmt.Errorf("--socket requires a value")
+			}
+			cfg.SocketPath = strings.TrimSpace(args[i])
+		case strings.HasPrefix(a, "--socket="):
+			cfg.SocketPath = strings.TrimSpace(strings.TrimPrefix(a, "--socket="))
+		default:
+			return cfg, fmt.Errorf("unknown argument %q", a)
+		}
+	}
+	return cfg, nil
+}
+
 //go:embed ui/*
 var uiFS embed.FS
 
@@ -2867,10 +2947,11 @@ func (s *Server) deleteProjectData(app string) (map[string]int64, []string, erro
 // ---------------------- Main ----------------------
 
 func main() {
+	runArgs := os.Args[1:]
 	if len(os.Args) > 1 {
-		switch os.Args[1] {
+		switch runArgs[0] {
 		case "service":
-			if err := handleServiceCommand(os.Args[2:]); err != nil {
+			if err := handleServiceCommand(runArgs[1:]); err != nil {
 				dieService(err.Error())
 			}
 			return
@@ -2880,7 +2961,26 @@ func main() {
 		}
 	}
 
+	runCfg, err := parseRelaydRunArgs(runArgs)
+	if err != nil {
+		if strings.Contains(err.Error(), "Usage:\n\trelayd") {
+			fmt.Println(err.Error())
+			return
+		}
+		fmt.Fprintln(os.Stderr, "error:", err)
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, relaydRunUsage)
+		os.Exit(2)
+	}
+	if runCfg.ShowVersion {
+		fmt.Println(relaydVersionLine())
+		return
+	}
+
 	dataDir := getenv("RELAY_DATA_DIR", "./data")
+	if runCfg.DataDir != "" {
+		dataDir = runCfg.DataDir
+	}
 	apiToken := getenv("RELAY_TOKEN", "")
 
 	absDataDir, err := filepath.Abs(dataDir)
@@ -3012,6 +3112,11 @@ func main() {
 	// (filesystem ACL provides authentication), and traffic never hits the
 	// network stack.  Set RELAY_SOCKET="" to disable.
 	socketPath := getenv("RELAY_SOCKET", filepath.Join(dataDir, "relay.sock"))
+	if runCfg.DisableSocket {
+		socketPath = ""
+	} else if runCfg.SocketPath != "" {
+		socketPath = runCfg.SocketPath
+	}
 	if socketPath != "" {
 		// Remove stale socket from a previous run.
 		_ = os.Remove(socketPath)
@@ -3076,6 +3181,9 @@ func main() {
 
 	// ── TCP HTTP server (UI + full API for remote / webhook access) ───────────
 	addr := getenv("RELAY_ADDR", ":8080")
+	if runCfg.Addr != "" {
+		addr = runCfg.Addr
+	}
 	httpServer := &http.Server{
 		Addr:    addr,
 		Handler: s.withCORS(mux),
@@ -3091,6 +3199,18 @@ func main() {
 	}
 	fmt.Println("Relay Agent listening on", addr)
 	if err := httpServer.ListenAndServe(); err != nil {
+		if errors.Is(err, http.ErrServerClosed) {
+			return
+		}
+		if strings.Contains(strings.ToLower(err.Error()), "address already in use") {
+			fmt.Fprintln(os.Stderr, "error: cannot start relayd because the listen address is already in use:", addr)
+			fmt.Fprintln(os.Stderr, "fix:")
+			fmt.Fprintln(os.Stderr, "  1) stop the existing process using this port")
+			fmt.Fprintln(os.Stderr, "  2) or start relayd on another port, for example:")
+			fmt.Fprintln(os.Stderr, "     relayd --port 9090")
+			fmt.Fprintln(os.Stderr, "     RELAY_ADDR=:9090 relayd")
+			os.Exit(1)
+		}
 		panic(err)
 	}
 }

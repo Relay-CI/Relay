@@ -71,6 +71,20 @@ On Windows, the packaged output also includes `vessel-linux`, which the Windows 
 ./relayd
 ```
 
+Use a different HTTP port:
+
+```bash
+./relayd --port 9090
+# or
+RELAY_ADDR=:9090 ./relayd
+```
+
+Show startup flags:
+
+```bash
+./relayd --help
+```
+
 ### Run 24/7 on Linux (systemd)
 
 To keep `relayd` running after SSH disconnects and across reboots (PM2-style), install it as a systemd service:

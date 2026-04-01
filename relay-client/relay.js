@@ -1030,10 +1030,12 @@ async function main() {
       if (process.platform === "win32") {
         console.log(`  ${c.cyan}[Environment]::SetEnvironmentVariable("Path", $env:Path + ";${installDir}", "User")${c.reset}`);
         console.log(`  ${c.cyan}relayd.exe${c.reset}`);
+        console.log(`  ${c.dim}# if 8080 is busy: relayd.exe --port 9090${c.reset}`);
       } else {
         const rc = process.env.SHELL?.includes("zsh") ? "~/.zshrc" : "~/.bashrc";
         console.log(`  ${c.cyan}echo 'export PATH="${installDir}:$PATH"' >> ${rc} && source ${rc}${c.reset}`);
         console.log(`  ${c.cyan}relayd${c.reset}`);
+        console.log(`  ${c.dim}# if 8080 is busy: relayd --port 9090${c.reset}`);
       }
       console.log(`\n  Then in your project:  ${c.cyan}relay init${c.reset}  and  ${c.cyan}relay deploy --stream${c.reset}\n`);
     }
