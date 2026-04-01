@@ -5140,7 +5140,7 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 				App:    body.App,
 				Env:    body.Env,
 				Branch: body.Branch,
-				Engine: EngineDocker,
+				Engine: EngineStation,
 			}
 		}
 		st.Engine = firstNonEmptyEngine(st.Engine)
@@ -5151,7 +5151,7 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 		if body.Engine != nil {
 			engine := normalizeEngine(*body.Engine)
 			if engine == "" {
-				httpError(w, 400, "engine must be docker or vessel")
+				httpError(w, 400, "engine must be docker or station")
 				return
 			}
 			st.Engine = engine
@@ -5648,7 +5648,7 @@ func (s *Server) runDeploy(job DeployJob) {
 			req.Source = "git"
 		}
 	}
-	engine := EngineDocker
+	engine := detectDefaultEngine()
 	if state != nil {
 		engine = firstNonEmptyEngine(state.Engine)
 	}
@@ -5945,12 +5945,12 @@ func (s *Server) runDeploy(job DeployJob) {
 		log("build reuse: unchanged build inputs; reusing %s", artifactRef)
 	} else if engine == EngineStation {
 		artifactRef = stationSnapshotName(req.App, req.Env, req.Branch, d.ID)
-		log("vessel build starting...")
+		log("station build starting...")
 		if _, err := s.buildStationSnapshot(repoDir, dockerfilePath, artifactRef, logf); err != nil {
 			end := time.Now()
 			d.Status = StatusFailed
 			d.EndedAt = &end
-			d.Error = "vessel build failed: " + err.Error()
+			d.Error = "station build failed: " + err.Error()
 			_ = s.updateDeployStatus(d.ID, d.Status, d.Error, d.StartedAt, d.EndedAt, "", "")
 			return
 		}
@@ -6068,9 +6068,9 @@ func (s *Server) runDeploy(job DeployJob) {
 			desiredMap[svc.Name] = svc
 		}
 		if appStopped {
-			log("app lane is kept offline; deploy will build and update the saved vessel snapshot without starting containers")
+			log("app lane is kept offline; deploy will build and update the saved station snapshot without starting containers")
 		} else if len(desiredServices) > 0 {
-			log("vessel engine does not support companion services; skipping %d service(s)", len(desiredServices))
+			log("station engine does not support companion services; skipping %d service(s)", len(desiredServices))
 		}
 		s.reconcileProjectServices(log, req.App, req.Env, req.Branch, desiredMap)
 		if secs, err := s.getAppSecrets(req.App, req.Env, req.Branch); err == nil {
@@ -6668,7 +6668,7 @@ func (s *Server) runSlotContainerWithRuntime(runtime ContainerRuntime, log func(
 	t0 := time.Now()
 	err := runtime.RunDetached(spec)
 	if log != nil {
-		log("vessel run completed in %s", time.Since(t0).Round(time.Millisecond))
+		log("station run completed in %s", time.Since(t0).Round(time.Millisecond))
 	}
 	return err
 }

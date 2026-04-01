@@ -1,12 +1,11 @@
 package main
 
 import (
-	"runtime"
 	"strings"
 )
 
 const (
-	EngineDocker = "docker"
+	EngineDocker  = "docker"
 	EngineStation = "station"
 )
 
@@ -14,9 +13,11 @@ const (
 
 func normalizeEngine(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", EngineDocker:
+	case "":
+		return EngineStation
+	case EngineDocker:
 		return EngineDocker
-	case EngineStation:
+	case EngineStation, "vessel":
 		return EngineStation
 	default:
 		return ""
@@ -34,25 +35,12 @@ func firstNonEmptyEngine(values ...string) string {
 	return detectDefaultEngine()
 }
 
-// detectDefaultEngine returns the best available engine for the current host.
+// detectDefaultEngine returns the default engine when none is configured.
 //
-// Priority:
-//   1. Linux (non-WSL): always vessel — it runs natively with no overhead.
-//   2. Windows with a healthy vessel daemon: vessel — daemon is already warm.
-//   3. Windows with WSL2 present but daemon not yet started: vessel — agent
-//      will spin up the daemon on the first build.
-//   4. Everything else (no WSL2, degraded state): docker.
+// Relay defaults to the Station runtime across platforms. Docker remains
+// available when explicitly selected in app configuration.
 func detectDefaultEngine() string {
-	if runtime.GOOS != "windows" {
-		return EngineStation
-	}
-	// On Windows: prefer vessel when WSL2 is available.
-	// stationAgentHealthy() is a non-blocking probe if the daemon is already up;
-	// wslAvailableForAgent() is a cheap fallback that just checks the distro list.
-	if stationAgentHealthy() || wslAvailableForAgent() {
-		return EngineStation
-	}
-	return EngineDocker
+	return EngineStation
 }
 
 // ─── capability queries ───────────────────────────────────────────────────────
@@ -125,4 +113,3 @@ func (s *Server) pruneRuntimeArtifacts(engine string, app string, env DeployEnv,
 	}
 	return s.pruneAppImages(app, env, branch, keep...)
 }
-
