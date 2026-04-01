@@ -84,16 +84,69 @@ func stationBuildStepTimeout() time.Duration {
 func runLoggedCommandWithTimeout(dir string, logw io.Writer, timeout time.Duration, label, bin string, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+
+	// Write output to a temp file instead of a pipe so that grandchild
+	// processes that inherit the fd don't block cmd.Wait().  Piping directly
+	// to logw causes a hang on Linux (same root cause as the Windows fix in
+	// runCommandCaptured): detached subprocesses spawned by station keep the
+	// write-end of the pipe alive after the parent exits, so the copy goroutine
+	// inside cmd.Wait() never returns.
+	f, err := os.CreateTemp("", "relay-cmd-*.log")
+	if err != nil {
+		return err
+	}
+	tmpPath := f.Name()
+	defer func() {
+		_ = f.Close()
+		_ = os.Remove(tmpPath)
+	}()
+
 	cmd := exec.CommandContext(ctx, bin, args...)
 	setCmdHideWindow(cmd)
 	cmd.Dir = dir
-	cmd.Stdout = logw
-	cmd.Stderr = logw
-	err := cmd.Run()
+	cmd.Stdout = f
+	cmd.Stderr = f
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	// Tail the temp file into logw while the command runs so callers see live
+	// output.  The goroutine stops once ctx is cancelled (either by timeout or
+	// after cmd.Wait returns) and drains any remaining bytes.
+	tailDone := make(chan struct{})
+	go func() {
+		defer close(tailDone)
+		tr, err := os.Open(tmpPath)
+		if err != nil {
+			return
+		}
+		defer tr.Close()
+		buf := make([]byte, 8192)
+		for {
+			n, _ := tr.Read(buf)
+			if n > 0 {
+				_, _ = logw.Write(buf[:n])
+				continue
+			}
+			select {
+			case <-ctx.Done():
+				_, _ = io.Copy(logw, tr)
+				return
+			default:
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+	}()
+
+	runErr := cmd.Wait()
+	cancel()    // signal the tail goroutine to drain and stop
+	<-tailDone // wait for it to flush remaining output
+
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return fmt.Errorf("%s timed out after %s", label, timeout)
 	}
-	return err
+	return runErr
 }
 
 // winToWSLPath converts a Windows absolute path to the /mnt/X form used inside
