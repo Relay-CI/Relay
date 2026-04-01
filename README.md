@@ -38,6 +38,12 @@ Add `~/.relay/bin` to your PATH — the command prints the exact line for your s
 relayd
 ```
 
+For Linux production (keeps running after SSH closes and restarts on reboot):
+
+```bash
+sudo relayd service install --user relay --group relay --data-dir /var/lib/relayd
+```
+
 On first run it creates `data/token.txt` — your auth token. Open `http://<server>:8080` for the dashboard.
 
 **2. Init your project** (run inside your app folder)

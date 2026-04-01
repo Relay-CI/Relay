@@ -71,6 +71,33 @@ On Windows, the packaged output also includes `vessel-linux`, which the Windows 
 ./relayd
 ```
 
+### Run 24/7 on Linux (systemd)
+
+To keep `relayd` running after SSH disconnects and across reboots (PM2-style), install it as a systemd service:
+
+```bash
+# preview generated unit file
+./relayd service unit --user relay --group relay --data-dir /var/lib/relayd
+
+# install + enable service (requires sudo)
+sudo ./relayd service install --user relay --group relay --data-dir /var/lib/relayd
+```
+
+Useful commands:
+
+```bash
+systemctl status relayd
+journalctl -u relayd -f
+sudo systemctl restart relayd
+sudo systemctl stop relayd
+```
+
+Notes:
+
+- The service uses `Restart=always` so crashes are auto-restarted.
+- `enable --now` starts the service immediately and on every boot.
+- If the VPS is powered off, no process can run; `relayd` comes back automatically when the VPS boots.
+
 Important:
 
 - `RELAY_DATA_DIR` defaults to `./data` relative to the current working directory.

@@ -38,6 +38,17 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+const relaydServiceUsage = `relayd service — manage systemd unit (Linux)
+
+Usage:
+	relayd service unit [--name relayd] [--user root] [--group root] [--data-dir /var/lib/relayd] [--addr :8080] [--bin /usr/local/bin/relayd]
+	relayd service install [--name relayd] [--user root] [--group root] [--data-dir /var/lib/relayd] [--addr :8080] [--bin /usr/local/bin/relayd]
+
+Examples:
+	relayd service unit
+	sudo relayd service install --user relay --group relay --data-dir /var/lib/relayd
+`
+
 //go:embed ui/*
 var uiFS embed.FS
 
@@ -494,7 +505,7 @@ type Server struct {
 	eventsMu    sync.RWMutex
 	eventsChans map[chan []byte]struct{}
 
-	runtime       ContainerRuntime
+	runtime        ContainerRuntime
 	stationRuntime ContainerRuntime
 }
 
@@ -2830,6 +2841,16 @@ func (s *Server) deleteProjectData(app string) (map[string]int64, []string, erro
 // ---------------------- Main ----------------------
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "service":
+			if err := handleServiceCommand(os.Args[2:]); err != nil {
+				dieService(err.Error())
+			}
+			return
+		}
+	}
+
 	dataDir := getenv("RELAY_DATA_DIR", "./data")
 	apiToken := getenv("RELAY_TOKEN", "")
 
@@ -2880,7 +2901,7 @@ func main() {
 		building:              make(map[string]bool),
 		eventsChans:           make(map[chan []byte]struct{}),
 		runtime:               &DockerRuntime{},
-		stationRuntime:         newStationRuntime(dataDir),
+		stationRuntime:        newStationRuntime(dataDir),
 	}
 	s.corsOrigins, s.allowAllCORS = parseAllowedOrigins(os.Getenv("RELAY_CORS_ORIGINS"))
 
@@ -3041,6 +3062,153 @@ func main() {
 	if err := httpServer.ListenAndServe(); err != nil {
 		panic(err)
 	}
+}
+
+type relaydServiceConfig struct {
+	Name    string
+	User    string
+	Group   string
+	DataDir string
+	Addr    string
+	BinPath string
+}
+
+func defaultServiceConfig() relaydServiceConfig {
+	binPath, _ := os.Executable()
+	if binPath == "" {
+		binPath = "relayd"
+	}
+	return relaydServiceConfig{
+		Name:    "relayd",
+		User:    "root",
+		Group:   "root",
+		DataDir: "/var/lib/relayd",
+		Addr:    ":8080",
+		BinPath: binPath,
+	}
+}
+
+func handleServiceCommand(args []string) error {
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("service command is only supported on Linux")
+	}
+	if len(args) == 0 {
+		fmt.Print(relaydServiceUsage)
+		return nil
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(args[0]))
+	cfg, err := parseServiceFlags(args[1:])
+	if err != nil {
+		return err
+	}
+
+	switch mode {
+	case "unit":
+		fmt.Print(renderSystemdUnit(cfg))
+		return nil
+	case "install":
+		return installSystemdUnit(cfg)
+	default:
+		return fmt.Errorf("unknown service subcommand %q\n\n%s", mode, relaydServiceUsage)
+	}
+}
+
+func parseServiceFlags(args []string) (relaydServiceConfig, error) {
+	cfg := defaultServiceConfig()
+	for i := 0; i < len(args); i++ {
+		a := strings.TrimSpace(args[i])
+		if a == "" {
+			continue
+		}
+		switch {
+		case a == "--name" && i+1 < len(args):
+			cfg.Name = strings.TrimSpace(args[i+1])
+			i++
+		case strings.HasPrefix(a, "--name="):
+			cfg.Name = strings.TrimSpace(strings.TrimPrefix(a, "--name="))
+		case a == "--user" && i+1 < len(args):
+			cfg.User = strings.TrimSpace(args[i+1])
+			i++
+		case strings.HasPrefix(a, "--user="):
+			cfg.User = strings.TrimSpace(strings.TrimPrefix(a, "--user="))
+		case a == "--group" && i+1 < len(args):
+			cfg.Group = strings.TrimSpace(args[i+1])
+			i++
+		case strings.HasPrefix(a, "--group="):
+			cfg.Group = strings.TrimSpace(strings.TrimPrefix(a, "--group="))
+		case a == "--data-dir" && i+1 < len(args):
+			cfg.DataDir = strings.TrimSpace(args[i+1])
+			i++
+		case strings.HasPrefix(a, "--data-dir="):
+			cfg.DataDir = strings.TrimSpace(strings.TrimPrefix(a, "--data-dir="))
+		case a == "--addr" && i+1 < len(args):
+			cfg.Addr = strings.TrimSpace(args[i+1])
+			i++
+		case strings.HasPrefix(a, "--addr="):
+			cfg.Addr = strings.TrimSpace(strings.TrimPrefix(a, "--addr="))
+		case a == "--bin" && i+1 < len(args):
+			cfg.BinPath = strings.TrimSpace(args[i+1])
+			i++
+		case strings.HasPrefix(a, "--bin="):
+			cfg.BinPath = strings.TrimSpace(strings.TrimPrefix(a, "--bin="))
+		default:
+			return cfg, fmt.Errorf("unknown option %q", a)
+		}
+	}
+
+	if cfg.Name == "" || cfg.User == "" || cfg.Group == "" || cfg.DataDir == "" || cfg.BinPath == "" {
+		return cfg, fmt.Errorf("name, user, group, data-dir, and bin must be non-empty")
+	}
+	return cfg, nil
+}
+
+func renderSystemdUnit(cfg relaydServiceConfig) string {
+	return fmt.Sprintf(`[Unit]
+Description=Relay Agent
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%s
+Group=%s
+WorkingDirectory=%s
+Environment=RELAY_DATA_DIR=%s
+Environment=RELAY_ADDR=%s
+ExecStart=%s
+Restart=always
+RestartSec=2
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+`, cfg.User, cfg.Group, cfg.DataDir, cfg.DataDir, cfg.Addr, cfg.BinPath)
+}
+
+func installSystemdUnit(cfg relaydServiceConfig) error {
+	unitPath := filepath.Join("/etc/systemd/system", cfg.Name+".service")
+	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
+		return fmt.Errorf("create data dir: %w", err)
+	}
+	if err := os.WriteFile(unitPath, []byte(renderSystemdUnit(cfg)), 0644); err != nil {
+		return fmt.Errorf("write unit file %s: %w (run with sudo)", unitPath, err)
+	}
+	if out, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl daemon-reload failed: %v\n%s", err, string(out))
+	}
+	if out, err := exec.Command("systemctl", "enable", "--now", cfg.Name).CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl enable --now %s failed: %v\n%s", cfg.Name, err, string(out))
+	}
+	fmt.Printf("installed and started systemd service: %s\n", cfg.Name)
+	fmt.Printf("status: systemctl status %s\n", cfg.Name)
+	fmt.Printf("logs  : journalctl -u %s -f\n", cfg.Name)
+	return nil
+}
+
+func dieService(msg string) {
+	fmt.Fprintln(os.Stderr, "error:", msg)
+	os.Exit(1)
 }
 
 // ---------------------- HTTP Handlers ----------------------
@@ -8109,4 +8277,3 @@ func cleanupStaticDockerArtifacts(repoDir string, removeNodeArtifacts bool) erro
 	}
 	return nil
 }
-
