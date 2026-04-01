@@ -86,7 +86,12 @@ func hardlinkCopy(src, dst string) error {
 		_ = os.Remove(target) // unlink stale copy first
 		if err := os.Link(path, target); err != nil {
 			// Hard links across filesystems fail; fall back to data copy.
-			return copyFile(path, target, info.Mode())
+			if cpErr := copyFile(path, target, info.Mode()); cpErr != nil {
+				// Skip files that cannot be read — this is common for kernel-backed
+				// device stubs stored as regular files in OCI images (e.g. /dev/autofs)
+				// where os.Open triggers kernel autofs interception and returns EINVAL.
+				return nil
+			}
 		}
 		return nil
 	})

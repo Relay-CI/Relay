@@ -61,11 +61,11 @@ type ociPlatform struct {
 
 type ociConfig struct {
 	Config struct {
-		Cmd        []string          `json:"Cmd"`
-		Entrypoint []string          `json:"Entrypoint"`
-		Env        []string          `json:"Env"`
+		Cmd          []string            `json:"Cmd"`
+		Entrypoint   []string            `json:"Entrypoint"`
+		Env          []string            `json:"Env"`
 		ExposedPorts map[string]struct{} `json:"ExposedPorts"`
-		WorkingDir string            `json:"WorkingDir"`
+		WorkingDir   string              `json:"WorkingDir"`
 	} `json:"config"`
 }
 
@@ -440,6 +440,11 @@ func applyTar(tr *tar.Reader, destDir string) error {
 			_, _ = io.Copy(wf, tr)
 			wf.Close()
 
+		case tar.TypeChar, tar.TypeBlock:
+			// Character and block device nodes require CAP_MKNOD to create.
+			// Skip them silently — the runtime bind-mounts /dev from the host,
+			// so these stubs are never needed inside the rootfs.
+
 		case tar.TypeSymlink:
 			_ = os.MkdirAll(filepath.Dir(target), 0755)
 			_ = os.Remove(target)
@@ -493,4 +498,3 @@ func cmdImageRemove(image string) {
 	}
 	fmt.Printf("removed %s\n", image)
 }
-
