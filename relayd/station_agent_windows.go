@@ -237,7 +237,7 @@ func (a *stationAgent) BuildDockerfile(dockerfile, contextDir, snapshotName stri
 		return nil, fmt.Errorf("vessel agent build: status %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
 	}
 
-	return readBuildStream(resp.Body, logw)
+	return readBuildStream(resp.Body, logw, stationAgentBuildIdleTimeout())
 }
 
 func stationAgentBuildTimeout() time.Duration {
@@ -248,35 +248,83 @@ func stationAgentBuildTimeout() time.Duration {
 	return time.Duration(secs) * time.Second
 }
 
+func stationAgentBuildIdleTimeout() time.Duration {
+	secs, err := strconv.Atoi(strings.TrimSpace(os.Getenv("RELAY_STATION_AGENT_BUILD_IDLE_TIMEOUT_SECONDS")))
+	if err != nil || secs <= 0 {
+		secs = 45
+	}
+	return time.Duration(secs) * time.Second
+}
+
 // readBuildStream reads the L:/M:/E: line protocol from the daemon build
 // response, forwarding log lines to logw and returning the manifest on success.
-func readBuildStream(body io.Reader, logw io.Writer) (*stationManifest, error) {
+func readBuildStream(body io.Reader, logw io.Writer, idleTimeout time.Duration) (*stationManifest, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 1<<20), 1<<20)
-	for scanner.Scan() {
-		line := scanner.Text()
-		switch {
-		case strings.HasPrefix(line, "L:"):
-			if logw != nil {
-				_, _ = fmt.Fprintln(logw, line[2:])
+	type streamEvent struct {
+		line string
+		err  error
+	}
+	events := make(chan streamEvent, 16)
+	go func() {
+		for scanner.Scan() {
+			events <- streamEvent{line: scanner.Text()}
+		}
+		if err := scanner.Err(); err != nil {
+			events <- streamEvent{err: fmt.Errorf("read build stream: %w", err)}
+		} else {
+			events <- streamEvent{err: io.EOF}
+		}
+		close(events)
+	}()
+
+	timer := time.NewTimer(idleTimeout)
+	defer timer.Stop()
+	resetTimer := func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
 			}
-		case strings.HasPrefix(line, "M:"):
-			var m stationManifest
-			if err := json.Unmarshal([]byte(line[2:]), &m); err != nil {
-				return nil, fmt.Errorf("decode build manifest: %w", err)
+		}
+		timer.Reset(idleTimeout)
+	}
+
+	for {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				return nil, fmt.Errorf("vessel agent build: stream ended without result")
 			}
-			if m.Env == nil {
-				m.Env = map[string]string{}
+			resetTimer()
+			if ev.err != nil {
+				if ev.err == io.EOF {
+					return nil, fmt.Errorf("vessel agent build: stream ended without result")
+				}
+				return nil, ev.err
 			}
-			return &m, nil
-		case strings.HasPrefix(line, "E:"):
-			return nil, fmt.Errorf("%s", line[2:])
+			line := ev.line
+			switch {
+			case strings.HasPrefix(line, "L:"):
+				if logw != nil {
+					_, _ = fmt.Fprintln(logw, line[2:])
+				}
+			case strings.HasPrefix(line, "M:"):
+				var m stationManifest
+				if err := json.Unmarshal([]byte(line[2:]), &m); err != nil {
+					return nil, fmt.Errorf("decode build manifest: %w", err)
+				}
+				if m.Env == nil {
+					m.Env = map[string]string{}
+				}
+				return &m, nil
+			case strings.HasPrefix(line, "E:"):
+				return nil, fmt.Errorf("%s", line[2:])
+			}
+		case <-timer.C:
+			return nil, fmt.Errorf("vessel agent build: stream idle for %s", idleTimeout)
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read build stream: %w", err)
-	}
-	return nil, fmt.Errorf("vessel agent build: stream ended without result")
 }
 
 // ─── snapshot operations ──────────────────────────────────────────────────────
