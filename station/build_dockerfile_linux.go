@@ -43,13 +43,33 @@ func BuildDockerfile(dockerfilePath, contextDir, outDir string, logf func(string
 	stageDirs := make(map[string]string)
 	var finalManifest *BuildManifest
 
+	// stagesUsedAsBase[i] = true if any later stage uses stage i as its FROM base.
+	// Stages only referenced via COPY --from (never as FROM) don't need their full
+	// merged overlay cached — only the upper layer (the files written by that stage's
+	// own instructions) is required. This avoids copying the entire base image through
+	// an overlayfs mount, which is always cross-filesystem and falls back to a slow
+	// byte-by-byte copy.
+	stagesUsedAsBase := make(map[int]bool)
+	for i, s := range df.Stages {
+		key := strings.ToLower(s.Name)
+		numKey := fmt.Sprintf("%d", i)
+		for _, later := range df.Stages[i+1:] {
+			ref := strings.ToLower(later.Image)
+			if ref == key || ref == numKey {
+				stagesUsedAsBase[i] = true
+				break
+			}
+		}
+	}
+
 	ctx := stageCtx{
-		outDir:      outDir,
-		stageDirs:   stageDirs,
-		stageHashes: make(map[string]string),
-		contextDir:  contextDir,
-		logf:        logf,
-		logw:        logw,
+		outDir:           outDir,
+		stageDirs:        stageDirs,
+		stageHashes:      make(map[string]string),
+		contextDir:       contextDir,
+		logf:             logf,
+		logw:             logw,
+		stagesUsedAsBase: stagesUsedAsBase,
 	}
 
 	for i, stage := range df.Stages {
@@ -79,17 +99,19 @@ func BuildDockerfile(dockerfilePath, contextDir, outDir string, logf func(string
 
 // stageCtx carries the shared context passed to every stage execution.
 type stageCtx struct {
-	outDir      string
-	stageDirs   map[string]string
-	stageHashes map[string]string // stage name → cache key computed after build
-	contextDir  string
-	logf        func(string, ...any)
-	logw        io.Writer
+	outDir           string
+	stageDirs        map[string]string
+	stageHashes      map[string]string // stage name → cache key computed after build
+	contextDir       string
+	logf             func(string, ...any)
+	logw             io.Writer
+	stagesUsedAsBase map[int]bool // stage index → true if a later stage uses it as FROM base
 }
 
 type stageWorkspace struct {
-	rootfs  string
-	cleanup func()
+	rootfs   string // merged overlayfs dir, or plain dir when overlay unavailable
+	upperDir string // overlayfs upper layer; empty when not overlay-backed
+	cleanup  func()
 }
 
 func (w *stageWorkspace) Close() {
@@ -165,12 +187,31 @@ func buildStage(idx int, stage DFStage, isFinal bool, ctx stageCtx) (*BuildManif
 	if !isFinal && cacheKey != "" {
 		cacheDir := stageCacheDir(cacheKey)
 		if mkErr := os.MkdirAll(filepath.Dir(cacheDir), 0755); mkErr == nil {
-			if matErr := materializeStageRootfs(rootfs, cacheDir); matErr != nil {
+			// Stages that are only referenced via COPY --from (never as a FROM
+			// base for a subsequent stage) only need to expose the files written
+			// by their own instructions.  Copying from the overlayfs upper layer
+			// (~source + build output) is far cheaper than copying the full
+			// merged view (base image + all lower layers = potentially 600 MB+).
+			// Hard-linking across an overlayfs mount always fails (EXDEV), so
+			// the merged-view copy degrades to a slow byte-by-byte fallback.
+			cacheSrc := rootfs
+			if !ctx.stagesUsedAsBase[idx] && workspace.upperDir != "" {
+				cacheSrc = workspace.upperDir
+			}
+			if matErr := materializeStageRootfs(cacheSrc, cacheDir); matErr != nil {
 				ctx.logf("[build] stage %d: warn: stage cache save failed: %v", idx, matErr)
 				_ = os.RemoveAll(cacheDir)
 			} else {
-				recordStageHash(stage, cacheKey, ctx.stageHashes)
-				return m, cacheDir, false, nil
+				// Write manifest as a final commit so a partially-written cache
+				// (e.g. from a previous interrupted deploy) is never mistaken for
+				// a valid one by loadManifest.
+				if mfErr := saveManifest(cacheDir, m); mfErr != nil {
+					ctx.logf("[build] stage %d: warn: stage cache manifest write failed: %v", idx, mfErr)
+					_ = os.RemoveAll(cacheDir)
+				} else {
+					recordStageHash(stage, cacheKey, ctx.stageHashes)
+					return m, cacheDir, false, nil
+				}
 			}
 		}
 		recordStageHash(stage, cacheKey, ctx.stageHashes)
@@ -190,8 +231,8 @@ func prepareStageRootfs(idx int, stage DFStage, stageDir string, stageDirs map[s
 	if err != nil {
 		return nil, nil, err
 	}
-	if overlayRootfs, cleanup, overlayErr := createBuildOverlayRootfs(baseRootfs); overlayErr == nil {
-		return baseManifest, &stageWorkspace{rootfs: overlayRootfs, cleanup: cleanup}, nil
+	if overlayRootfs, upperDir, cleanup, overlayErr := createBuildOverlayRootfs(baseRootfs); overlayErr == nil {
+		return baseManifest, &stageWorkspace{rootfs: overlayRootfs, upperDir: upperDir, cleanup: cleanup}, nil
 	}
 	if err := copyDirContents(baseRootfs, stageDir); err != nil {
 		return nil, nil, fmt.Errorf("seed rootfs from %s: %w", stage.Image, err)
@@ -214,27 +255,27 @@ func resolveStageBase(idx int, stage DFStage, stageDirs map[string]string, logf 
 	return rootfs, m, nil
 }
 
-func createBuildOverlayRootfs(lowerDir string) (string, func(), error) {
+func createBuildOverlayRootfs(lowerDir string) (merged, upper string, cleanup func(), err error) {
 	base := filepath.Join(stateBaseDir(), "build-overlays", randID())
-	merged := filepath.Join(base, "merged")
-	upper := filepath.Join(base, "upper")
+	merged = filepath.Join(base, "merged")
+	upper = filepath.Join(base, "upper")
 	work := filepath.Join(base, "work")
 	for _, dir := range []string{merged, upper, work} {
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		if mkErr := os.MkdirAll(dir, 0755); mkErr != nil {
 			_ = os.RemoveAll(base)
-			return "", nil, fmt.Errorf("overlay dir setup: %w", err)
+			return "", "", nil, fmt.Errorf("overlay dir setup: %w", mkErr)
 		}
 	}
 	opts := fmt.Sprintf("lowerdir=%s,upperdir=%s,workdir=%s", lowerDir, upper, work)
-	if err := syscall.Mount("overlay", merged, "overlay", 0, opts); err != nil {
+	if mountErr := syscall.Mount("overlay", merged, "overlay", 0, opts); mountErr != nil {
 		_ = os.RemoveAll(base)
-		return "", nil, fmt.Errorf("overlay mount: %w", err)
+		return "", "", nil, fmt.Errorf("overlay mount: %w", mountErr)
 	}
-	cleanup := func() {
+	cleanup = func() {
 		_ = syscall.Unmount(merged, 0)
 		_ = os.RemoveAll(base)
 	}
-	return merged, cleanup, nil
+	return merged, upper, cleanup, nil
 }
 
 func materializeStageRootfs(src, dest string) error {
