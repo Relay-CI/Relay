@@ -78,7 +78,7 @@ func getStationAgent() (*stationAgent, error) {
 			http: &http.Client{
 				Timeout: 0, // no global timeout; callers use per-request contexts
 				Transport: &http.Transport{
-					DialContext: (&net.Dialer{Timeout: 3 * time.Second}).DialContext,
+					DialContext:         (&net.Dialer{Timeout: 3 * time.Second}).DialContext,
 					MaxIdleConnsPerHost: 4,
 				},
 			},
@@ -219,8 +219,9 @@ func (a *stationAgent) BuildDockerfile(dockerfile, contextDir, snapshotName stri
 		ContextDir:   toWSLPath(contextDir),
 		SnapshotName: snapshotName,
 	})
-	// Build may run for many minutes — no timeout on this request.
-	req, err := http.NewRequest(http.MethodPost, a.url("/build-dockerfile"), bytes.NewReader(body))
+	ctx, cancel := context.WithTimeout(context.Background(), stationAgentBuildTimeout())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.url("/build-dockerfile"), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -237,6 +238,14 @@ func (a *stationAgent) BuildDockerfile(dockerfile, contextDir, snapshotName stri
 	}
 
 	return readBuildStream(resp.Body, logw)
+}
+
+func stationAgentBuildTimeout() time.Duration {
+	secs, err := strconv.Atoi(strings.TrimSpace(os.Getenv("RELAY_STATION_AGENT_BUILD_TIMEOUT_SECONDS")))
+	if err != nil || secs <= 0 {
+		secs = 600
+	}
+	return time.Duration(secs) * time.Second
 }
 
 // readBuildStream reads the L:/M:/E: line protocol from the daemon build
@@ -508,4 +517,3 @@ func startStationAgentBackground() {
 
 // Ensure os is available for stderr writes in ensureWSLBinary.
 var _ = os.Stderr
-

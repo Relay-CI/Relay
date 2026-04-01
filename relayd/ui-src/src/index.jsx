@@ -180,11 +180,11 @@ function trafficModeLabel(value) {
 }
 
 function engineLabel(value) {
-  return value === "vessel" ? "Vessel" : "Docker";
+  return value === "station" ? "Station" : "Docker";
 }
 
 function normalizeEngineValue(value) {
-  return value === "vessel" ? "vessel" : "docker";
+  return value === "station" ? "station" : "docker";
 }
 
 function applyEngineConstraints(config) {
@@ -1963,7 +1963,7 @@ function SettingsTab({ project, selectedEnv, services, onUpdated }) {
   const applyRequired = pendingApplyHint || restartRequired;
   const savedEngine = normalizeEngineValue(selectedEnv.engine);
   const draftEngine = normalizeEngineValue(config.engine);
-  const draftIsVessel = draftEngine === "vessel";
+  const draftIsStation = draftEngine === "station";
   const savedHostPort = Number(selectedEnv.host_port) || 0;
   const draftHostPort = Number(config.host_port) || 0;
   const savedServicePort = Number(selectedEnv.service_port) || 0;
@@ -2006,10 +2006,10 @@ function SettingsTab({ project, selectedEnv, services, onUpdated }) {
       hint: "Best when you need the most mature runtime behavior.",
     },
     {
-      value: "vessel",
-      title: "Vessel",
-      summary: "Experimental native snapshot runner with a faster start path than Docker on the same host.",
-      hint: "Session cutovers, companion services, and host-based routing now work here too, but this engine still needs closer verification than Docker.",
+      value: "station",
+      title: "Station",
+      summary: "Native snapshot runner. Faster start path than Docker — no image pull on each deploy.",
+      hint: "Supports session cutover, companion services, and host-based routing alongside Docker.",
     },
   ];
   const policyOptions = [
@@ -2151,12 +2151,12 @@ function SettingsTab({ project, selectedEnv, services, onUpdated }) {
         tone: path.endsWith("/stop") ? "warn" : "ok",
         text:
           path.endsWith("/restart")
-            ? savedEngine === "vessel"
-              ? "Restart sent. Relay is recycling the saved Vessel snapshot and companion set now."
+            ? savedEngine === "station"
+              ? "Restart sent. Relay is recycling the saved Station snapshot and companion set now."
               : "Restart sent. The live route should move to the saved port after the refresh finishes."
             : path.endsWith("/start")
-              ? savedEngine === "vessel"
-                ? "Start sent. Relay is bringing the latest saved Vessel snapshot and enabled companions online now."
+              ? savedEngine === "station"
+                ? "Start sent. Relay is bringing the latest saved Station snapshot and enabled companions online now."
                 : "Start sent. Relay is bringing the latest saved image and enabled companions online now."
               : "Stop sent. The app lane is now kept offline, and future deploys will only build/update until you start it again.",
       });
@@ -2391,7 +2391,7 @@ function SettingsTab({ project, selectedEnv, services, onUpdated }) {
                     <div className="eyebrow">Runtime Engine</div>
                     <strong>{selectedEngineOption.title}</strong>
                   </div>
-                  <span className="runtime-control-card__meta">{draftIsVessel ? "experimental lane" : "full feature lane"}</span>
+                  <span className="runtime-control-card__meta">{draftIsStation ? "station lane" : "docker lane"}</span>
                 </div>
                 <div className="runtime-segmented">
                   {engineOptions.map((option) => (
@@ -2452,16 +2452,11 @@ function SettingsTab({ project, selectedEnv, services, onUpdated }) {
                 <p className="runtime-control-card__copy">{selectedPolicyOption.summary} {selectedPolicyOption.hint}</p>
               </div>
             </div>
-            {draftIsVessel && (
-              <div className="settings-notice settings-notice--warn">
-                <strong>Vessel is experimental</strong>
-                <span>Relay now routes Vessel lanes through the same lane model as Docker, including session cutover, public host state, and companions. Keep validating custom images and service layouts more closely on this engine.</span>
-              </div>
-            )}
+
             <div className="field-grid runtime-form-grid">
               <label className="field">
                 <span>Public Host</span>
-                <input className="text-input" value={config.public_host} onChange={(e) => updateConfig({ public_host: e.target.value })} placeholder={draftIsVessel ? "Optional but still experimental on Vessel" : ""} />
+                <input className="text-input" value={config.public_host} onChange={(e) => updateConfig({ public_host: e.target.value })} placeholder="" />
               </label>
               <label className="field">
                 <span>Host Port</span>
@@ -2479,8 +2474,8 @@ function SettingsTab({ project, selectedEnv, services, onUpdated }) {
                 {showAdvancedPorts ? "Hide Service Port" : "Show Service Port"}
               </button>
               <span className="settings-advanced__summary">
-                {draftIsVessel
-                  ? <><code>Host Port</code> is where the Vessel edge proxy listens. <code>Public Host</code> and session policy now work too, but verify them after switching this lane.</>
+                {draftIsStation
+                  ? <><code>Host Port</code> is where the Station edge proxy listens. <code>Public Host</code> and session policy work the same as Docker.</>
                   : <><code>Host Port</code> is public. <code>Service Port</code> stays on the app default unless you know it changed.</>}
               </span>
             </div>
@@ -2497,8 +2492,8 @@ function SettingsTab({ project, selectedEnv, services, onUpdated }) {
               <button type="button" className="ghost-button" onClick={() => control("/api/apps/start")} disabled={busy}>Start App</button>
             </div>
             <div className="settings-footnote">
-              {draftIsVessel
-                ? <><strong>Vessel note:</strong> save the engine switch, then restart or deploy to move this lane onto the latest Vessel snapshot. Routing, session cutover, and companions now follow the same saved lane settings here too, but verify custom workloads after switching.</>
+              {draftIsStation
+                ? <><strong>Station note:</strong> save the engine switch, then restart or deploy to move this lane onto the latest Station snapshot. Routing, session cutover, and companions follow the same saved lane settings.</>
                 : <><strong>Safe default:</strong> change the route or traffic policy, then use <code>Apply Now</code>. If you want the next deploy to pick it up without touching the running app, use <code>Save for Later</code>.</>}
             </div>
           </div>
@@ -2568,12 +2563,7 @@ function SettingsTab({ project, selectedEnv, services, onUpdated }) {
             <span className="metric-pill">agent config overrides repo on deploy</span>
           </div>
         </div>
-        {draftIsVessel && (
-          <div className="settings-notice settings-notice--warn">
-            <strong>Companions on Vessel are newer</strong>
-            <span>Relay now starts and restarts companions on Vessel lanes too. If a service depends on custom port publishing or volume semantics, verify the running lane after you save.</span>
-          </div>
-        )}
+
         <div className="companion-preset-row">
           {[
             { kind: "postgres", icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg> },
@@ -2597,7 +2587,7 @@ function SettingsTab({ project, selectedEnv, services, onUpdated }) {
                   <polyline points="2 12 12 17 22 12"/>
                 </svg>
                 <span>No companions yet</span>
-                <span>{draftIsVessel ? "Use a preset above, then verify the live Vessel lane after saving." : "Use a preset above to add your first service."}</span>
+                <span>Use a preset above to add your first service.</span>
               </div>
             )}
             {companions.map((item) => (
@@ -2727,9 +2717,7 @@ function SettingsTab({ project, selectedEnv, services, onUpdated }) {
               ) : null}
             </div>
             <div className="settings-footnote">
-              {draftIsVessel
-                ? <>Companion state persists here for Vessel too. Named volumes become host-backed storage on the agent, and service host ports need extra verification compared with <code>Docker</code>.</>
-                : <>Companion state now persists here. If a companion is marked <code>Keep off</code>, deploys and app restarts leave it off until you turn it back on. Stopping the app also stops its running companions.</>}
+              Companion state persists across deploys. If a companion is marked <code>Keep off</code>, deploys and app restarts leave it off until you turn it back on. Stopping the app also stops its running companions.
             </div>
           </div>
         </div>

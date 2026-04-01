@@ -14804,10 +14804,10 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
     return value === "session" ? "session sticky" : "edge cutover";
   }
   function engineLabel(value) {
-    return value === "vessel" ? "Vessel" : "Docker";
+    return value === "station" ? "Station" : "Docker";
   }
   function normalizeEngineValue(value) {
-    return value === "vessel" ? "vessel" : "docker";
+    return value === "station" ? "station" : "docker";
   }
   function applyEngineConstraints(config) {
     return {
@@ -16221,7 +16221,7 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
     const applyRequired = pendingApplyHint || restartRequired;
     const savedEngine = normalizeEngineValue(selectedEnv.engine);
     const draftEngine = normalizeEngineValue(config.engine);
-    const draftIsVessel = draftEngine === "vessel";
+    const draftIsStation = draftEngine === "station";
     const savedHostPort = Number(selectedEnv.host_port) || 0;
     const draftHostPort = Number(config.host_port) || 0;
     const savedServicePort = Number(selectedEnv.service_port) || 0;
@@ -16253,10 +16253,10 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
         hint: "Best when you need the most mature runtime behavior."
       },
       {
-        value: "vessel",
-        title: "Vessel",
-        summary: "Experimental native snapshot runner with a faster start path than Docker on the same host.",
-        hint: "Session cutovers, companion services, and host-based routing now work here too, but this engine still needs closer verification than Docker."
+        value: "station",
+        title: "Station",
+        summary: "Native snapshot runner. Faster start path than Docker \u2014 no image pull on each deploy.",
+        hint: "Supports session cutover, companion services, and host-based routing alongside Docker."
       }
     ];
     const policyOptions = [
@@ -16388,7 +16388,7 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
         });
         setNotice({
           tone: path.endsWith("/stop") ? "warn" : "ok",
-          text: path.endsWith("/restart") ? savedEngine === "vessel" ? "Restart sent. Relay is recycling the saved Vessel snapshot and companion set now." : "Restart sent. The live route should move to the saved port after the refresh finishes." : path.endsWith("/start") ? savedEngine === "vessel" ? "Start sent. Relay is bringing the latest saved Vessel snapshot and enabled companions online now." : "Start sent. Relay is bringing the latest saved image and enabled companions online now." : "Stop sent. The app lane is now kept offline, and future deploys will only build/update until you start it again."
+          text: path.endsWith("/restart") ? savedEngine === "station" ? "Restart sent. Relay is recycling the saved Station snapshot and companion set now." : "Restart sent. The live route should move to the saved port after the refresh finishes." : path.endsWith("/start") ? savedEngine === "station" ? "Start sent. Relay is bringing the latest saved Station snapshot and enabled companions online now." : "Start sent. Relay is bringing the latest saved image and enabled companions online now." : "Stop sent. The app lane is now kept offline, and future deploys will only build/update until you start it again."
         });
         if (!path.endsWith("/stop")) setPendingApplyHint(false);
         await onUpdated();
@@ -16590,7 +16590,7 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
                     /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "eyebrow", children: "Runtime Engine" }),
                     /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("strong", { children: selectedEngineOption.title })
                   ] }),
-                  /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "runtime-control-card__meta", children: draftIsVessel ? "experimental lane" : "full feature lane" })
+                  /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "runtime-control-card__meta", children: draftIsStation ? "station lane" : "docker lane" })
                 ] }),
                 /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "runtime-segmented", children: engineOptions.map((option) => /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(
                   "button",
@@ -16653,14 +16653,10 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
                 ] })
               ] })
             ] }),
-            draftIsVessel && /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "settings-notice settings-notice--warn", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("strong", { children: "Vessel is experimental" }),
-              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { children: "Relay now routes Vessel lanes through the same lane model as Docker, including session cutover, public host state, and companions. Keep validating custom images and service layouts more closely on this engine." })
-            ] }),
             /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "field-grid runtime-form-grid", children: [
               /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("label", { className: "field", children: [
                 /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { children: "Public Host" }),
-                /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("input", { className: "text-input", value: config.public_host, onChange: (e) => updateConfig({ public_host: e.target.value }), placeholder: draftIsVessel ? "Optional but still experimental on Vessel" : "" })
+                /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("input", { className: "text-input", value: config.public_host, onChange: (e) => updateConfig({ public_host: e.target.value }), placeholder: "" })
               ] }),
               /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("label", { className: "field", children: [
                 /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { children: "Host Port" }),
@@ -16673,11 +16669,11 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
             ] }),
             /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "settings-advanced settings-advanced--inline", children: [
               /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "ghost-button ghost-button--compact", onClick: () => setShowAdvancedPorts((value) => !value), children: showAdvancedPorts ? "Hide Service Port" : "Show Service Port" }),
-              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "settings-advanced__summary", children: draftIsVessel ? /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(import_jsx_runtime27.Fragment, { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "settings-advanced__summary", children: draftIsStation ? /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(import_jsx_runtime27.Fragment, { children: [
                 /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("code", { children: "Host Port" }),
-                " is where the Vessel edge proxy listens. ",
+                " is where the Station edge proxy listens. ",
                 /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("code", { children: "Public Host" }),
-                " and session policy now work too, but verify them after switching this lane."
+                " and session policy work the same as Docker."
               ] }) : /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(import_jsx_runtime27.Fragment, { children: [
                 /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("code", { children: "Host Port" }),
                 " is public. ",
@@ -16693,9 +16689,9 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
               /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "ghost-button", onClick: () => control("/api/apps/stop"), disabled: busy, children: "Stop App" }),
               /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "ghost-button", onClick: () => control("/api/apps/start"), disabled: busy, children: "Start App" })
             ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "settings-footnote", children: draftIsVessel ? /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(import_jsx_runtime27.Fragment, { children: [
-              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("strong", { children: "Vessel note:" }),
-              " save the engine switch, then restart or deploy to move this lane onto the latest Vessel snapshot. Routing, session cutover, and companions now follow the same saved lane settings here too, but verify custom workloads after switching."
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "settings-footnote", children: draftIsStation ? /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(import_jsx_runtime27.Fragment, { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("strong", { children: "Station note:" }),
+              " save the engine switch, then restart or deploy to move this lane onto the latest Station snapshot. Routing, session cutover, and companions follow the same saved lane settings."
             ] }) : /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(import_jsx_runtime27.Fragment, { children: [
               /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("strong", { children: "Safe default:" }),
               " change the route or traffic policy, then use ",
@@ -16765,10 +16761,6 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
             /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "metric-pill", children: "agent config overrides repo on deploy" })
           ] })
         ] }),
-        draftIsVessel && /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "settings-notice settings-notice--warn", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("strong", { children: "Companions on Vessel are newer" }),
-          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { children: "Relay now starts and restarts companions on Vessel lanes too. If a service depends on custom port publishing or volume semantics, verify the running lane after you save." })
-        ] }),
         /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "companion-preset-row", children: [
           { kind: "postgres", icon: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", children: [
             /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("ellipse", { cx: "12", cy: "5", rx: "9", ry: "3" }),
@@ -16799,7 +16791,7 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
                 /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("polyline", { points: "2 12 12 17 22 12" })
               ] }),
               /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { children: "No companions yet" }),
-              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { children: draftIsVessel ? "Use a preset above, then verify the live Vessel lane after saving." : "Use a preset above to add your first service." })
+              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { children: "Use a preset above to add your first service." })
             ] }),
             companions.map((item) => /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(
               "button",
@@ -16923,15 +16915,11 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
               selectedCompanion ? /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "ghost-button", onClick: () => restartCompanion(selectedCompanion), disabled: companionBusy || companionDraft.stopped, children: "Restart This Companion" }) : null,
               selectedCompanion ? /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "ghost-button", onClick: () => deleteCompanion(selectedCompanion), disabled: companionBusy, children: "Delete Companion" }) : null
             ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "settings-footnote", children: draftIsVessel ? /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(import_jsx_runtime27.Fragment, { children: [
-              "Companion state persists here for Vessel too. Named volumes become host-backed storage on the agent, and service host ports need extra verification compared with ",
-              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("code", { children: "Docker" }),
-              "."
-            ] }) : /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(import_jsx_runtime27.Fragment, { children: [
-              "Companion state now persists here. If a companion is marked ",
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "settings-footnote", children: [
+              "Companion state persists across deploys. If a companion is marked ",
               /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("code", { children: "Keep off" }),
               ", deploys and app restarts leave it off until you turn it back on. Stopping the app also stops its running companions."
-            ] }) })
+            ] })
           ] })
         ] })
       ] }),

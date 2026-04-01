@@ -93,6 +93,22 @@ function formatDuration(ms) {
   return `${minutes}m ${seconds}s`;
 }
 
+function isTerminalDeployStatus(status) {
+  const s = String(status || "").toLowerCase();
+  return s === "success" || s === "failed";
+}
+
+async function waitForTerminalDeployStatus(transport, deployId, timeoutMs = 180000, pollMs = 2000) {
+  const started = nowMs();
+  let last = null;
+  while (nowMs() - started < timeoutMs) {
+    last = await apiJSON(transport, "GET", `/api/deploys/${deployId}`);
+    if (isTerminalDeployStatus(last?.status)) return last;
+    await sleep(pollMs);
+  }
+  return last;
+}
+
 function statusColor(status) {
   if (!status) return c.dim;
   const s = String(status).toLowerCase();
@@ -486,6 +502,27 @@ function streamLogsTransport(transport, deployId) {
       let lastWasStatus = false;
       let lastLineLen = 0;
       let deployStatus = null;
+      let resolved = false;
+      let idleTimer = null;
+
+      function finish() {
+        if (resolved) return;
+        resolved = true;
+        if (idleTimer) clearTimeout(idleTimer);
+        if (lastWasStatus) process.stdout.write("\n");
+        resolve(deployStatus);
+      }
+
+      function resetIdleTimer() {
+        if (idleTimer) clearTimeout(idleTimer);
+        // Some deploys emit no lines after the build completes; don't block forever.
+        idleTimer = setTimeout(() => {
+          try { if (typeof incomingMsg.destroy === "function") incomingMsg.destroy(); } catch {}
+          finish();
+        }, 45000);
+      }
+
+      resetIdleTimer();
 
       function processFrame(frame) {
         let eventName = "message";
@@ -518,6 +555,8 @@ function streamLogsTransport(transport, deployId) {
       }
 
       incomingMsg.on("data", (chunk) => {
+        if (resolved) return;
+        resetIdleTimer();
         buf += chunk.toString("utf8");
         let idx;
         while ((idx = buf.indexOf("\n\n")) >= 0) {
@@ -526,8 +565,10 @@ function streamLogsTransport(transport, deployId) {
         }
       });
       incomingMsg.on("end", () => {
-        if (lastWasStatus) process.stdout.write("\n");
-        resolve(deployStatus);
+        finish();
+      });
+      incomingMsg.on("error", () => {
+        finish();
       });
     });
   }
@@ -1212,12 +1253,15 @@ async function main() {
     info("streaming logs");
     const streamStartedAt = nowMs();
     const streamedStatus = await streamLogsTransport(transport, deploy.id);
-    const finalDeploy = await apiJSON(transport, "GET", `/api/deploys/${deploy.id}`);
+    let finalDeploy = await apiJSON(transport, "GET", `/api/deploys/${deploy.id}`);
+    if (!isTerminalDeployStatus(finalDeploy?.status)) {
+      finalDeploy = await waitForTerminalDeployStatus(transport, deploy.id);
+    }
     const appState = await apiJSON(transport, "GET", `/api/apps/config?app=${encodeURIComponent(app)}&env=${encodeURIComponent(env)}&branch=${encodeURIComponent(branch)}`);
     const appStopped = Boolean(appState?.Stopped ?? appState?.stopped);
     const totalElapsed  = formatDuration(nowMs() - totalStartedAt);
     const streamElapsed = formatDuration(nowMs() - streamStartedAt);
-    const finalStatus   = streamedStatus || finalDeploy.status || "unknown";
+    const finalStatus   = streamedStatus || finalDeploy?.status || "unknown";
     const duration      = finalDeploy.started_at && finalDeploy.ended_at
       ? formatDuration(new Date(finalDeploy.ended_at) - new Date(finalDeploy.started_at))
       : totalElapsed;
