@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -70,6 +71,29 @@ func startWSLKeepAlive(distro string) {
 			}
 		}()
 	})
+}
+
+func stationBuildStepTimeout() time.Duration {
+	secs, err := strconv.Atoi(strings.TrimSpace(os.Getenv("RELAY_STATION_BUILD_STEP_TIMEOUT_SECONDS")))
+	if err != nil || secs <= 0 {
+		secs = 900
+	}
+	return time.Duration(secs) * time.Second
+}
+
+func runLoggedCommandWithTimeout(dir string, logw io.Writer, timeout time.Duration, label, bin string, args ...string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	setCmdHideWindow(cmd)
+	cmd.Dir = dir
+	cmd.Stdout = logw
+	cmd.Stderr = logw
+	err := cmd.Run()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("%s timed out after %s", label, timeout)
+	}
+	return err
 }
 
 // winToWSLPath converts a Windows absolute path to the /mnt/X form used inside
@@ -1167,11 +1191,14 @@ func (s *Server) buildStationSnapshot(repoDir, dockerfilePath, snapshotName stri
 	}
 	defer os.RemoveAll(buildDir)
 
-	buildCmd := vr.command(bin, "build-dockerfile", dockerfilePath, repoDir, buildDir)
-	buildCmd.Dir = repoDir
-	buildCmd.Stdout = logw
-	buildCmd.Stderr = logw
-	if err := buildCmd.Run(); err != nil {
+	if err := runLoggedCommandWithTimeout(
+		repoDir,
+		logw,
+		stationBuildStepTimeout(),
+		"station build-dockerfile",
+		bin,
+		"build-dockerfile", dockerfilePath, repoDir, buildDir,
+	); err != nil {
 		return nil, fmt.Errorf("station build-dockerfile failed: %w", err)
 	}
 
@@ -1197,11 +1224,14 @@ func (s *Server) buildStationSnapshot(repoDir, dockerfilePath, snapshotName stri
 
 	// Standard path: save snapshot on Windows, then sync to WSL2.
 	_ = os.RemoveAll(stationSnapshotDir(snapshotName))
-	saveCmd := vr.command(bin, "snapshot", "save", snapshotName, buildDir)
-	saveCmd.Dir = repoDir
-	saveCmd.Stdout = logw
-	saveCmd.Stderr = logw
-	if err := saveCmd.Run(); err != nil {
+	if err := runLoggedCommandWithTimeout(
+		repoDir,
+		logw,
+		stationBuildStepTimeout(),
+		"station snapshot save",
+		bin,
+		"snapshot", "save", snapshotName, buildDir,
+	); err != nil {
 		return nil, fmt.Errorf("station snapshot save failed: %w", err)
 	}
 	if runtime.GOOS == "windows" {
