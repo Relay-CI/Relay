@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -82,8 +81,9 @@ func stationBuildStepTimeout() time.Duration {
 }
 
 func runLoggedCommandWithTimeout(dir string, logw io.Writer, timeout time.Duration, label, bin string, args ...string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
+	// cancelTail signals the tail goroutine to drain and stop.
+	tailCtx, cancelTail := context.WithCancel(context.Background())
+	defer cancelTail()
 
 	// Write output to a temp file instead of a pipe so that grandchild
 	// processes that inherit the fd don't block cmd.Wait().  Piping directly
@@ -101,8 +101,13 @@ func runLoggedCommandWithTimeout(dir string, logw io.Writer, timeout time.Durati
 		_ = os.Remove(tmpPath)
 	}()
 
-	cmd := exec.CommandContext(ctx, bin, args...)
+	// Use plain exec.Command (not CommandContext) so we control exactly when
+	// and how the process and its children are killed.
+	cmd := exec.Command(bin, args...)
 	setCmdHideWindow(cmd)
+	// On Linux: put station in its own process group so the timeout can kill
+	// the entire tree (build containers, containerd, etc.), not just the leader.
+	setLongRunCmdAttrs(cmd)
 	cmd.Dir = dir
 	cmd.Stdout = f
 	cmd.Stderr = f
@@ -112,8 +117,8 @@ func runLoggedCommandWithTimeout(dir string, logw io.Writer, timeout time.Durati
 	}
 
 	// Tail the temp file into logw while the command runs so callers see live
-	// output.  The goroutine stops once ctx is cancelled (either by timeout or
-	// after cmd.Wait returns) and drains any remaining bytes.
+	// output.  The goroutine stops once tailCtx is cancelled and drains any
+	// remaining bytes.
 	tailDone := make(chan struct{})
 	go func() {
 		defer close(tailDone)
@@ -130,7 +135,7 @@ func runLoggedCommandWithTimeout(dir string, logw io.Writer, timeout time.Durati
 				continue
 			}
 			select {
-			case <-ctx.Done():
+			case <-tailCtx.Done():
 				_, _ = io.Copy(logw, tr)
 				return
 			default:
@@ -139,11 +144,31 @@ func runLoggedCommandWithTimeout(dir string, logw io.Writer, timeout time.Durati
 		}
 	}()
 
-	runErr := cmd.Wait()
-	cancel()    // signal the tail goroutine to drain and stop
-	<-tailDone // wait for it to flush remaining output
+	// Wait for the process or the timeout, whichever comes first.
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
 
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	var runErr error
+	timedOut := false
+	select {
+	case runErr = <-waitDone:
+		// Process exited normally (success or error).
+	case <-timer.C:
+		timedOut = true
+		fmt.Fprintf(logw, "[build] %s timed out after %s, killing build\n", label, timeout)
+		// Kill the entire process group (Linux) or the process (Windows) so
+		// build containers and their children don't linger.
+		killLongRunCmd(cmd)
+		runErr = <-waitDone
+	}
+
+	cancelTail() // signal the tail goroutine to drain and stop
+	<-tailDone   // wait for it to flush remaining output
+
+	if timedOut {
 		return fmt.Errorf("%s timed out after %s", label, timeout)
 	}
 	return runErr

@@ -18,3 +18,15 @@ func setCmdHideWindow(cmd *exec.Cmd) {
 		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | createNoWindow,
 	}
 }
+
+// setLongRunCmdAttrs is a no-op on Windows: setCmdHideWindow already puts the
+// process into a new process group via CREATE_NEW_PROCESS_GROUP.
+func setLongRunCmdAttrs(cmd *exec.Cmd) {}
+
+// killLongRunCmd kills the process on Windows. Child processes in WSL2 are
+// managed by WSL and cleaned up when their parent exits.
+func killLongRunCmd(cmd *exec.Cmd) {
+	if cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+}
