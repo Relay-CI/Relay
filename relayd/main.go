@@ -54,6 +54,32 @@ var uiFS embed.FS
 
 const dashboardSessionCookie = "relay_session"
 
+var (
+	relaydVersion   = "dev"
+	relaydCommit    = "unknown"
+	relaydBuildDate = "unknown"
+)
+
+func relaydVersionLine() string {
+	return fmt.Sprintf("relayd %s (commit=%s built=%s os=%s arch=%s)", relaydVersion, relaydCommit, relaydBuildDate, runtime.GOOS, runtime.GOARCH)
+}
+
+func stationBinaryVersion() (version string, binaryPath string, err error) {
+	bin, err := ensureVesselBinary()
+	if err != nil {
+		return "", "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "--version")
+	setCmdHideWindow(cmd)
+	out, runErr := runCommandCaptured(cmd)
+	if runErr != nil {
+		return "", bin, runErr
+	}
+	return strings.TrimSpace(string(out)), bin, nil
+}
+
 // ctxKey is used to attach per-connection metadata injected by ConnContext.
 type ctxKey int
 
@@ -2848,6 +2874,9 @@ func main() {
 				dieService(err.Error())
 			}
 			return
+		case "version", "--version", "-version":
+			fmt.Println(relaydVersionLine())
+			return
 		}
 	}
 
@@ -2926,6 +2955,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/api/version", s.handleVersion)
 
 	// UI
 	uiRoot, _ := fs.Sub(uiFS, "ui")
@@ -2996,6 +3026,7 @@ func main() {
 			// We do NOT serve the UI files on the socket; that stays on TCP.
 			sockMux := http.NewServeMux()
 			sockMux.HandleFunc("/health", s.handleHealth)
+			sockMux.HandleFunc("/api/version", s.handleVersion)
 			sockMux.HandleFunc("/api/auth/session", s.handleDashboardSession)
 			sockMux.HandleFunc("/api/deploys", s.auth(s.handleDeploys))
 			sockMux.HandleFunc("/api/deploys/", s.auth(s.handleDeployByID))
@@ -3216,6 +3247,35 @@ func dieService(msg string) {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
+}
+
+func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, 405, "method not allowed")
+		return
+	}
+
+	stationVersion := ""
+	stationPath := ""
+	stationErr := ""
+	if ver, path, err := stationBinaryVersion(); err == nil {
+		stationVersion = ver
+		stationPath = path
+	} else {
+		stationErr = err.Error()
+	}
+
+	writeJSON(w, 200, map[string]any{
+		"component":           "relayd",
+		"version":             relaydVersion,
+		"commit":              relaydCommit,
+		"build_date":          relaydBuildDate,
+		"goos":                runtime.GOOS,
+		"goarch":              runtime.GOARCH,
+		"station_version":     stationVersion,
+		"station_binary":      stationPath,
+		"station_version_err": stationErr,
+	})
 }
 
 func (s *Server) handleDeploys(w http.ResponseWriter, r *http.Request) {

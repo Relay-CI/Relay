@@ -1,7 +1,10 @@
 param(
     [string]$OutputDir,
     [string]$GOOS = $env:GOOS,
-    [string]$GOARCH = $env:GOARCH
+    [string]$GOARCH = $env:GOARCH,
+    [string]$Version,
+    [string]$Commit,
+    [string]$BuildDate
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,6 +16,22 @@ if (-not $GOOS) {
 if (-not $GOARCH) {
     $GOARCH = (& go env GOARCH).Trim()
 }
+if (-not $Version) {
+    $Version = "dev"
+}
+if (-not $Commit) {
+    try {
+        $Commit = (& git -C $repoRoot rev-parse --short HEAD).Trim()
+    } catch {
+        $Commit = "unknown"
+    }
+}
+if (-not $BuildDate) {
+    $BuildDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+}
+
+$relaydLdflags = "-X main.relaydVersion=$Version -X main.relaydCommit=$Commit -X main.relaydBuildDate=$BuildDate"
+$stationLdflags = "-X main.stationVersion=$Version -X main.stationCommit=$Commit -X main.stationBuildDate=$BuildDate"
 
 $ext = if ($GOOS -eq "windows") { ".exe" } else { "" }
 if (-not $OutputDir) {
@@ -39,7 +58,7 @@ try {
     Write-Host "Building relayd for $GOOS/$GOARCH..."
     Push-Location (Join-Path $repoRoot "relayd")
     try {
-        & go build "-o" (Join-Path $OutputDir "relayd$ext") .
+        & go build "-ldflags" $relaydLdflags "-o" (Join-Path $OutputDir "relayd$ext") .
     } finally {
         Pop-Location
     }
@@ -47,7 +66,7 @@ try {
     Write-Host "Building station for $GOOS/$GOARCH..."
     Push-Location (Join-Path $repoRoot "station")
     try {
-        & go build "-mod=mod" "-o" (Join-Path $OutputDir "station$ext") .
+        & go build "-mod=mod" "-ldflags" $stationLdflags "-o" (Join-Path $OutputDir "station$ext") .
         if (-Not (Test-Path (Join-Path $OutputDir "station$ext"))) {
             throw "Station build failed: output file station$ext missing"
         }
@@ -56,7 +75,7 @@ try {
             $env:GOOS = "linux"
             $env:GOARCH = $linuxArch
             Write-Host "Building station Linux sidecar for WSL2 (linux/$linuxArch)..."
-            & go build "-mod=mod" "-o" (Join-Path $OutputDir "station-linux") .
+            & go build "-mod=mod" "-ldflags" $stationLdflags "-o" (Join-Path $OutputDir "station-linux") .
             if (-Not (Test-Path (Join-Path $OutputDir "station-linux"))) {
                 throw "Station Linux sidecar build failed: station-linux missing"
             }

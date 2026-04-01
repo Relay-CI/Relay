@@ -77,8 +77,10 @@ relay rollback                     Roll back to previous image
 relay start / stop / restart       Control a running container
 relay secrets list/add/rm          Manage app secrets
 relay plugin list/install/remove   Manage server-side buildpack plugins
+relay version                      Show relay/relayd/station versions
 relay agent install [--version v]  Download relayd + station binaries
-relay agent status                 Show installed agent version and path
+relay agent update                 Update relayd + station to latest release
+relay agent status                 Show installed/latest versions and outdated status
 ```
 
 ---

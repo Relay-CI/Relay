@@ -53,8 +53,10 @@ relay rollback                     Roll back to previous image
 relay start / stop / restart       Control a running container
 relay secrets list/add/rm          Manage app secrets
 relay plugin list/install/remove   Manage server-side buildpack plugins
+relay version                      Show relay/relayd/station versions
 relay agent install [--version v]  Download relayd + station binaries
-relay agent status                 Show installed agent version and path
+relay agent update                 Update relayd + station to latest release
+relay agent status                 Show installed/latest versions and outdated status
 ```
 
 ## Usage
@@ -125,6 +127,23 @@ relay agent install --version v0.1.7
 ```
 
 Installs to `~/.relay/bin/` and prints the PATH line to add.
+
+### `agent update`
+
+Checks GitHub Releases, compares with your installed `.relay-version`, and downloads the latest OS-specific archive only when you are behind:
+
+```bash
+relay agent update
+```
+
+### `version`
+
+Shows component versions in one place:
+
+- relay CLI version
+- installed agent version + latest release
+- binary-reported `relayd --version` and `station --version`
+- server-reported versions from `/api/version` when the agent is reachable
 
 ## Flags
 

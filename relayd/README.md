@@ -118,6 +118,18 @@ curl http://localhost:8080/health
 # ok
 ```
 
+Version endpoint:
+
+```bash
+curl http://localhost:8080/api/version
+```
+
+Print binary version directly:
+
+```bash
+./relayd --version
+```
+
 ### 4) Web Dashboard
 
 Relay Agent now includes a secure, built-in Web UI for managing your deployments.

@@ -17,11 +17,22 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
+
+var (
+	stationVersion   = "dev"
+	stationCommit    = "unknown"
+	stationBuildDate = "unknown"
+)
+
+func stationVersionLine() string {
+	return fmt.Sprintf("station %s (commit=%s built=%s os=%s arch=%s)", stationVersion, stationCommit, stationBuildDate, runtime.GOOS, runtime.GOARCH)
+}
 
 // ─── types ────────────────────────────────────────────────────────────────────
 
@@ -247,6 +258,10 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "version", "--version", "-version":
+		fmt.Println(stationVersionLine())
+		return
+
 	case "run":
 		appName, port, restart, volumes, netMode, image, extraEnv, extraHosts, workdir, rest := parseFlags(os.Args[2:])
 		if len(rest) < 2 && image == "" {
@@ -508,6 +523,7 @@ Port commands:
   port free <app>   Release a port allocation
 
 Other:
+	version                 Print station build version
   setup-rootfs [dest]  %s
   wsl-warm             Pre-warm WSL2 VM + start keepalive (add to Windows startup)
   Windows desktop      Double-click vessel.exe in Explorer to open Station Desktop
@@ -886,5 +902,3 @@ func containerNetworkKey(appName, id string) string {
 	}
 	return strings.TrimSpace(id)
 }
-
-

@@ -37,10 +37,23 @@ if (process.platform === "win32") {
 const fs  = require("fs");
 const fsp = require("fs/promises");
 const http = require("http");
+const https = require("https");
 const readline = require("readline");
 const path = require("path");
+const os = require("os");
 const crypto = require("crypto");
+const { execSync, spawnSync } = require("child_process");
 const { resolveDeployArgs, resolveServerArgs, resolveTransport } = require("./deploy");
+
+const CLI_VERSION = (() => {
+  try {
+    return String(require("./package.json").version || "dev");
+  } catch {
+    return "dev";
+  }
+})();
+
+const RELEASES_API_LATEST = "https://api.github.com/repos/Relay-CI/Relay/releases/latest";
 
 // â”€â”€â”€ ANSI colours (disabled when stdout is not a TTY) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -135,6 +148,98 @@ function parseArgs(argv) {
     }
   }
   return out;
+}
+
+function normalizeVersionTag(v) {
+  return String(v || "").trim().replace(/^v/i, "");
+}
+
+function parseSemver(v) {
+  const raw = normalizeVersionTag(v);
+  const [core, pre = ""] = raw.split("-", 2);
+  const [maj, min, pat] = core.split(".").map((x) => Number.parseInt(x, 10));
+  if (![maj, min, pat].every(Number.isFinite)) return null;
+  return { maj, min, pat, pre };
+}
+
+function compareVersions(a, b) {
+  const va = parseSemver(a);
+  const vb = parseSemver(b);
+  if (!va || !vb) return 0;
+  if (va.maj !== vb.maj) return va.maj - vb.maj;
+  if (va.min !== vb.min) return va.min - vb.min;
+  if (va.pat !== vb.pat) return va.pat - vb.pat;
+  if (va.pre === vb.pre) return 0;
+  if (!va.pre) return 1;
+  if (!vb.pre) return -1;
+  return va.pre.localeCompare(vb.pre);
+}
+
+function isOlderVersion(installed, latest) {
+  return compareVersions(installed, latest) < 0;
+}
+
+function httpsGet(url) {
+  return new Promise((resolve, reject) => {
+    const follow = (u) => {
+      https.get(u, {
+        headers: {
+          "User-Agent": "relay-cli",
+          "Accept": "application/vnd.github+json",
+        },
+      }, (res) => {
+        if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location) {
+          follow(res.headers.location);
+          return;
+        }
+        const chunks = [];
+        res.on("data", (ch) => chunks.push(ch));
+        res.on("end",  () => resolve({ status: res.statusCode, body: Buffer.concat(chunks) }));
+        res.on("error", reject);
+      }).on("error", reject);
+    };
+    follow(url);
+  });
+}
+
+function httpsDownload(url, dest) {
+  return new Promise((resolve, reject) => {
+    const follow = (u) => {
+      https.get(u, { headers: { "User-Agent": "relay-cli" } }, (res) => {
+        if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location) {
+          follow(res.headers.location);
+          return;
+        }
+        if (res.statusCode !== 200) {
+          reject(new Error(`HTTP ${res.statusCode}`));
+          return;
+        }
+        const out = fs.createWriteStream(dest);
+        res.pipe(out);
+        out.on("finish", resolve);
+        out.on("error", reject);
+      }).on("error", reject);
+    };
+    follow(url);
+  });
+}
+
+async function fetchLatestReleaseTag() {
+  const { status, body } = await httpsGet(RELEASES_API_LATEST);
+  if (status !== 200) throw new Error(`GitHub API returned HTTP ${status}`);
+  let json;
+  try { json = JSON.parse(body.toString("utf8")); }
+  catch { throw new Error("Could not parse latest release from GitHub"); }
+  const tag = String(json.tag_name || "").trim();
+  if (!tag) throw new Error("Latest release has no tag_name");
+  return tag;
+}
+
+function readBinaryVersion(binPath) {
+  if (!fs.existsSync(binPath)) return "";
+  const out = spawnSync(binPath, ["--version"], { encoding: "utf8" });
+  if (out.error || out.status !== 0) return "";
+  return String(out.stdout || "").trim();
 }
 
 async function readJSONIfExists(p) {
@@ -567,9 +672,12 @@ ${c.bold}COMMANDS${c.reset}
   ${c.cyan}plugin install${c.reset} <file.json>   Install a buildpack plugin
   ${c.cyan}plugin remove${c.reset}  <name>        Remove a buildpack plugin
 
+  ${c.cyan}version${c.reset}                      Show relay, relayd, and station versions
+
   ${c.cyan}agent install${c.reset}                Download relayd + station binaries for this platform
     --version <v>            Pin a release version (default: latest)
     --dir     <path>         Install directory (default: ~/.relay/bin)
+  ${c.cyan}agent update${c.reset}                 Update relayd + station to latest release
   ${c.cyan}agent status${c.reset}                 Show installed agent version and path
 `);
 }
@@ -578,10 +686,64 @@ ${c.bold}COMMANDS${c.reset}
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const cmd  = args._[0];
+  let cmd  = args._[0];
+
+  if (!cmd && args.version === "true") {
+    cmd = "version";
+  }
 
   if (!cmd || args.help === "true" || args.h === "true") {
     printHelp();
+    process.exit(0);
+  }
+
+  if (cmd === "version") {
+    const installDir = path.resolve(
+      args.dir || process.env.RELAY_BIN_DIR || path.join(os.homedir(), ".relay", "bin")
+    );
+    const ext = process.platform === "win32" ? ".exe" : "";
+    const vf = path.join(installDir, ".relay-version");
+
+    let installed = "";
+    try { installed = (await fsp.readFile(vf, "utf8")).trim(); } catch {}
+
+    let latest = "";
+    try { latest = await fetchLatestReleaseTag(); }
+    catch (e) { warn(`Could not fetch latest release: ${e.message}`); }
+
+    console.log(`\n${c.bold}Relay Versions${c.reset}\n`);
+    console.log(`  relay CLI           ${c.green}${CLI_VERSION}${c.reset}`);
+    console.log(`  relayd (installed)  ${installed ? `${c.green}${installed}${c.reset}` : `${c.yellow}not installed${c.reset}`}`);
+    if (latest) {
+      console.log(`  relayd (latest)     ${c.cyan}${latest}${c.reset}`);
+      if (installed && isOlderVersion(installed, latest)) {
+        console.log(`  update status       ${c.yellow}outdated${c.reset}  ${c.dim}(run: relay agent update)${c.reset}`);
+      } else if (installed) {
+        console.log(`  update status       ${c.green}up to date${c.reset}`);
+      }
+    }
+
+    const relaydPath = path.join(installDir, `relayd${ext}`);
+    const stationPath = path.join(installDir, `station${ext}`);
+    const relaydBinaryVersion = readBinaryVersion(relaydPath);
+    const stationBinaryVersion = readBinaryVersion(stationPath);
+    if (relaydBinaryVersion) console.log(`  relayd binary       ${c.dim}${relaydBinaryVersion}${c.reset}`);
+    if (stationBinaryVersion) console.log(`  station binary      ${c.dim}${stationBinaryVersion}${c.reset}`);
+
+    try {
+      const transport = resolveTransport(args);
+      const serverVersion = await apiJSON(transport, "GET", "/api/version");
+      if (serverVersion && serverVersion.version) {
+        console.log(`  relayd (server)     ${c.green}${serverVersion.version}${c.reset}`);
+      }
+      if (serverVersion && serverVersion.station_version) {
+        console.log(`  station (server)    ${c.dim}${serverVersion.station_version}${c.reset}`);
+      }
+    } catch {
+      // Optional; relay version should still work without server connectivity.
+    }
+
+    console.log("");
     process.exit(0);
   }
 
@@ -804,9 +966,6 @@ async function main() {
   // ── agent ──────────────────────────────────────────────────────────────────
   if (cmd === "agent") {
     const sub = args._[1];
-    const os = require("os");
-    const https = require("https");
-    const { execSync } = require("child_process");
 
     const installDir = path.resolve(
       args.dir || process.env.RELAY_BIN_DIR || path.join(os.homedir(), ".relay", "bin")
@@ -820,47 +979,8 @@ async function main() {
       die(`No prebuilt binary for ${p}/${a}. Build from source: https://github.com/Relay-CI/Relay`);
     }
 
-    function httpsGet(url) {
-      return new Promise((resolve, reject) => {
-        const follow = (u) => {
-          https.get(u, { headers: { "User-Agent": "relay-cli" } }, (res) => {
-            if (res.statusCode === 301 || res.statusCode === 302) { follow(res.headers.location); return; }
-            const chunks = [];
-            res.on("data", (ch) => chunks.push(ch));
-            res.on("end",  () => resolve({ status: res.statusCode, body: Buffer.concat(chunks) }));
-            res.on("error", reject);
-          }).on("error", reject);
-        };
-        follow(url);
-      });
-    }
-
-    function httpsDownload(url, dest) {
-      return new Promise((resolve, reject) => {
-        const follow = (u) => {
-          https.get(u, { headers: { "User-Agent": "relay-cli" } }, (res) => {
-            if (res.statusCode === 301 || res.statusCode === 302) { follow(res.headers.location); return; }
-            if (res.statusCode !== 200) { reject(new Error(`HTTP ${res.statusCode}`)); return; }
-            const out = fs.createWriteStream(dest);
-            res.pipe(out);
-            out.on("finish", resolve);
-            out.on("error", reject);
-          }).on("error", reject);
-        };
-        follow(url);
-      });
-    }
-
-    if (!sub || sub === "install") {
+    async function installAgentRelease(version) {
       const asset = platformAsset();
-      let version = args.version || args.v;
-      if (!version) {
-        info("Fetching latest release...");
-        const { body } = await httpsGet("https://api.github.com/repos/Relay-CI/Relay/releases/latest");
-        try { version = JSON.parse(body.toString()).tag_name; } catch { die("Could not parse latest release from GitHub"); }
-      }
-      if (!version) die("Could not determine version. Pass --version v0.x.x");
-
       const downloadUrl = `https://github.com/Relay-CI/Relay/releases/download/${version}/${asset.tarball}`;
       const tmpFile = path.join(os.tmpdir(), asset.tarball);
 
@@ -874,14 +994,15 @@ async function main() {
       const dlSpinner = createSpinner(`Downloading ${asset.tarball}`);
       dlSpinner.start();
       try { await httpsDownload(downloadUrl, tmpFile); }
-      catch (e) { dlSpinner.stop(false, e.message); die(`Download failed — does release ${version} exist on GitHub?`); }
+      catch (e) { dlSpinner.stop(false, e.message); die(`Download failed - does release ${version} exist on GitHub?`); }
       dlSpinner.stop(true);
 
       const exSpinner = createSpinner("Extracting");
       exSpinner.start();
       try {
         if (asset.zip) {
-          const dest = installDir.replace(/'/g, "''"); const tmp = tmpFile.replace(/'/g, "''");
+          const dest = installDir.replace(/'/g, "''");
+          const tmp = tmpFile.replace(/'/g, "''");
           execSync(`powershell -NoProfile -Command "Expand-Archive -Force -Path '${tmp}' -DestinationPath '${dest}'"`, { stdio: "pipe" });
         } else {
           execSync(`tar xzf "${tmpFile}" -C "${installDir}"`, { stdio: "pipe" });
@@ -892,7 +1013,10 @@ async function main() {
             if (fs.existsSync(bp)) fs.chmodSync(bp, 0o755);
           }
         }
-      } catch (e) { exSpinner.stop(false); die(`Extraction failed: ${e.message}`); }
+      } catch (e) {
+        exSpinner.stop(false);
+        die(`Extraction failed: ${e.message}`);
+      }
       exSpinner.stop(true);
 
       const ext = process.platform === "win32" ? ".exe" : "";
@@ -912,6 +1036,41 @@ async function main() {
         console.log(`  ${c.cyan}relayd${c.reset}`);
       }
       console.log(`\n  Then in your project:  ${c.cyan}relay init${c.reset}  and  ${c.cyan}relay deploy --stream${c.reset}\n`);
+    }
+
+    if (!sub || sub === "install") {
+      let version = args.version || args.v;
+      if (!version) {
+        info("Fetching latest release...");
+        try { version = await fetchLatestReleaseTag(); }
+        catch (e) { die(`Could not determine latest release: ${e.message}`); }
+      }
+      if (!version) die("Could not determine version. Pass --version v0.x.x");
+
+      await installAgentRelease(version);
+      process.exit(0);
+    }
+
+    if (sub === "update") {
+      const vf = path.join(installDir, ".relay-version");
+      let installed = "";
+      try { installed = (await fsp.readFile(vf, "utf8")).trim(); } catch {}
+
+      let latest;
+      try { latest = await fetchLatestReleaseTag(); }
+      catch (e) { die(`Could not check latest release: ${e.message}`); }
+
+      if (installed && !isOlderVersion(installed, latest)) {
+        ok(`Already up to date (${installed})`);
+        process.exit(0);
+      }
+
+      if (installed) {
+        info(`Updating ${installed} -> ${latest}`);
+      } else {
+        info(`Installing latest release ${latest}`);
+      }
+      await installAgentRelease(latest);
       process.exit(0);
     }
 
@@ -920,15 +1079,40 @@ async function main() {
       const ext = process.platform === "win32" ? ".exe" : "";
       let installed = null;
       try { installed = (await fsp.readFile(vf, "utf8")).trim(); } catch { }
+
+      let latest = "";
+      try { latest = await fetchLatestReleaseTag(); }
+      catch (e) { warn(`Could not fetch latest release: ${e.message}`); }
+
+      const relaydPath = path.join(installDir, `relayd${ext}`);
+      const stationPath = path.join(installDir, `station${ext}`);
+      const relaydBinaryVersion = readBinaryVersion(relaydPath);
+      const stationBinaryVersion = readBinaryVersion(stationPath);
+
       console.log(`\n${c.bold}Relay Agent${c.reset}\n`);
-      console.log(`  Dir      ${c.dim}${installDir}${c.reset}`);
-      console.log(`  Version  ${installed ? `${c.green}${installed}${c.reset}` : `${c.yellow}not installed${c.reset}`}`);
-      console.log(`  relayd   ${fs.existsSync(path.join(installDir, `relayd${ext}`))  ? `${c.green}\u2713${c.reset}` : `${c.red}\u2717${c.reset}`}`);
-      console.log(`  station  ${fs.existsSync(path.join(installDir, `station${ext}`)) ? `${c.green}\u2713${c.reset}` : `${c.red}\u2717${c.reset}`}\n`);
+      console.log(`  Dir              ${c.dim}${installDir}${c.reset}`);
+      console.log(`  Installed        ${installed ? `${c.green}${installed}${c.reset}` : `${c.yellow}not installed${c.reset}`}`);
+      if (latest) {
+        console.log(`  Latest           ${c.cyan}${latest}${c.reset}`);
+        if (installed && isOlderVersion(installed, latest)) {
+          console.log(`  Update status    ${c.yellow}outdated${c.reset}  ${c.dim}(run: relay agent update)${c.reset}`);
+        } else if (installed) {
+          console.log(`  Update status    ${c.green}up to date${c.reset}`);
+        }
+      }
+      console.log(`  relayd binary    ${fs.existsSync(relaydPath) ? `${c.green}\u2713${c.reset}` : `${c.red}\u2717${c.reset}`}`);
+      if (relaydBinaryVersion) {
+        console.log(`  relayd version   ${c.dim}${relaydBinaryVersion}${c.reset}`);
+      }
+      console.log(`  station binary   ${fs.existsSync(stationPath) ? `${c.green}\u2713${c.reset}` : `${c.red}\u2717${c.reset}`}`);
+      if (stationBinaryVersion) {
+        console.log(`  station version  ${c.dim}${stationBinaryVersion}${c.reset}`);
+      }
+      console.log("");
       process.exit(0);
     }
 
-    die(`Unknown agent sub-command: ${sub}. Supported: install, status`);
+    die(`Unknown agent sub-command: ${sub}. Supported: install, update, status`);
   }
 
 
