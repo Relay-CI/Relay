@@ -2969,7 +2969,7 @@ func main() {
 		}
 		fmt.Fprintln(os.Stderr, "error:", err)
 		fmt.Fprintln(os.Stderr)
-		fmt.Fprintln(os.Stderr, relaydRunUsage)
+		fmt.Fprint(os.Stderr, relaydRunUsage)
 		os.Exit(2)
 	}
 	if runCfg.ShowVersion {
