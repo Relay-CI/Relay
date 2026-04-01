@@ -22,7 +22,7 @@ import (
 var stationBuildMu sync.Mutex
 
 // runCommandCaptured executes cmd with stdout/stderr redirected to a temporary
-// file instead of anonymous pipes. Detached vessel subprocesses on Windows can
+// file instead of anonymous pipes. Detached station subprocesses on Windows can
 // keep pipe handles open after the launcher exits, which makes CombinedOutput
 // hang even though the container/proxy has already started.
 func runCommandCaptured(cmd *exec.Cmd) ([]byte, error) {
@@ -102,17 +102,17 @@ func wslBuildDirFromBreadcrumb(buildDir string) (string, error) {
 	return dir, nil
 }
 
-// wslSaveSnapshot runs `vessel snapshot save` inside WSL2 so the snapshot
+// wslSaveSnapshot runs `station snapshot save` inside WSL2 so the snapshot
 // is created by hardlinks within ext4 — effectively instant.
 func wslSaveSnapshot(distro, snapshotName, wslBuildDir string, logw io.Writer) error {
-	fmt.Fprintf(logw, "[vessel] saving snapshot in WSL2 filesystem...\n")
-	// Remove any existing WSL2-side snapshot first (vessel save refuses to overwrite).
+	fmt.Fprintf(logw, "[station] saving snapshot in WSL2 filesystem...\n")
+	// Remove any existing WSL2-side snapshot first (station save refuses to overwrite).
 	rmCmd := exec.Command("wsl.exe", "-d", distro, "--", "sh", "-c",
 		"rm -rf /tmp/relay-native/snapshots/"+shqSimple(snapshotName))
 	setCmdHideWindow(rmCmd)
 	_ = rmCmd.Run()
 	cmd := exec.Command("wsl.exe", "-d", distro, "--",
-		"/usr/local/bin/vessel", "snapshot", "save", snapshotName, wslBuildDir)
+		"/usr/local/bin/station", "snapshot", "save", snapshotName, wslBuildDir)
 	setCmdHideWindow(cmd)
 	cmd.Stdout = logw
 	cmd.Stderr = logw
@@ -123,7 +123,7 @@ func wslSaveSnapshot(distro, snapshotName, wslBuildDir string, logw io.Writer) e
 // directory containing only the manifest JSON.  This lets loadStationManifest
 // work without a full Windows-side rootfs copy.
 func wslWriteWindowsManifestStub(snapshotName, buildDir string) error {
-	manifestData, err := os.ReadFile(filepath.Join(buildDir, "vessel-manifest.json"))
+	manifestData, err := os.ReadFile(filepath.Join(buildDir, "station-manifest.json"))
 	if err != nil {
 		return fmt.Errorf("read manifest: %w", err)
 	}
@@ -132,7 +132,7 @@ func wslWriteWindowsManifestStub(snapshotName, buildDir string) error {
 	if err := os.MkdirAll(winSnapDir, 0755); err != nil {
 		return fmt.Errorf("mkdir: %w", err)
 	}
-	return os.WriteFile(filepath.Join(winSnapDir, "vessel-manifest.json"), manifestData, 0644)
+	return os.WriteFile(filepath.Join(winSnapDir, "station-manifest.json"), manifestData, 0644)
 }
 
 // syncSnapshotToWSL2 copies the named snapshot from the Windows store into
@@ -144,14 +144,14 @@ func syncSnapshotToWSL2(distro, snapshotName string, logw io.Writer) {
 	winSnapDir := stationSnapshotDir(snapshotName)
 	wslSrc := winToWSLPath(winSnapDir)
 	wslDst := "/tmp/relay-native/snapshots/" + snapshotName
-	fmt.Fprintf(logw, "[vessel] syncing snapshot to WSL2 filesystem...\n")
+	fmt.Fprintf(logw, "[station] syncing snapshot to WSL2 filesystem...\n")
 	cmd := exec.Command("wsl.exe", "-d", distro, "--", "sh", "-c",
 		"rm -rf "+shqSimple(wslDst)+" && mkdir -p /tmp/relay-native/snapshots && cp -a "+shqSimple(wslSrc)+" "+shqSimple(wslDst))
 	setCmdHideWindow(cmd)
 	cmd.Stdout = logw
 	cmd.Stderr = logw
 	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(logw, "[vessel] warn: WSL2 snapshot sync failed: %v\n", err)
+		fmt.Fprintf(logw, "[station] warn: WSL2 snapshot sync failed: %v\n", err)
 	}
 }
 
@@ -188,7 +188,14 @@ func stationBinaryName() string {
 	if runtime.GOOS == "windows" {
 		return "station.exe"
 	}
-	return "vessel"
+	return "station"
+}
+
+func stationBinaryCandidates() []string {
+	if runtime.GOOS == "windows" {
+		return []string{"station.exe", "vessel.exe"}
+	}
+	return []string{"station", "vessel"}
 }
 
 func stationStateBaseDir() string {
@@ -204,31 +211,31 @@ func stationSnapshotDir(name string) string {
 }
 
 func stationSnapshotManifestPath(name string) string {
-	return filepath.Join(stationSnapshotDir(name), "vessel-manifest.json")
+	return filepath.Join(stationSnapshotDir(name), "station-manifest.json")
 }
 
-func vesselContainerConfigPath(id string) string {
+func stationContainerConfigPath(id string) string {
 	return filepath.Join(stationStateBaseDir(), "containers", id, "config.json")
 }
 
-func vesselContainerLogPath(id string) string {
+func stationContainerLogPath(id string) string {
 	return filepath.Join(stationStateBaseDir(), "containers", id, "output.log")
 }
 
-func vesselProxyConfigPath(app string) string {
+func stationProxyConfigPath(app string) string {
 	return filepath.Join(stationStateBaseDir(), "proxies", app, "proxy.json")
 }
 
-func vesselProxyLogPath(app string) string {
+func stationProxyLogPath(app string) string {
 	return filepath.Join(stationStateBaseDir(), "proxies", app, "proxy.log")
 }
 
 func newStationRuntime(dataDir string) *StationRuntime {
 	base := filepath.Join(stationStateBaseDir(), "volumes")
 	if strings.TrimSpace(dataDir) != "" {
-		base = filepath.Join(dataDir, "vessel-volumes")
+		base = filepath.Join(dataDir, "station-volumes")
 	}
-	// Start the vessel daemon in the background so it is warm before the first
+	// Start the station daemon in the background so it is warm before the first
 	// deploy.  The daemon process itself keeps the WSL2 VM alive — no separate
 	// keep-alive ping loop is needed.
 	if runtime.GOOS == "windows" {
@@ -241,7 +248,7 @@ func stationAppName(app string, env DeployEnv, branch string) string {
 	return fmt.Sprintf("relay__%s__%s__%s__app", safe(app), safe(string(env)), safe(branch))
 }
 
-func vesselProxyName(app string, env DeployEnv, branch string) string {
+func stationProxyName(app string, env DeployEnv, branch string) string {
 	return fmt.Sprintf("relay__%s__%s__%s__proxy", safe(app), safe(string(env)), safe(branch))
 }
 
@@ -253,7 +260,7 @@ func stationSnapshotPrefix(app string, env DeployEnv, branch string) string {
 	return fmt.Sprintf("relay__%s__%s__%s__", safe(app), safe(string(env)), safe(branch))
 }
 
-func vesselSourceDirCandidates() []string {
+func stationSourceDirCandidates() []string {
 	seen := map[string]struct{}{}
 	out := make([]string, 0, 6)
 	add := func(p string) {
@@ -272,33 +279,38 @@ func vesselSourceDirCandidates() []string {
 		out = append(out, abs)
 	}
 
+	add(os.Getenv("RELAY_STATION_SOURCE_DIR"))
 	add(os.Getenv("RELAY_VESSEL_SOURCE_DIR"))
 	if exe, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exe)
+		add(filepath.Join(exeDir, "..", "station"))
+		add(filepath.Join(exeDir, "station"))
 		add(filepath.Join(exeDir, "..", "vessel"))
 		add(filepath.Join(exeDir, "vessel"))
 	}
 	if wd, err := os.Getwd(); err == nil {
+		add(filepath.Join(wd, "..", "station"))
+		add(filepath.Join(wd, "station"))
 		add(filepath.Join(wd, "..", "vessel"))
 		add(filepath.Join(wd, "vessel"))
 	}
 	return out
 }
 
-func validVesselSourceDir(dir string) bool {
+func validstationSourceDir(dir string) bool {
 	return fileExists(filepath.Join(dir, "go.mod")) && fileExists(filepath.Join(dir, "main.go"))
 }
 
-func findVesselSourceDir() string {
-	for _, dir := range vesselSourceDirCandidates() {
-		if validVesselSourceDir(dir) {
+func findstationSourceDir() string {
+	for _, dir := range stationSourceDirCandidates() {
+		if validstationSourceDir(dir) {
 			return dir
 		}
 	}
 	return ""
 }
 
-func vesselSourceNewerThanBinary(sourceDir, binaryPath string) bool {
+func stationSourceNewerThanBinary(sourceDir, binaryPath string) bool {
 	info, err := os.Stat(binaryPath)
 	if err != nil {
 		return true
@@ -320,7 +332,13 @@ func vesselSourceNewerThanBinary(sourceDir, binaryPath string) bool {
 	return newer
 }
 
-func ensureVesselBinary() (string, error) {
+func ensurestationBinary() (string, error) {
+	if override := strings.TrimSpace(os.Getenv("RELAY_STATION_BIN")); override != "" {
+		if fileExists(override) {
+			return filepath.Abs(override)
+		}
+		return "", fmt.Errorf("RELAY_STATION_BIN points to a missing file: %s", override)
+	}
 	if override := strings.TrimSpace(os.Getenv("RELAY_VESSEL_BIN")); override != "" {
 		if fileExists(override) {
 			return filepath.Abs(override)
@@ -328,30 +346,47 @@ func ensureVesselBinary() (string, error) {
 		return "", fmt.Errorf("RELAY_VESSEL_BIN points to a missing file: %s", override)
 	}
 
-	if sourceDir := findVesselSourceDir(); sourceDir != "" {
+	if sourceDir := findstationSourceDir(); sourceDir != "" {
 		binaryPath := filepath.Join(sourceDir, stationBinaryName())
+		legacyBinaryPath := binaryPath
+		if len(stationBinaryCandidates()) > 1 {
+			legacyBinaryPath = filepath.Join(sourceDir, stationBinaryCandidates()[1])
+		}
 		stationBuildMu.Lock()
 		defer stationBuildMu.Unlock()
-		if vesselSourceNewerThanBinary(sourceDir, binaryPath) {
+		if stationSourceNewerThanBinary(sourceDir, binaryPath) && stationSourceNewerThanBinary(sourceDir, legacyBinaryPath) {
 			cmd := exec.Command("go", "build", "-o", binaryPath, ".")
 			cmd.Dir = sourceDir
 			setCmdHideWindow(cmd)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
-				return "", fmt.Errorf("build vessel from %s: %v (%s)", sourceDir, err, strings.TrimSpace(string(out)))
+				return "", fmt.Errorf("build station from %s: %v (%s)", sourceDir, err, strings.TrimSpace(string(out)))
 			}
 		}
-		return binaryPath, nil
+		if fileExists(binaryPath) {
+			return binaryPath, nil
+		}
+		if legacyBinaryPath != binaryPath && fileExists(legacyBinaryPath) {
+			return legacyBinaryPath, nil
+		}
 	}
 
 	if exe, err := os.Executable(); err == nil {
-		candidate := filepath.Join(filepath.Dir(exe), stationBinaryName())
-		if fileExists(candidate) {
-			return candidate, nil
+		exeDir := filepath.Dir(exe)
+		for _, name := range stationBinaryCandidates() {
+			candidate := filepath.Join(exeDir, name)
+			if fileExists(candidate) {
+				return candidate, nil
+			}
 		}
 	}
 
-	return "", fmt.Errorf("vessel source/binary not found; keep vessel beside relayd or set RELAY_VESSEL_BIN")
+	return "", fmt.Errorf("station source/binary not found; keep station beside relayd or set RELAY_STATION_BIN (RELAY_VESSEL_BIN is also supported)")
+}
+
+// ensureVesselBinary remains for backward compatibility with existing call sites.
+func ensureVesselBinary() (string, error) {
+	return ensurestationBinary()
 }
 
 func loadStationManifest(snapshotName string) (*stationManifest, error) {
@@ -369,20 +404,20 @@ func loadStationManifest(snapshotName string) (*stationManifest, error) {
 	return &manifest, nil
 }
 
-func vesselCommand(manifest *stationManifest) ([]string, error) {
+func stationCommand(manifest *stationManifest) ([]string, error) {
 	if manifest == nil {
-		return nil, fmt.Errorf("missing vessel manifest")
+		return nil, fmt.Errorf("missing station manifest")
 	}
 	cmd := make([]string, 0, len(manifest.Entrypoint)+len(manifest.Cmd))
 	cmd = append(cmd, manifest.Entrypoint...)
 	cmd = append(cmd, manifest.Cmd...)
 	if len(cmd) == 0 {
-		return nil, fmt.Errorf("vessel snapshot has no entrypoint/cmd")
+		return nil, fmt.Errorf("station snapshot has no entrypoint/cmd")
 	}
 	return cmd, nil
 }
 
-func mergeVesselEnv(manifestEnv, extraEnv map[string]string) []string {
+func mergestationEnv(manifestEnv, extraEnv map[string]string) []string {
 	merged := map[string]string{}
 	for key, value := range manifestEnv {
 		merged[key] = value
@@ -406,7 +441,7 @@ func stationContainerRunning(rec *stationContainerRecord) bool {
 	return rec != nil && rec.PID > 0 && pidAlive(rec.PID)
 }
 
-func loadVesselContainersByApp(appName string) ([]stationContainerRecord, error) {
+func loadstationContainersByApp(appName string) ([]stationContainerRecord, error) {
 	matches, err := filepath.Glob(filepath.Join(stationStateBaseDir(), "containers", "*", "config.json"))
 	if err != nil {
 		return nil, err
@@ -433,7 +468,7 @@ func loadVesselContainersByApp(appName string) ([]stationContainerRecord, error)
 }
 
 func latestStationContainerByApp(appName string) (*stationContainerRecord, error) {
-	records, err := loadVesselContainersByApp(appName)
+	records, err := loadstationContainersByApp(appName)
 	if err != nil || len(records) == 0 {
 		return nil, err
 	}
@@ -445,8 +480,8 @@ func latestStationContainerByApp(appName string) (*stationContainerRecord, error
 	return &records[0], nil
 }
 
-func loadVesselContainerByID(id string) (*stationContainerRecord, error) {
-	data, err := os.ReadFile(vesselContainerConfigPath(id))
+func loadstationContainerByID(id string) (*stationContainerRecord, error) {
+	data, err := os.ReadFile(stationContainerConfigPath(id))
 	if err != nil {
 		return nil, err
 	}
@@ -457,8 +492,8 @@ func loadVesselContainerByID(id string) (*stationContainerRecord, error) {
 	return &rec, nil
 }
 
-func loadVesselProxyRecord(app string) *stationProxyRecord {
-	data, err := os.ReadFile(vesselProxyConfigPath(app))
+func loadstationProxyRecord(app string) *stationProxyRecord {
+	data, err := os.ReadFile(stationProxyConfigPath(app))
 	if err != nil {
 		return nil
 	}
@@ -469,38 +504,38 @@ func loadVesselProxyRecord(app string) *stationProxyRecord {
 	return &rec
 }
 
-type vesselPortBinding struct {
+type stationPortBinding struct {
 	HostPort      int
 	ContainerPort int
 }
 
-func parseVesselPortBinding(binding string) vesselPortBinding {
+func parsestationPortBinding(binding string) stationPortBinding {
 	binding = strings.TrimSpace(binding)
 	if binding == "" {
-		return vesselPortBinding{}
+		return stationPortBinding{}
 	}
 	parts := strings.Split(binding, ":")
 	last := strings.TrimSpace(parts[len(parts)-1])
 	containerPort, _ := strconv.Atoi(last)
 	if len(parts) == 1 {
-		return vesselPortBinding{ContainerPort: containerPort}
+		return stationPortBinding{ContainerPort: containerPort}
 	}
 	hostPart := strings.TrimSpace(strings.Join(parts[:len(parts)-1], ":"))
 	if hostPart == "" {
-		return vesselPortBinding{ContainerPort: containerPort}
+		return stationPortBinding{ContainerPort: containerPort}
 	}
 	hostPortText := hostPart
 	if idx := strings.LastIndex(hostPart, ":"); idx >= 0 {
 		hostPortText = strings.TrimSpace(hostPart[idx+1:])
 	}
 	hostPort, _ := strconv.Atoi(hostPortText)
-	return vesselPortBinding{
+	return stationPortBinding{
 		HostPort:      hostPort,
 		ContainerPort: containerPort,
 	}
 }
 
-func vesselPortFromEnv(envs []string) int {
+func stationPortFromEnv(envs []string) int {
 	for _, pair := range envs {
 		if !strings.HasPrefix(pair, "PORT=") {
 			continue
@@ -513,16 +548,16 @@ func vesselPortFromEnv(envs []string) int {
 	return 0
 }
 
-func vesselSpecPort(spec ContainerSpec) int {
+func stationSpecPort(spec ContainerSpec) int {
 	for _, binding := range spec.PortBindings {
-		if port := parseVesselPortBinding(binding).ContainerPort; port > 0 {
+		if port := parsestationPortBinding(binding).ContainerPort; port > 0 {
 			return port
 		}
 	}
-	return vesselPortFromEnv(spec.Env)
+	return stationPortFromEnv(spec.Env)
 }
 
-func vesselFindFreePort() (int, error) {
+func stationFindFreePort() (int, error) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return 0, err
@@ -532,7 +567,7 @@ func vesselFindFreePort() (int, error) {
 	return port, nil
 }
 
-func vesselEnvWithResolvedPort(envs []string, port int) []string {
+func stationEnvWithResolvedPort(envs []string, port int) []string {
 	if port <= 0 {
 		return append([]string{}, envs...)
 	}
@@ -554,42 +589,42 @@ func vesselEnvWithResolvedPort(envs []string, port int) []string {
 	return out
 }
 
-func vesselResolvedRunPort(spec ContainerSpec) (int, []string, error) {
+func stationResolvedRunPort(spec ContainerSpec) (int, []string, error) {
 	envs := append([]string{}, spec.Env...)
 	bridgeMode := spec.Network != "" && runtime.GOOS != "windows"
 	for _, binding := range spec.PortBindings {
-		parsed := parseVesselPortBinding(binding)
+		parsed := parsestationPortBinding(binding)
 		if parsed.ContainerPort <= 0 {
 			continue
 		}
 		if bridgeMode {
-			return parsed.ContainerPort, vesselEnvWithResolvedPort(envs, parsed.ContainerPort), nil
+			return parsed.ContainerPort, stationEnvWithResolvedPort(envs, parsed.ContainerPort), nil
 		}
 		hostPort := parsed.HostPort
 		if hostPort <= 0 {
 			var err error
-			hostPort, err = vesselFindFreePort()
+			hostPort, err = stationFindFreePort()
 			if err != nil {
 				return 0, nil, err
 			}
 		}
-		return hostPort, vesselEnvWithResolvedPort(envs, hostPort), nil
+		return hostPort, stationEnvWithResolvedPort(envs, hostPort), nil
 	}
-	return vesselPortFromEnv(envs), envs, nil
+	return stationPortFromEnv(envs), envs, nil
 }
 
 func stationRuntimeLogPath(name string) string {
-	if rec := loadVesselProxyRecord(name); rec != nil {
-		return vesselProxyLogPath(name)
+	if rec := loadstationProxyRecord(name); rec != nil {
+		return stationProxyLogPath(name)
 	}
 	rec, err := latestStationContainerByApp(name)
 	if err != nil || rec == nil {
 		return ""
 	}
-	return vesselContainerLogPath(rec.ID)
+	return stationContainerLogPath(rec.ID)
 }
 
-func vesselSlotUpstream(runtime ContainerRuntime, name string, port int) string {
+func stationSlotUpstream(runtime ContainerRuntime, name string, port int) string {
 	if ip := strings.TrimSpace(runtime.ContainerIP(name)); ip != "" {
 		return net.JoinHostPort(ip, strconv.Itoa(firstNonZero(port, 3000)))
 	}
@@ -610,7 +645,7 @@ func stripWSLNulls(b []byte) string {
 	return string(out)
 }
 
-func vesselWSLDistro() string {
+func stationWSLDistro() string {
 	if runtime.GOOS != "windows" {
 		return ""
 	}
@@ -639,6 +674,11 @@ func vesselWSLDistro() string {
 		return fallback
 	}
 	return "station-linux"
+}
+
+// vesselWSLDistro remains for backward compatibility with existing call sites.
+func vesselWSLDistro() string {
+	return stationWSLDistro()
 }
 
 func (r *StationRuntime) probeBridgeAddress(ip string, port int) bool {
@@ -712,7 +752,7 @@ func waitForPort(log func(string, ...any), port int, timeout time.Duration, labe
 	return fmt.Errorf("%s did not become ready on port %d within %s", label, port, timeout)
 }
 
-func vesselExec(bin string, args ...string) (string, error) {
+func stationExec(bin string, args ...string) (string, error) {
 	cmd := exec.Command(bin, args...)
 	setCmdHideWindow(cmd)
 	out, err := runCommandCaptured(cmd)
@@ -723,14 +763,14 @@ func vesselExec(bin string, args ...string) (string, error) {
 }
 
 func (r *StationRuntime) binary() (string, error) {
-	return ensureVesselBinary()
+	return ensurestationBinary()
 }
 
 func (r *StationRuntime) command(bin string, args ...string) *exec.Cmd {
 	cmd := exec.Command(bin, args...)
 	setCmdHideWindow(cmd)
 	if base := strings.TrimSpace(r.volumeBaseDir); base != "" {
-		cmd.Env = append(os.Environ(), "VESSEL_VOLUME_BASE="+base)
+		cmd.Env = append(os.Environ(), "STATION_VOLUME_BASE="+base, "VESSEL_VOLUME_BASE="+base)
 	}
 	return cmd
 }
@@ -754,7 +794,7 @@ func (r *StationRuntime) runWithTimeout(timeout time.Duration, args ...string) (
 	cmd := exec.CommandContext(ctx, bin, args...)
 	setCmdHideWindow(cmd)
 	if base := strings.TrimSpace(r.volumeBaseDir); base != "" {
-		cmd.Env = append(os.Environ(), "VESSEL_VOLUME_BASE="+base)
+		cmd.Env = append(os.Environ(), "station_VOLUME_BASE="+base)
 	}
 	return runCommandCaptured(cmd)
 }
@@ -780,9 +820,9 @@ func runDetachedViaAgent(spec ContainerSpec) (bool, error) {
 	if len(spec.PortBindings) > 0 {
 		netMode = "host" // published ports must bind in the WSL host namespace
 	}
-	port, envs, portErr := vesselResolvedRunPort(spec)
+	port, envs, portErr := stationResolvedRunPort(spec)
 	if portErr != nil {
-		return true, fmt.Errorf("resolve vessel port for %s: %w", spec.Name, portErr)
+		return true, fmt.Errorf("resolve station port for %s: %w", spec.Name, portErr)
 	}
 	req := agentRunContainerReq{
 		App:        spec.Name,
@@ -825,9 +865,9 @@ func (r *StationRuntime) RunDetached(spec ContainerSpec) error {
 		// keeps the listener inside an internal namespace that Windows cannot dial.
 		args = append(args, "--net", "host")
 	}
-	port, envs, err := vesselResolvedRunPort(spec)
+	port, envs, err := stationResolvedRunPort(spec)
 	if err != nil {
-		return fmt.Errorf("resolve vessel port for %s: %w", spec.Name, err)
+		return fmt.Errorf("resolve station port for %s: %w", spec.Name, err)
 	}
 	if port > 0 {
 		args = append(args, "--port", strconv.Itoa(port))
@@ -848,7 +888,7 @@ func (r *StationRuntime) RunDetached(spec ContainerSpec) error {
 
 	out, err := r.runWithTimeout(2*time.Minute, args...)
 	if err != nil {
-		return fmt.Errorf("vessel run %s: %v (%s)", spec.Name, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("station run %s: %v (%s)", spec.Name, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -862,10 +902,10 @@ func (r *StationRuntime) Remove(name string) {
 	}
 	// Legacy path.
 	if bin, err := r.binary(); err == nil {
-		_, _ = vesselExec(bin, "proxy", "stop", name)
-		records, _ := loadVesselContainersByApp(name)
+		_, _ = stationExec(bin, "proxy", "stop", name)
+		records, _ := loadstationContainersByApp(name)
 		for _, rec := range records {
-			_, _ = vesselExec(bin, "stop", rec.ID)
+			_, _ = stationExec(bin, "stop", rec.ID)
 		}
 	}
 }
@@ -874,7 +914,7 @@ func (r *StationRuntime) IsRunning(name string) bool {
 	if rec, err := latestStationContainerByApp(name); err == nil && stationContainerRunning(rec) {
 		return true
 	}
-	if proxy := loadVesselProxyRecord(name); proxy != nil && proxy.PID > 0 && pidAlive(proxy.PID) {
+	if proxy := loadstationProxyRecord(name); proxy != nil && proxy.PID > 0 && pidAlive(proxy.PID) {
 		return true
 	}
 	return false
@@ -889,7 +929,7 @@ func (r *StationRuntime) ContainerIP(name string) string {
 }
 
 func (r *StationRuntime) PublishedPort(name string, containerPort int) int {
-	if proxy := loadVesselProxyRecord(name); proxy != nil {
+	if proxy := loadstationProxyRecord(name); proxy != nil {
 		return proxy.ProxyPort
 	}
 	rec, err := latestStationContainerByApp(name)
@@ -904,20 +944,20 @@ func (r *StationRuntime) PublishedPort(name string, containerPort int) int {
 
 func (r *StationRuntime) Exec(container string, cmd []string) ([]byte, error) {
 	if len(cmd) == 0 {
-		return nil, fmt.Errorf("vessel exec requires a command")
+		return nil, fmt.Errorf("station exec requires a command")
 	}
 	target := strings.TrimSpace(container)
 	if target == "" {
-		return nil, fmt.Errorf("vessel exec requires a container name")
+		return nil, fmt.Errorf("station exec requires a container name")
 	}
-	if rec, err := loadVesselContainerByID(target); err == nil && stationContainerRunning(rec) {
+	if rec, err := loadstationContainerByID(target); err == nil && stationContainerRunning(rec) {
 		target = rec.ID
 	} else if rec, err := latestStationContainerByApp(target); err == nil && rec != nil && stationContainerRunning(rec) {
 		target = rec.ID
-	} else if proxy := loadVesselProxyRecord(target); proxy != nil && proxy.PID > 0 && pidAlive(proxy.PID) {
-		return nil, fmt.Errorf("vessel exec does not support proxy process %s", container)
+	} else if proxy := loadstationProxyRecord(target); proxy != nil && proxy.PID > 0 && pidAlive(proxy.PID) {
+		return nil, fmt.Errorf("station exec does not support proxy process %s", container)
 	} else {
-		return nil, fmt.Errorf("no running vessel container for %s", container)
+		return nil, fmt.Errorf("no running station container for %s", container)
 	}
 	args := append([]string{"exec", target}, cmd...)
 	return r.run(args...)
@@ -1100,18 +1140,18 @@ func (s *Server) buildStationSnapshot(repoDir, dockerfilePath, snapshotName stri
 	// copy, no manifest stub, no separate wsl.exe snapshot-save call.
 	if runtime.GOOS == "windows" {
 		if agent, err := getStationAgent(); err == nil && agent != nil {
-			fmt.Fprintf(logw, "[build] delegating to vessel daemon (WSL2)\n")
+			fmt.Fprintf(logw, "[build] delegating to station daemon (WSL2)\n")
 			m, agentErr := agent.BuildDockerfile(dockerfilePath, repoDir, snapshotName, logw)
 			if agentErr == nil {
 				return m, nil
 			}
-			fmt.Fprintf(logw, "[vessel] warn: daemon build failed (%v); falling back to wsl.exe path\n", agentErr)
+			fmt.Fprintf(logw, "[station] warn: daemon build failed (%v); falling back to wsl.exe path\n", agentErr)
 			resetStationAgent()
 		}
 	}
 
 	// ── Legacy path (non-Windows or daemon unavailable) ───────────────────────
-	bin, err := ensureVesselBinary()
+	bin, err := ensurestationBinary()
 	if err != nil {
 		return nil, err
 	}
@@ -1120,10 +1160,10 @@ func (s *Server) buildStationSnapshot(repoDir, dockerfilePath, snapshotName stri
 		vr = newStationRuntime(s.dataDir)
 	}
 
-	buildDir := filepath.Join(s.dataDir, "vessel-builds", snapshotName)
+	buildDir := filepath.Join(s.dataDir, "station-builds", snapshotName)
 	_ = os.RemoveAll(buildDir)
 	if err := os.MkdirAll(buildDir, 0755); err != nil {
-		return nil, fmt.Errorf("create vessel build dir: %w", err)
+		return nil, fmt.Errorf("create station build dir: %w", err)
 	}
 	defer os.RemoveAll(buildDir)
 
@@ -1132,17 +1172,17 @@ func (s *Server) buildStationSnapshot(repoDir, dockerfilePath, snapshotName stri
 	buildCmd.Stdout = logw
 	buildCmd.Stderr = logw
 	if err := buildCmd.Run(); err != nil {
-		return nil, fmt.Errorf("vessel build-dockerfile failed: %w", err)
+		return nil, fmt.Errorf("station build-dockerfile failed: %w", err)
 	}
 
 	// Windows WSL2 fast-save: if the build wrote output to a WSL2-internal
 	// directory, save the snapshot there via hardlinks (ext4 → ext4, instant).
 	if runtime.GOOS == "windows" {
 		if wslBuildDir, err := wslBuildDirFromBreadcrumb(buildDir); err == nil {
-			if distro := vesselWSLDistro(); distro != "" {
+			if distro := stationWSLDistro(); distro != "" {
 				if snapErr := wslSaveSnapshot(distro, snapshotName, wslBuildDir, logw); snapErr == nil {
 					if serr := wslWriteWindowsManifestStub(snapshotName, buildDir); serr != nil {
-						fmt.Fprintf(logw, "[vessel] warn: manifest stub: %v\n", serr)
+						fmt.Fprintf(logw, "[station] warn: manifest stub: %v\n", serr)
 					}
 					cleanCmd := exec.Command("wsl.exe", "-d", distro, "--", "sh", "-c",
 						"rm -rf "+shqSimple(wslBuildDir))
@@ -1150,7 +1190,7 @@ func (s *Server) buildStationSnapshot(repoDir, dockerfilePath, snapshotName stri
 					_ = cleanCmd.Run()
 					return loadStationManifest(snapshotName)
 				}
-				fmt.Fprintf(logw, "[vessel] warn: WSL2 fast snapshot save failed; falling back to Windows save\n")
+				fmt.Fprintf(logw, "[station] warn: WSL2 fast snapshot save failed; falling back to Windows save\n")
 			}
 		}
 	}
@@ -1162,10 +1202,10 @@ func (s *Server) buildStationSnapshot(repoDir, dockerfilePath, snapshotName stri
 	saveCmd.Stdout = logw
 	saveCmd.Stderr = logw
 	if err := saveCmd.Run(); err != nil {
-		return nil, fmt.Errorf("vessel snapshot save failed: %w", err)
+		return nil, fmt.Errorf("station snapshot save failed: %w", err)
 	}
 	if runtime.GOOS == "windows" {
-		if distro := vesselWSLDistro(); distro != "" {
+		if distro := stationWSLDistro(); distro != "" {
 			syncSnapshotToWSL2(distro, snapshotName, logw)
 		}
 	}
@@ -1180,16 +1220,16 @@ func (s *Server) stopStationLane(app string, env DeployEnv, branch string) error
 		appSlotContainerName(app, env, branch, "blue"),
 		appSlotContainerName(app, env, branch, "green"),
 		stationAppName(app, env, branch),
-		vesselProxyName(app, env, branch),
+		stationProxyName(app, env, branch),
 	} {
 		runtime.Remove(name)
 	}
 	return nil
 }
 
-// vesselProxyParams bundles the arguments shared by all proxy-related helpers,
+// stationProxyParams bundles the arguments shared by all proxy-related helpers,
 // keeping individual function signatures under the 7-parameter limit.
-type vesselProxyParams struct {
+type stationProxyParams struct {
 	app         string
 	env         DeployEnv
 	branch      string
@@ -1203,17 +1243,17 @@ type vesselProxyParams struct {
 	recreate    bool
 }
 
-// ensureVesselEdgeProxyViaAgent attempts to start or swap the edge proxy
+// ensurestationEdgeProxyViaAgent attempts to start or swap the edge proxy
 // through the long-lived WSL2 daemon.  Returns (true, err) when the agent
 // handled the request, or (false, nil) to fall through to the legacy path.
-func (s *Server) ensureVesselEdgeProxyViaAgent(log func(string, ...any), vrt ContainerRuntime, p vesselProxyParams) (bool, error) {
+func (s *Server) ensurestationEdgeProxyViaAgent(log func(string, ...any), vrt ContainerRuntime, p stationProxyParams) (bool, error) {
 	agent, agentErr := getStationAgent()
 	if agentErr != nil || agent == nil {
 		return false, nil
 	}
 	proxyName := appBaseContainerName(p.app, p.env, p.branch)
 	targetPort := firstNonZero(p.hostPort, defaultHostPort(p.env))
-	activeUpstream := vesselSlotUpstream(vrt, appSlotContainerName(p.app, p.env, p.branch, p.activeSlot), p.servicePort)
+	activeUpstream := stationSlotUpstream(vrt, appSlotContainerName(p.app, p.env, p.branch, p.activeSlot), p.servicePort)
 
 	var proxyOpErr error
 	if p.recreate || !vrt.IsRunning(proxyName) {
@@ -1231,7 +1271,7 @@ func (s *Server) ensureVesselEdgeProxyViaAgent(log func(string, ...any), vrt Con
 	return true, nil
 }
 
-func agentProxyStart(agent *stationAgent, vrt ContainerRuntime, proxyName, activeUpstream string, targetPort int, p vesselProxyParams) error {
+func agentProxyStart(agent *stationAgent, vrt ContainerRuntime, proxyName, activeUpstream string, targetPort int, p stationProxyParams) error {
 	vrt.Remove(proxyName)
 	req := agentProxyReq{
 		App:            proxyName,
@@ -1242,7 +1282,7 @@ func agentProxyStart(agent *stationAgent, vrt ContainerRuntime, proxyName, activ
 		CookieName:     edgeCookieName(p.app, p.env, p.branch),
 	}
 	if p.standbySlot != "" {
-		req.StandbyUpstream = vesselSlotUpstream(vrt, appSlotContainerName(p.app, p.env, p.branch, p.standbySlot), p.servicePort)
+		req.StandbyUpstream = stationSlotUpstream(vrt, appSlotContainerName(p.app, p.env, p.branch, p.standbySlot), p.servicePort)
 		req.StandbySlot = p.standbySlot
 	}
 	if strings.ToLower(strings.TrimSpace(p.mode)) == "traefik" && strings.TrimSpace(p.publicHost) != "" {
@@ -1252,7 +1292,7 @@ func agentProxyStart(agent *stationAgent, vrt ContainerRuntime, proxyName, activ
 	return err
 }
 
-func agentProxySwap(agent *stationAgent, vrt ContainerRuntime, proxyName, activeUpstream string, p vesselProxyParams) error {
+func agentProxySwap(agent *stationAgent, vrt ContainerRuntime, proxyName, activeUpstream string, p stationProxyParams) error {
 	req := agentProxyReq{
 		App:            proxyName,
 		ActiveUpstream: activeUpstream,
@@ -1261,7 +1301,7 @@ func agentProxySwap(agent *stationAgent, vrt ContainerRuntime, proxyName, active
 		CookieName:     edgeCookieName(p.app, p.env, p.branch),
 	}
 	if p.standbySlot != "" {
-		req.StandbyUpstream = vesselSlotUpstream(vrt, appSlotContainerName(p.app, p.env, p.branch, p.standbySlot), p.servicePort)
+		req.StandbyUpstream = stationSlotUpstream(vrt, appSlotContainerName(p.app, p.env, p.branch, p.standbySlot), p.servicePort)
 		req.StandbySlot = p.standbySlot
 	} else {
 		req.ClearStandby = true
@@ -1274,7 +1314,7 @@ func agentProxySwap(agent *stationAgent, vrt ContainerRuntime, proxyName, active
 	return agent.ProxySwap(req)
 }
 
-func (s *Server) ensureVesselEdgeProxy(log func(string, ...any), app string, env DeployEnv, branch string, activeSlot string, standbySlot string, servicePort int, hostPort int, mode string, trafficMode string, publicHost string, recreate bool) error {
+func (s *Server) ensurestationEdgeProxy(log func(string, ...any), app string, env DeployEnv, branch string, activeSlot string, standbySlot string, servicePort int, hostPort int, mode string, trafficMode string, publicHost string, recreate bool) error {
 	runtime := s.runtimeForEngine(EngineStation)
 	activeSlot = normalizeActiveSlot(activeSlot)
 	standbySlot = normalizeActiveSlot(standbySlot)
@@ -1289,7 +1329,7 @@ func (s *Server) ensureVesselEdgeProxy(log func(string, ...any), app string, env
 	}
 
 	// ── Agent fast path ───────────────────────────────────────────────────────
-	if done, err := s.ensureVesselEdgeProxyViaAgent(log, runtime, vesselProxyParams{
+	if done, err := s.ensurestationEdgeProxyViaAgent(log, runtime, stationProxyParams{
 		app: app, env: env, branch: branch,
 		activeSlot: activeSlot, standbySlot: standbySlot,
 		servicePort: servicePort, hostPort: hostPort,
@@ -1299,13 +1339,13 @@ func (s *Server) ensureVesselEdgeProxy(log func(string, ...any), app string, env
 		return err
 	}
 
-	bin, err := ensureVesselBinary()
+	bin, err := ensurestationBinary()
 	if err != nil {
 		return err
 	}
 
 	proxyName := appBaseContainerName(app, env, branch)
-	activeUpstream := vesselSlotUpstream(runtime, appSlotContainerName(app, env, branch, activeSlot), servicePort)
+	activeUpstream := stationSlotUpstream(runtime, appSlotContainerName(app, env, branch, activeSlot), servicePort)
 	args := []string{"proxy"}
 	if recreate || !runtime.IsRunning(proxyName) {
 		runtime.Remove(proxyName)
@@ -1321,7 +1361,7 @@ func (s *Server) ensureVesselEdgeProxy(log func(string, ...any), app string, env
 	)
 	if standbySlot != "" {
 		args = append(args,
-			"--standby-upstream", vesselSlotUpstream(runtime, appSlotContainerName(app, env, branch, standbySlot), servicePort),
+			"--standby-upstream", stationSlotUpstream(runtime, appSlotContainerName(app, env, branch, standbySlot), servicePort),
 			"--standby-slot", standbySlot,
 		)
 	} else {
@@ -1333,8 +1373,8 @@ func (s *Server) ensureVesselEdgeProxy(log func(string, ...any), app string, env
 		args = append(args, "--clear-public-host")
 	}
 
-	if out, err := vesselExec(bin, args...); err != nil {
-		return fmt.Errorf("vessel proxy update failed: %w", err)
+	if out, err := stationExec(bin, args...); err != nil {
+		return fmt.Errorf("station proxy update failed: %w", err)
 	} else if log != nil && strings.TrimSpace(out) != "" {
 		for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 			log(line)
@@ -1346,12 +1386,12 @@ func (s *Server) ensureVesselEdgeProxy(log func(string, ...any), app string, env
 	return nil
 }
 
-func (s *Server) cleanupVesselStandbySlotAfter(app string, env DeployEnv, branch string, activeSlot string, oldSlot string, servicePort int, hostPort int, mode string, trafficMode string, publicHost string, wait time.Duration) {
+func (s *Server) cleanupstationStandbySlotAfter(app string, env DeployEnv, branch string, activeSlot string, oldSlot string, servicePort int, hostPort int, mode string, trafficMode string, publicHost string, wait time.Duration) {
 	runtime := s.runtimeForEngine(EngineStation)
 	name := appSlotContainerName(app, env, branch, oldSlot)
 	cleanup := func() {
 		runtime.Remove(name)
-		_ = s.ensureVesselEdgeProxy(nil, app, env, branch, activeSlot, "", servicePort, hostPort, mode, trafficMode, publicHost, false)
+		_ = s.ensurestationEdgeProxy(nil, app, env, branch, activeSlot, "", servicePort, hostPort, mode, trafficMode, publicHost, false)
 		if st, err := s.getAppState(app, env, branch); err == nil && st != nil {
 			if normalizeActiveSlot(st.ActiveSlot) == normalizeActiveSlot(activeSlot) && normalizeActiveSlot(st.StandbySlot) == normalizeActiveSlot(oldSlot) {
 				st.StandbySlot = ""
@@ -1379,7 +1419,7 @@ func (s *Server) runStationApp(log func(string, ...any), req DeployRequest, snap
 	trafficMode := firstNonEmpty(normalizeTrafficMode(req.TrafficMode), "edge")
 	networkName := appNetworkName(req.App, req.Env, req.Branch)
 	if err := runtime.EnsureNetwork(networkName); err != nil {
-		return fmt.Errorf("ensure vessel network: %w", err)
+		return fmt.Errorf("ensure station network: %w", err)
 	}
 
 	state, _ := s.getAppState(req.App, req.Env, req.Branch)
@@ -1407,7 +1447,7 @@ func (s *Server) runStationApp(log func(string, ...any), req DeployRequest, snap
 	if !recreateProxy && edgeProxyPublishedPortChanged(runtime, req.App, req.Env, req.Branch, hostPort, mode) {
 		recreateProxy = true
 	}
-	if err := s.ensureVesselEdgeProxy(log, req.App, req.Env, req.Branch, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, recreateProxy); err != nil {
+	if err := s.ensurestationEdgeProxy(log, req.App, req.Env, req.Branch, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, recreateProxy); err != nil {
 		runtime.Remove(candidateName)
 		return err
 	}
@@ -1422,7 +1462,7 @@ func (s *Server) runStationApp(log func(string, ...any), req DeployRequest, snap
 			_ = s.saveAppState(state)
 			s.broadcastSnapshot()
 		}
-		s.cleanupVesselStandbySlotAfter(req.App, req.Env, req.Branch, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, rolloutDrainDuration())
+		s.cleanupstationStandbySlotAfter(req.App, req.Env, req.Branch, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, rolloutDrainDuration())
 	} else if state != nil {
 		state.ActiveSlot = nextSlot
 		state.StandbySlot = ""
@@ -1686,11 +1726,10 @@ func (s *Server) stationRuntimeLogTargets(app string, env DeployEnv, branch stri
 	case lane.AppStopped:
 		lane.OfflineReason = "This app lane is currently off. Start or redeploy it to resume runtime logs."
 	case !lane.AppRunning && activeSlot != "":
-		lane.OfflineReason = fmt.Sprintf("Relay cannot find a running Vessel container for the live %s app slot.", activeSlot)
+		lane.OfflineReason = fmt.Sprintf("Relay cannot find a running station container for the live %s app slot.", activeSlot)
 	case !lane.AppRunning:
-		lane.OfflineReason = "Relay cannot find a running Vessel app container for this lane."
+		lane.OfflineReason = "Relay cannot find a running station app container for this lane."
 	}
 
 	return targets, lane, nil
 }
-
