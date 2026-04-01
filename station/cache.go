@@ -75,6 +75,13 @@ func hardlinkCopy(src, dst string) error {
 			return os.MkdirAll(target, info.Mode())
 		}
 
+		// Skip special files (devices, sockets, named pipes, etc.) — they
+		// cannot be meaningfully copied and opening them may return errors
+		// (e.g. /dev/autofs returns "invalid argument" on read).
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+
 		// Regular file: hard-link to reuse the inode.
 		_ = os.Remove(target) // unlink stale copy first
 		if err := os.Link(path, target); err != nil {
@@ -192,4 +199,3 @@ func prepareImageWorkdir(image, containerID string) (string, error) {
 	}
 	return dest, nil
 }
-
