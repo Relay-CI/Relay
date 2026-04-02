@@ -40,6 +40,8 @@ relay init
 relay deploy --stream
 ```
 
+> **⚠️ Engine selection:** when `relay init` asks which engine to use, choose **docker**. The Station engine is under active development and is currently unstable — deploys may be slow or fail. Do not switch to Station in the dashboard until a stable release is announced.
+
 ## Commands
 
 ```

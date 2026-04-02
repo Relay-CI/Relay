@@ -113,6 +113,8 @@ Common flags (all commands): `--url` `--token` `--app` `--env` `--branch` `--dir
 | **Docker** | Production — full feature set on any host |
 | **Station** | Fast local / WSL2 — snapshot-based, instant rollout |
 
+> **⚠️ Use Docker.** Station is under active development and is currently unstable — deploys can be slow or fail unexpectedly. When `relay init` asks which engine to use, pick **docker**. Do not switch to Station in the dashboard until a stable release is announced.
+
 Switch per app in the dashboard under **Settings → Runtime / Routing**.
 
 ---
