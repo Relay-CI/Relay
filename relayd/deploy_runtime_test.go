@@ -274,10 +274,10 @@ func TestEdgeProxyPublishedPortChanged(t *testing.T) {
 		published: map[string]int{containerName: 3003},
 	}
 
-	if !edgeProxyPublishedPortChanged(runtime, "demo", EnvPreview, "main", 3002, "port") {
+	if !edgeProxyPublishedPortChanged(runtime, "demo", EnvPreview, "main", 3002, "port", "") {
 		t.Fatalf("expected published port mismatch to require edge proxy recreation")
 	}
-	if edgeProxyPublishedPortChanged(runtime, "demo", EnvPreview, "main", 3003, "port") {
+	if edgeProxyPublishedPortChanged(runtime, "demo", EnvPreview, "main", 3003, "port", "") {
 		t.Fatalf("matching published port should not require edge proxy recreation")
 	}
 }
