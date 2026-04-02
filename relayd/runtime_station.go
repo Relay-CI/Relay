@@ -1262,7 +1262,10 @@ func (s *Server) buildStationSnapshot(repoDir, dockerfilePath, snapshotName stri
 		vr = newStationRuntime(s.dataDir)
 	}
 
-	buildDir := filepath.Join(s.dataDir, "station-builds", snapshotName)
+	// Use the station tmpfs base dir (same filesystem as the OCI cache, overlays,
+	// and snapshot store) so materializeStageRootfs and snapshot save can use
+	// hardlinks instead of byte-for-byte file copies across filesystems.
+	buildDir := filepath.Join(stationStateBaseDir(), "station-builds", snapshotName)
 	_ = os.RemoveAll(buildDir)
 	if err := os.MkdirAll(buildDir, 0755); err != nil {
 		return nil, fmt.Errorf("create station build dir: %w", err)

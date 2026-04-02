@@ -321,7 +321,15 @@ async function runSetupWizard(args, cfgPath) {
   const env    = await prompt("Env     ", args.env    || process.env.RELAY_ENV    || "preview");
   const branch = await prompt("Branch  ", args.branch || process.env.RELAY_BRANCH || "main");
 
-  // ── 3. Confirm save ──
+  // ── 3. Engine ──
+  console.log("");
+  const engineRaw = await prompt(
+    `Engine   ${c.dim}[vessel = Relay native runtime,  docker = Docker]${c.reset}`,
+    args.engine || process.env.RELAY_ENGINE || "vessel"
+  );
+  const engine = engineRaw.toLowerCase().startsWith("d") ? "docker" : "vessel";
+
+  // ── 4. Confirm save ──
   console.log("");
   const saveRaw = await prompt(`Save to ${path.basename(cfgPath)}?`, "yes");
   if (saveRaw.toLowerCase().startsWith("y")) {
@@ -332,12 +340,13 @@ async function runSetupWizard(args, cfgPath) {
     if (app)    cfg.app    = app;
     if (env)    cfg.env    = env;
     if (branch) cfg.branch = branch;
+    cfg.engine = engine;
     await fsp.writeFile(cfgPath, JSON.stringify(cfg, null, 2), "utf8");
     ok(`Saved ${cfgPath}`);
   }
   console.log("");
 
-  return { socket, url, token, app, env, branch };
+  return { socket, url, token, app, env, branch, engine };
 }
 
 /**
@@ -369,6 +378,7 @@ async function resolveOrSetup(args, { needDeploy = false } = {}) {
     if (wiz.app)    args.app    = wiz.app;
     if (wiz.env)    args.env    = wiz.env;
     if (wiz.branch) args.branch = wiz.branch;
+    if (wiz.engine) args.engine = wiz.engine;
     try {
       const transport = resolveTransport(args);
       const resolved  = needDeploy ? resolveDeployArgs(args) : null;
@@ -680,8 +690,10 @@ ${c.bold}TRANSPORT FLAGS${c.reset} (global, apply to all commands)
 
 ${c.bold}COMMANDS${c.reset}
   ${c.cyan}init${c.reset}                         Write .relay.json with current flag values
+    --engine <vessel|docker>     Runtime engine (default: vessel)
   ${c.cyan}deploy${c.reset}                       Sync workspace and build + roll out
     --app   --env  --branch  --dir
+    --engine <vessel|docker>
     --mode  --host-port  --service-port  --public-host
     --install-cmd  --build-cmd  --start-cmd
     --stream                 Stream build logs until complete
@@ -801,6 +813,7 @@ async function main() {
       if (args.app    || process.env.RELAY_APP)    cfgOut.app    = args.app    || process.env.RELAY_APP;
       if (args.env    || process.env.RELAY_ENV)    cfgOut.env    = args.env    || process.env.RELAY_ENV    || "preview";
       if (args.branch || process.env.RELAY_BRANCH) cfgOut.branch = args.branch || process.env.RELAY_BRANCH || "main";
+      if (args.engine || process.env.RELAY_ENGINE) cfgOut.engine = args.engine || process.env.RELAY_ENGINE;
       if (args.dir)                                cfgOut.dir    = args.dir;
       await fsp.writeFile(cfgPath, JSON.stringify(cfgOut, null, 2), "utf8");
       ok(`Wrote ${cfgPath}`);
@@ -1188,6 +1201,7 @@ async function main() {
   const installCmd  = args["install-cmd"] || localDefaults?.install_cmd || cfg?.install_cmd || "";
   const buildCmd    = args["build-cmd"]   || localDefaults?.build_cmd   || cfg?.build_cmd   || "";
   const startCmd    = args["start-cmd"]   || localDefaults?.start_cmd   || cfg?.start_cmd   || "";
+  const engine      = args.engine         || localDefaults?.engine      || cfg?.engine      || "";
 
   const via = transport.kind === "socket" ? `socket:${transport.socketPath}` : transport.baseUrl;
   info(`deploying ${c.bold}${app}${c.reset}  env=${env} branch=${branch}  via ${c.dim}${via}${c.reset}`);
@@ -1241,6 +1255,7 @@ async function main() {
     build_cmd: buildCmd,
     start_cmd: startCmd,
   };
+  if (engine) deployPayload.engine = engine;
   if (hasModeOverride) deployPayload.mode = mode;
   if (hasHostPortOverride) deployPayload.host_port = hostPort;
   if (hasServicePortOverride) deployPayload.service_port = servicePort;

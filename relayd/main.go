@@ -216,6 +216,7 @@ type DeployRequest struct {
 	Mode        string `json:"mode"`         // "traefik" or "port"
 	TrafficMode string `json:"traffic_mode"` // "edge" or "session"
 	Source      string `json:"source"`       // "git" or "sync"
+	Engine      string `json:"engine"`       // "docker" or "station"/"vessel"; overrides stored app state when set
 }
 
 type Deploy struct {
@@ -4587,8 +4588,22 @@ func (s *Server) handleSyncFinish(w http.ResponseWriter, r *http.Request) {
 		InstallCmd  string `json:"install_cmd"`
 		BuildCmd    string `json:"build_cmd"`
 		StartCmd    string `json:"start_cmd"`
+		Engine      string `json:"engine,omitempty"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	// Persist engine preference to app state when provided so that runDeploy
+	// picks it up even if no prior app state exists (first deploy of a new project).
+	if body.Engine != "" {
+		if eng := normalizeEngine(body.Engine); eng != "" {
+			st, _ := s.getAppState(sess.App, sess.Env, sess.Branch)
+			if st == nil {
+				st = &AppState{App: sess.App, Env: sess.Env, Branch: sess.Branch}
+			}
+			st.Engine = eng
+			_ = s.saveAppState(st)
+		}
+	}
 
 	deployID := newID()
 	logPath := filepath.Join(s.logsDir, deployID+".log")
@@ -4615,6 +4630,7 @@ func (s *Server) handleSyncFinish(w http.ResponseWriter, r *http.Request) {
 		InstallCmd:       body.InstallCmd,
 		BuildCmd:         body.BuildCmd,
 		StartCmd:         body.StartCmd,
+		Engine:           normalizeEngine(body.Engine),
 	}
 
 	s.mu.Lock()
@@ -5649,7 +5665,9 @@ func (s *Server) runDeploy(job DeployJob) {
 		}
 	}
 	engine := detectDefaultEngine()
-	if state != nil {
+	if req.Engine != "" {
+		engine = firstNonEmptyEngine(req.Engine)
+	} else if state != nil {
 		engine = firstNonEmptyEngine(state.Engine)
 	}
 	constrainDeployRequestForEngine(engine, &req)
