@@ -605,6 +605,7 @@ type Server struct {
 	workspacesDir         string
 	logsDir               string
 	pluginsDir            string
+	acmeWebroot           string
 	httpAddr              string
 	corsOrigins           map[string]struct{}
 	allowAllCORS          bool
@@ -3132,6 +3133,7 @@ func main() {
 		workspacesDir:         filepath.Join(dataDir, "workspaces"),
 		logsDir:               filepath.Join(dataDir, "logs"),
 		pluginsDir:            filepath.Join(dataDir, "plugins"),
+		acmeWebroot:           filepath.Join(dataDir, "acme-webroot"),
 		httpAddr:              getenv("RELAY_ADDR", ":8080"),
 		corsOrigins:           map[string]struct{}{},
 		allowAllCORS:          false,
@@ -3149,6 +3151,7 @@ func main() {
 	mustMkdir(s.workspacesDir)
 	mustMkdir(s.logsDir)
 	mustMkdir(s.pluginsDir)
+	mustMkdir(s.acmeWebroot)
 	mustMkdir(s.pluginBuildpacksDir())
 	if err := s.reloadBuildpacks(); err != nil {
 		panic(err)
@@ -3171,6 +3174,9 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/api/version", s.handleVersion)
+	mux.Handle("/.well-known/acme-challenge/",
+		http.StripPrefix("/.well-known/acme-challenge/",
+			http.FileServer(http.Dir(s.acmeWebroot))))
 
 	// UI
 	uiRoot, _ := fs.Sub(uiFS, "ui")
@@ -3302,6 +3308,10 @@ func main() {
 		addr = runCfg.Addr
 	}
 	s.httpAddr = addr
+	// Start the lightweight ACME / HTTP-01 listener on :80 (best-effort; if
+	// the port is already taken by Caddy via Docker, it logs a notice and
+	// continues without it).
+	go s.startACMEListener()
 	httpServer := &http.Server{
 		Addr:    addr,
 		Handler: s.withCORS(mux),
@@ -6921,6 +6931,50 @@ func (s *Server) cleanupStandbySlotAfter(app string, env DeployEnv, branch strin
 // ensureGlobalProxy maintains a Caddy container that routes public_host domains
 // to their respective per-app edge proxy ports, handling TLS automatically.
 // It is called (in a goroutine) after any deploy or app config change.
+// startACMEListener binds a lightweight HTTP server on RELAY_ACME_ADDR (default
+// ":80") that:
+//   - serves /.well-known/acme-challenge/* from the acme-webroot directory so
+//     that external ACME clients (certbot, acme.sh) can complete HTTP-01
+//     challenges without needing nginx or any other web server;
+//   - redirects all other HTTP traffic to the same URL over HTTPS.
+//
+// If the address is already in use (e.g. Caddy is running with -p 80:80 via
+// Docker), the bind silently fails and Caddy handles challenges itself.
+func (s *Server) startACMEListener() {
+	acmeAddr := getenv("RELAY_ACME_ADDR", ":80")
+	ln, err := net.Listen("tcp", acmeAddr)
+	if err != nil {
+		// Port already claimed (e.g. by Caddy's Docker port binding) — that's
+		// fine; Caddy will handle ACME challenges on its own.
+		fmt.Fprintf(os.Stderr, "info: ACME HTTP listener could not bind %s (%v); challenges will be served by Caddy when Docker is available\n", acmeAddr, err)
+		return
+	}
+
+	acmeMux := http.NewServeMux()
+	// Serve challenge tokens from the local webroot directory.
+	acmeMux.Handle("/.well-known/acme-challenge/",
+		http.StripPrefix("/.well-known/acme-challenge/",
+			http.FileServer(http.Dir(s.acmeWebroot))))
+	// Redirect all other plain-HTTP traffic to HTTPS.
+	acmeMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		target := "https://" + r.Host + r.URL.RequestURI()
+		http.Redirect(w, r, target, http.StatusMovedPermanently)
+	})
+
+	srv := &http.Server{
+		Handler:           acmeMux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	fmt.Println("ACME HTTP listener on", acmeAddr)
+	go func() {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			fmt.Fprintf(os.Stderr, "ACME listener error: %v\n", err)
+		}
+	}()
+}
+
 func (s *Server) ensureGlobalProxy() error {
 	rows, err := s.db.Query(`SELECT public_host, COALESCE(host_port, 0) FROM app_state WHERE public_host != '' AND COALESCE(stopped,0)=0`)
 	if err != nil {
@@ -6966,6 +7020,13 @@ func (s *Server) ensureGlobalProxy() error {
 	configPath := filepath.Join(configDir, "Caddyfile")
 
 	var cf strings.Builder
+	// Prepend a global options block when RELAY_ACME_EMAIL is set.  Caddy
+	// uses the email for Let's Encrypt account registration and expiry notices.
+	if email := strings.TrimSpace(os.Getenv("RELAY_ACME_EMAIL")); email != "" {
+		cf.WriteString("{\n")
+		cf.WriteString(fmt.Sprintf("\temail %s\n", email))
+		cf.WriteString("}\n\n")
+	}
 	for _, r := range routes {
 		cf.WriteString(strings.TrimSpace(r.host) + " {\n")
 		cf.WriteString(fmt.Sprintf("\treverse_proxy host.docker.internal:%d\n", r.hostPort))
