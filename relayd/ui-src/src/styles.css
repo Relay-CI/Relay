@@ -2934,6 +2934,156 @@ a {
   text-align: left;
   cursor: pointer;
   transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+
+/* ── Analytics tab ───────────────────────────────────────────────────────── */
+.analytics-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.analytics-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.analytics-header h2 {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text);
+  margin: 0;
+}
+
+.analytics-period-pills {
+  display: flex;
+  gap: 4px;
+}
+
+.analytics-period-pill {
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
+}
+
+.analytics-period-pill--active {
+  border-color: var(--teal);
+  color: var(--teal);
+  background: rgba(111, 194, 166, 0.08);
+}
+
+/* Country / page bar rows */
+.analytics-bar-row {
+  display: grid;
+  grid-template-columns: 1fr 2fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+
+.analytics-bar-row:last-child {
+  border-bottom: none;
+}
+
+.analytics-bar-label {
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.analytics-flag {
+  font-size: 16px;
+  line-height: 1;
+}
+
+.analytics-bar-track {
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.06);
+  overflow: hidden;
+}
+
+.analytics-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--teal);
+  transition: width 400ms ease;
+}
+
+.analytics-bar-fill--amber {
+  background: var(--amber);
+}
+
+.analytics-bar-fill--danger {
+  background: var(--danger, #e05252);
+}
+
+.analytics-bar-count {
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--muted);
+  min-width: 48px;
+  text-align: right;
+}
+
+/* Time-series mini chart */
+.analytics-timeseries {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 80px;
+  padding-top: 4px;
+}
+
+.analytics-ts-bar {
+  flex: 1;
+  min-width: 4px;
+  background: var(--teal);
+  border-radius: 2px 2px 0 0;
+  opacity: 0.7;
+  transition: opacity 120ms ease;
+  cursor: default;
+}
+
+.analytics-ts-bar:hover {
+  opacity: 1;
+}
+
+.analytics-ts-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+}
+
+.analytics-ts-label {
+  font-size: 10px;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+
+/* Empty state */
+.analytics-empty {
+  text-align: center;
+  padding: 48px 24px;
+  color: var(--muted);
+  font-size: 13px;
+}
 }
 
 .logs-build-item:hover {

@@ -63,6 +63,12 @@ const NAV_ICONS = {
       <line x1="6" y1="18" x2="6.01" y2="18"/>
     </svg>
   ),
+  analytics: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/>
+      <line x1="6" y1="20" x2="6" y2="14"/><line x1="3" y1="20" x2="21" y2="20"/>
+    </svg>
+  ),
 };
 
 async function api(path, options = {}) {
@@ -3126,6 +3132,186 @@ function EmptyState() {
   );
 }
 
+// ── Country code → flag emoji helper ─────────────────────────────────────────
+function countryFlag(code) {
+  if (!code || code.length !== 2) return "";
+  const cp = [...code.toUpperCase()].map(c => 0x1f1e6 + c.charCodeAt(0) - 65);
+  return String.fromCodePoint(...cp);
+}
+
+// ── Analytics tab ─────────────────────────────────────────────────────────────
+function AnalyticsTab({ selectedEnv }) {
+  const [period, setPeriod] = useState("7d");
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    const params = new URLSearchParams({ period });
+    if (selectedEnv?.app) params.set("app", selectedEnv.app);
+    api(`/api/analytics?${params}`)
+      .then(d => { if (!cancelled) setData(d); })
+      .catch(e => { if (!cancelled) setError(e.message); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [period, selectedEnv?.app]);
+
+  const totalRequests = data?.total_requests ?? 0;
+  const byCountry = data?.by_country ?? [];
+  const byStatus = data?.by_status ?? [];
+  const byHour = data?.by_hour ?? [];
+  const byHost = data?.by_host ?? [];
+
+  const maxCountry = byCountry.reduce((m, c) => Math.max(m, c.count), 1);
+  const maxHour = byHour.reduce((m, h) => Math.max(m, h.count), 1);
+
+  const success2xx = byStatus.filter(s => s.status >= 200 && s.status < 300).reduce((sum, s) => sum + s.count, 0);
+  const redirect3xx = byStatus.filter(s => s.status >= 300 && s.status < 400).reduce((sum, s) => sum + s.count, 0);
+  const error4xx = byStatus.filter(s => s.status >= 400 && s.status < 500).reduce((sum, s) => sum + s.count, 0);
+  const error5xx = byStatus.filter(s => s.status >= 500).reduce((sum, s) => sum + s.count, 0);
+  const successRate = totalRequests > 0 ? Math.round((success2xx / totalRequests) * 100) : 0;
+
+  // Time labels: first and last bucket
+  const firstTs = byHour[0]?.ts ?? 0;
+  const lastTs = byHour[byHour.length - 1]?.ts ?? 0;
+  function fmtBucket(ts) {
+    if (!ts) return "";
+    const d = new Date(ts * 1000);
+    return period === "30d"
+      ? d.toLocaleDateString([], { month: "short", day: "numeric" })
+      : d.toLocaleTimeString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  }
+
+  return (
+    <section className="analytics-pane">
+      <div className="analytics-header">
+        <h2>Traffic Analytics</h2>
+        <div className="analytics-period-pills">
+          {[["24h", "24h"], ["7d", "7 days"], ["30d", "30 days"]].map(([val, label]) => (
+            <button
+              key={val}
+              type="button"
+              className={cx("analytics-period-pill", period === val && "analytics-period-pill--active")}
+              onClick={() => setPeriod(val)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {loading && <div className="muted" style={{ padding: "32px 0" }}>Loading analytics…</div>}
+      {error && <div className="error-banner">{error}</div>}
+
+      {!loading && !error && totalRequests === 0 && (
+        <div className="analytics-empty">
+          No traffic data yet for this period.<br />
+          <span className="eyebrow" style={{ marginTop: 8, display: "block" }}>
+            Traffic is recorded from the Caddy access log once the global proxy is running.
+          </span>
+        </div>
+      )}
+
+      {!loading && !error && totalRequests > 0 && (
+        <>
+          <div className="metric-row">
+            <MetricCard label="Requests" value={totalRequests.toLocaleString()} meta={`last ${period}`} tone="teal" />
+            <MetricCard label="Countries" value={String(byCountry.length)} meta="unique" />
+            <MetricCard label="Success Rate" value={`${successRate}%`} meta="2xx responses" tone="amber" />
+            <MetricCard label="Errors" value={(error4xx + error5xx).toLocaleString()} meta="4xx + 5xx" accent={error4xx + error5xx > 0} />
+          </div>
+
+          <div className="grid-two">
+            {/* Top countries */}
+            <div className="panel section-card">
+              <div className="section-card__header">
+                <div className="section-card__title">Top Countries</div>
+              </div>
+              {byCountry.slice(0, 12).map(c => (
+                <div className="analytics-bar-row" key={c.code}>
+                  <div className="analytics-bar-label">
+                    <span className="analytics-flag">{countryFlag(c.code)}</span>
+                    {c.name}
+                  </div>
+                  <div className="analytics-bar-track">
+                    <div className="analytics-bar-fill" style={{ width: `${(c.count / maxCountry) * 100}%` }} />
+                  </div>
+                  <div className="analytics-bar-count">{c.count.toLocaleString()}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Status codes + top hosts */}
+            <div className="panel section-card">
+              <div className="section-card__header">
+                <div className="section-card__title">Status Breakdown</div>
+              </div>
+              {[
+                { label: "2xx Success", count: success2xx, cls: "" },
+                { label: "3xx Redirect", count: redirect3xx, cls: "" },
+                { label: "4xx Client Error", count: error4xx, cls: "analytics-bar-fill--amber" },
+                { label: "5xx Server Error", count: error5xx, cls: "analytics-bar-fill--danger" },
+              ].map(row => (
+                <div className="analytics-bar-row" key={row.label}>
+                  <div className="analytics-bar-label">{row.label}</div>
+                  <div className="analytics-bar-track">
+                    <div className={cx("analytics-bar-fill", row.cls)} style={{ width: `${totalRequests > 0 ? (row.count / totalRequests) * 100 : 0}%` }} />
+                  </div>
+                  <div className="analytics-bar-count">{row.count.toLocaleString()}</div>
+                </div>
+              ))}
+
+              {byHost.length > 0 && (
+                <>
+                  <div className="section-card__header" style={{ marginTop: 20 }}>
+                    <div className="section-card__title">Top Hosts</div>
+                  </div>
+                  {byHost.slice(0, 5).map(h => (
+                    <div className="analytics-bar-row" key={h.host}>
+                      <div className="analytics-bar-label" style={{ fontFamily: "var(--mono)", fontSize: 11 }}>{h.host}</div>
+                      <div className="analytics-bar-track">
+                        <div className="analytics-bar-fill" style={{ width: `${(h.count / totalRequests) * 100}%` }} />
+                      </div>
+                      <div className="analytics-bar-count">{h.count.toLocaleString()}</div>
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Requests over time */}
+          {byHour.length > 0 && (
+            <div className="panel section-card">
+              <div className="section-card__header">
+                <div className="section-card__title">Requests Over Time</div>
+                <div className="eyebrow">{period === "30d" ? "daily" : "hourly"} buckets</div>
+              </div>
+              <div className="analytics-timeseries">
+                {byHour.map(h => (
+                  <div
+                    key={h.ts}
+                    className="analytics-ts-bar"
+                    style={{ height: `${Math.max(4, (h.count / maxHour) * 100)}%` }}
+                    title={`${fmtBucket(h.ts)}: ${h.count.toLocaleString()} requests`}
+                  />
+                ))}
+              </div>
+              <div className="analytics-ts-labels">
+                <span className="analytics-ts-label">{fmtBucket(firstTs)}</span>
+                <span className="analytics-ts-label">{fmtBucket(lastTs)}</span>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 function ServerSettingsTab() {
   const [baseDomain, setBaseDomain] = useState("");
   const [dashboardHost, setDashboardHost] = useState("");
@@ -3532,6 +3718,7 @@ function App() {
             ["overview", "Overview"],
             ["deployments", "Deployments"],
             ["logs", "Logs"],
+            ["analytics", "Analytics"],
             ["settings", "Settings"],
             ["server", "Server"],
           ].map(([id, label]) => (
@@ -3668,6 +3855,8 @@ function App() {
         {!selectedProject ? (
           activeTab === "server" ? (
             <ServerSettingsTab />
+          ) : activeTab === "analytics" ? (
+            <AnalyticsTab selectedEnv={null} />
           ) : (
             <EmptyState />
           )
@@ -3733,6 +3922,10 @@ function App() {
 
             {activeTab === "server" && (
               <ServerSettingsTab />
+            )}
+
+            {activeTab === "analytics" && (
+              <AnalyticsTab selectedEnv={selectedEnv} />
             )}
           </>
         )}

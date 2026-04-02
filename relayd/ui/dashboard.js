@@ -14704,6 +14704,12 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
       /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("rect", { x: "2", y: "14", width: "20", height: "8", rx: "2", ry: "2" }),
       /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("line", { x1: "6", y1: "6", x2: "6.01", y2: "6" }),
       /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("line", { x1: "6", y1: "18", x2: "6.01", y2: "18" })
+    ] }),
+    analytics: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.5", strokeLinecap: "round", strokeLinejoin: "round", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("line", { x1: "18", y1: "20", x2: "18", y2: "10" }),
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("line", { x1: "12", y1: "20", x2: "12", y2: "4" }),
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("line", { x1: "6", y1: "20", x2: "6", y2: "14" }),
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("line", { x1: "3", y1: "20", x2: "21", y2: "20" })
     ] })
   };
   async function api(path, options = {}) {
@@ -17286,6 +17292,139 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
       /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("p", { children: "The project dropdown is now driven by `/api/projects`, so projects appear as soon as Relay has app state." })
     ] });
   }
+  function countryFlag(code) {
+    if (!code || code.length !== 2) return "";
+    const cp = [...code.toUpperCase()].map((c) => 127462 + c.charCodeAt(0) - 65);
+    return String.fromCodePoint(...cp);
+  }
+  function AnalyticsTab({ selectedEnv }) {
+    const [period, setPeriod] = (0, import_react9.useState)("7d");
+    const [data, setData] = (0, import_react9.useState)(null);
+    const [loading, setLoading] = (0, import_react9.useState)(true);
+    const [error, setError] = (0, import_react9.useState)(null);
+    (0, import_react9.useEffect)(() => {
+      let cancelled = false;
+      setLoading(true);
+      setError(null);
+      const params = new URLSearchParams({ period });
+      if (selectedEnv?.app) params.set("app", selectedEnv.app);
+      api(`/api/analytics?${params}`).then((d) => {
+        if (!cancelled) setData(d);
+      }).catch((e) => {
+        if (!cancelled) setError(e.message);
+      }).finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+      return () => {
+        cancelled = true;
+      };
+    }, [period, selectedEnv?.app]);
+    const totalRequests = data?.total_requests ?? 0;
+    const byCountry = data?.by_country ?? [];
+    const byStatus = data?.by_status ?? [];
+    const byHour = data?.by_hour ?? [];
+    const byHost = data?.by_host ?? [];
+    const maxCountry = byCountry.reduce((m, c) => Math.max(m, c.count), 1);
+    const maxHour = byHour.reduce((m, h) => Math.max(m, h.count), 1);
+    const success2xx = byStatus.filter((s) => s.status >= 200 && s.status < 300).reduce((sum, s) => sum + s.count, 0);
+    const redirect3xx = byStatus.filter((s) => s.status >= 300 && s.status < 400).reduce((sum, s) => sum + s.count, 0);
+    const error4xx = byStatus.filter((s) => s.status >= 400 && s.status < 500).reduce((sum, s) => sum + s.count, 0);
+    const error5xx = byStatus.filter((s) => s.status >= 500).reduce((sum, s) => sum + s.count, 0);
+    const successRate = totalRequests > 0 ? Math.round(success2xx / totalRequests * 100) : 0;
+    const firstTs = byHour[0]?.ts ?? 0;
+    const lastTs = byHour[byHour.length - 1]?.ts ?? 0;
+    function fmtBucket(ts) {
+      if (!ts) return "";
+      const d = new Date(ts * 1e3);
+      return period === "30d" ? d.toLocaleDateString([], { month: "short", day: "numeric" }) : d.toLocaleTimeString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    }
+    return /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("section", { className: "analytics-pane", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "analytics-header", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("h2", { children: "Traffic Analytics" }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "analytics-period-pills", children: [["24h", "24h"], ["7d", "7 days"], ["30d", "30 days"]].map(([val, label]) => /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(
+          "button",
+          {
+            type: "button",
+            className: cx2("analytics-period-pill", period === val && "analytics-period-pill--active"),
+            onClick: () => setPeriod(val),
+            children: label
+          },
+          val
+        )) })
+      ] }),
+      loading && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "muted", style: { padding: "32px 0" }, children: "Loading analytics\u2026" }),
+      error && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "error-banner", children: error }),
+      !loading && !error && totalRequests === 0 && /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "analytics-empty", children: [
+        "No traffic data yet for this period.",
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("br", {}),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "eyebrow", style: { marginTop: 8, display: "block" }, children: "Traffic is recorded from the Caddy access log once the global proxy is running." })
+      ] }),
+      !loading && !error && totalRequests > 0 && /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(import_jsx_runtime27.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "metric-row", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(MetricCard, { label: "Requests", value: totalRequests.toLocaleString(), meta: `last ${period}`, tone: "teal" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(MetricCard, { label: "Countries", value: String(byCountry.length), meta: "unique" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(MetricCard, { label: "Success Rate", value: `${successRate}%`, meta: "2xx responses", tone: "amber" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(MetricCard, { label: "Errors", value: (error4xx + error5xx).toLocaleString(), meta: "4xx + 5xx", accent: error4xx + error5xx > 0 })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "grid-two", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "panel section-card", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "section-card__header", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "section-card__title", children: "Top Countries" }) }),
+            byCountry.slice(0, 12).map((c) => /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "analytics-bar-row", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "analytics-bar-label", children: [
+                /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "analytics-flag", children: countryFlag(c.code) }),
+                c.name
+              ] }),
+              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "analytics-bar-track", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "analytics-bar-fill", style: { width: `${c.count / maxCountry * 100}%` } }) }),
+              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "analytics-bar-count", children: c.count.toLocaleString() })
+            ] }, c.code))
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "panel section-card", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "section-card__header", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "section-card__title", children: "Status Breakdown" }) }),
+            [
+              { label: "2xx Success", count: success2xx, cls: "" },
+              { label: "3xx Redirect", count: redirect3xx, cls: "" },
+              { label: "4xx Client Error", count: error4xx, cls: "analytics-bar-fill--amber" },
+              { label: "5xx Server Error", count: error5xx, cls: "analytics-bar-fill--danger" }
+            ].map((row) => /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "analytics-bar-row", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "analytics-bar-label", children: row.label }),
+              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "analytics-bar-track", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: cx2("analytics-bar-fill", row.cls), style: { width: `${totalRequests > 0 ? row.count / totalRequests * 100 : 0}%` } }) }),
+              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "analytics-bar-count", children: row.count.toLocaleString() })
+            ] }, row.label)),
+            byHost.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(import_jsx_runtime27.Fragment, { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "section-card__header", style: { marginTop: 20 }, children: /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "section-card__title", children: "Top Hosts" }) }),
+              byHost.slice(0, 5).map((h) => /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "analytics-bar-row", children: [
+                /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "analytics-bar-label", style: { fontFamily: "var(--mono)", fontSize: 11 }, children: h.host }),
+                /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "analytics-bar-track", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "analytics-bar-fill", style: { width: `${h.count / totalRequests * 100}%` } }) }),
+                /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "analytics-bar-count", children: h.count.toLocaleString() })
+              ] }, h.host))
+            ] })
+          ] })
+        ] }),
+        byHour.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "panel section-card", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "section-card__header", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "section-card__title", children: "Requests Over Time" }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "eyebrow", children: [
+              period === "30d" ? "daily" : "hourly",
+              " buckets"
+            ] })
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "analytics-timeseries", children: byHour.map((h) => /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(
+            "div",
+            {
+              className: "analytics-ts-bar",
+              style: { height: `${Math.max(4, h.count / maxHour * 100)}%` },
+              title: `${fmtBucket(h.ts)}: ${h.count.toLocaleString()} requests`
+            },
+            h.ts
+          )) }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "analytics-ts-labels", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "analytics-ts-label", children: fmtBucket(firstTs) }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "analytics-ts-label", children: fmtBucket(lastTs) })
+          ] })
+        ] })
+      ] })
+    ] });
+  }
   function ServerSettingsTab() {
     const [baseDomain, setBaseDomain] = (0, import_react9.useState)("");
     const [dashboardHost, setDashboardHost] = (0, import_react9.useState)("");
@@ -17665,6 +17804,7 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
           ["overview", "Overview"],
           ["deployments", "Deployments"],
           ["logs", "Logs"],
+          ["analytics", "Analytics"],
           ["settings", "Settings"],
           ["server", "Server"]
         ].map(([id, label]) => /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(
@@ -17769,7 +17909,7 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
           ] })
         ] }),
         dashboard.error && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "error-banner", children: dashboard.error }),
-        !selectedProject ? activeTab === "server" ? /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(ServerSettingsTab, {}) : /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(EmptyState, {}) : /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(import_jsx_runtime27.Fragment, { children: [
+        !selectedProject ? activeTab === "server" ? /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(ServerSettingsTab, {}) : activeTab === "analytics" ? /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(AnalyticsTab, { selectedEnv: null }) : /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(EmptyState, {}) : /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(import_jsx_runtime27.Fragment, { children: [
           /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "metric-row", children: [
             /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(MetricCard, { label: "Environments", value: String(selectedProject.envs.length), meta: "active project lanes", tone: "teal" }),
             /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(MetricCard, { label: "Services", value: String(selectedProject.services.length), meta: "companion containers", accent: true }),
@@ -17829,7 +17969,8 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
               onUpdated: refreshDashboard
             }
           ),
-          activeTab === "server" && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(ServerSettingsTab, {})
+          activeTab === "server" && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(ServerSettingsTab, {}),
+          activeTab === "analytics" && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(AnalyticsTab, { selectedEnv })
         ] }),
         selectedDeploy && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(
           LogViewer,

@@ -606,6 +606,7 @@ type Server struct {
 	logsDir               string
 	pluginsDir            string
 	acmeWebroot           string
+	caddyLogsDir          string
 	httpAddr              string
 	corsOrigins           map[string]struct{}
 	allowAllCORS          bool
@@ -3134,6 +3135,7 @@ func main() {
 		logsDir:               filepath.Join(dataDir, "logs"),
 		pluginsDir:            filepath.Join(dataDir, "plugins"),
 		acmeWebroot:           filepath.Join(dataDir, "acme-webroot"),
+		caddyLogsDir:          filepath.Join(dataDir, "caddy-logs"),
 		httpAddr:              getenv("RELAY_ADDR", ":8080"),
 		corsOrigins:           map[string]struct{}{},
 		allowAllCORS:          false,
@@ -3152,6 +3154,7 @@ func main() {
 	mustMkdir(s.logsDir)
 	mustMkdir(s.pluginsDir)
 	mustMkdir(s.acmeWebroot)
+	mustMkdir(s.caddyLogsDir)
 	mustMkdir(s.pluginBuildpacksDir())
 	if err := s.reloadBuildpacks(); err != nil {
 		panic(err)
@@ -3227,6 +3230,7 @@ func main() {
 
 	// Webhooks (unauthenticated, use provider-specific secrets if configured)
 	mux.HandleFunc("/api/webhooks/github", s.handleGithubWebhook)
+	mux.HandleFunc("/api/analytics", s.auth(s.handleAnalytics))
 
 	// ── Unix-domain socket (local API transport) ──────────────────────────────
 	// The socket is the recommended transport for the relay CLI when both the
@@ -3312,6 +3316,10 @@ func main() {
 	// the port is already taken by Caddy via Docker, it logs a notice and
 	// continues without it).
 	go s.startACMEListener()
+	// Tail Caddy access logs and aggregate per-request analytics.
+	go s.startLogTailer()
+	// Tail Caddy access logs and aggregate analytics.
+	go s.startLogTailer()
 	httpServer := &http.Server{
 		Addr:    addr,
 		Handler: s.withCORS(mux),
@@ -6940,6 +6948,362 @@ func (s *Server) cleanupStandbySlotAfter(app string, env DeployEnv, branch strin
 //
 // If the address is already in use (e.g. Caddy is running with -p 80:80 via
 // Docker), the bind silently fails and Caddy handles challenges itself.
+// ─────────────────────────────────────────────────────────────────────────────
+// Analytics: Caddy access-log tailer + IP geolocation + query handler
+// ─────────────────────────────────────────────────────────────────────────────
+
+// caddyLogEntry is the subset of Caddy's JSON access-log format we care about.
+type caddyLogEntry struct {
+	Ts      float64 `json:"ts"`
+	Request struct {
+		RemoteIP string `json:"remote_ip"`
+		Method   string `json:"method"`
+		Host     string `json:"host"`
+		URI      string `json:"uri"`
+	} `json:"request"`
+	Status int   `json:"status"`
+	Size   int64 `json:"size"`
+}
+
+// startLogTailer reads new lines appended to the Caddy access log, inserts
+// analytics events into SQLite, and resolves country codes in the background.
+func (s *Server) startLogTailer() {
+	logPath := filepath.Join(s.caddyLogsDir, "access.log")
+
+	// Persist the byte offset between restarts so we don't re-process old events.
+	getOffset := func() int64 {
+		var v string
+		_ = s.db.QueryRow(`SELECT value FROM server_config WHERE key='analytics_log_offset'`).Scan(&v)
+		n, _ := strconv.ParseInt(v, 10, 64)
+		return n
+	}
+	saveOffset := func(off int64) {
+		_, _ = s.db.Exec(`INSERT OR REPLACE INTO server_config(key,value) VALUES('analytics_log_offset',?)`, strconv.FormatInt(off, 10))
+	}
+
+	offset := getOffset()
+
+	for {
+		f, err := os.Open(logPath)
+		if err != nil {
+			// File doesn't exist yet (Caddy not started). Wait and retry.
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		fi, _ := f.Stat()
+		// If the file shrank (roll / truncation), reset to beginning.
+		if offset > fi.Size() {
+			offset = 0
+			saveOffset(0)
+		}
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			f.Close()
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		scanner := bufio.NewScanner(f)
+		var newEvents []caddyLogEntry
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line == "" {
+				continue
+			}
+			var entry caddyLogEntry
+			if err := json.Unmarshal([]byte(line), &entry); err != nil {
+				continue
+			}
+			// Skip internal Caddy admin / health check lines.
+			if entry.Ts == 0 || entry.Request.Host == "" {
+				continue
+			}
+			newEvents = append(newEvents, entry)
+		}
+
+		newOffset, _ := f.Seek(0, io.SeekCurrent)
+		f.Close()
+
+		if len(newEvents) > 0 {
+			s.insertAnalyticsEvents(newEvents)
+			saveOffset(newOffset)
+			offset = newOffset
+			// Kick off a non-blocking country resolver pass.
+			go s.resolveAnalyticsCountries()
+		} else {
+			offset = newOffset
+		}
+
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func (s *Server) insertAnalyticsEvents(entries []caddyLogEntry) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return
+	}
+	stmt, err := tx.Prepare(`INSERT INTO analytics_events(ts,host,method,path,status,bytes,remote_ip) VALUES(?,?,?,?,?,?,?)`)
+	if err != nil {
+		tx.Rollback()
+		return
+	}
+	defer stmt.Close()
+	for _, e := range entries {
+		ts := int64(e.Ts)
+		uri := e.Request.URI
+		if len(uri) > 256 {
+			uri = uri[:256]
+		}
+		if _, err := stmt.Exec(ts, e.Request.Host, e.Request.Method, uri, e.Status, e.Size, e.Request.RemoteIP); err != nil {
+			continue
+		}
+	}
+	tx.Commit()
+}
+
+// ipAPIBatchResponse is one item from the ip-api.com /batch response.
+type ipAPIBatchResponse struct {
+	Status      string `json:"status"`
+	Country     string `json:"country"`
+	CountryCode string `json:"countryCode"`
+	Query       string `json:"query"`
+}
+
+// resolveAnalyticsCountries batch-resolves remote IPs to country codes using
+// ip-api.com (free, no key, 45 req/min).  Results are cached in ip_country_cache.
+func (s *Server) resolveAnalyticsCountries() {
+	// Collect distinct IPs that have no country assigned yet.
+	rows, err := s.db.Query(`
+		SELECT DISTINCT remote_ip FROM analytics_events
+		WHERE country_code='' AND remote_ip!=''
+		LIMIT 500`)
+	if err != nil {
+		return
+	}
+	var ips []string
+	for rows.Next() {
+		var ip string
+		if err := rows.Scan(&ip); err == nil && ip != "" {
+			ips = append(ips, ip)
+		}
+	}
+	rows.Close()
+	if len(ips) == 0 {
+		return
+	}
+
+	// Filter out already-cached IPs.
+	uncached := ips[:0]
+	for _, ip := range ips {
+		var code string
+		_ = s.db.QueryRow(`SELECT country_code FROM ip_country_cache WHERE ip=?`, ip).Scan(&code)
+		if code == "" {
+			uncached = append(uncached, ip)
+		}
+	}
+
+	// Process in batches of up to 100 (ip-api.com limit).
+	for i := 0; i < len(uncached); i += 100 {
+		end := i + 100
+		if end > len(uncached) {
+			end = len(uncached)
+		}
+		batch := uncached[i:end]
+
+		type req struct {
+			Query  string `json:"query"`
+			Fields string `json:"fields"`
+		}
+		reqs := make([]req, len(batch))
+		for j, ip := range batch {
+			reqs[j] = req{Query: ip, Fields: "status,country,countryCode,query"}
+		}
+		body, _ := json.Marshal(reqs)
+		resp, err := (&http.Client{Timeout: 10 * time.Second}).Post(
+			"http://ip-api.com/batch", "application/json", bytes.NewReader(body))
+		if err != nil {
+			continue
+		}
+		var results []ipAPIBatchResponse
+		_ = json.NewDecoder(resp.Body).Decode(&results)
+		resp.Body.Close()
+
+		now := time.Now().Unix()
+		for _, r := range results {
+			if r.Status != "success" || r.Query == "" {
+				continue
+			}
+			_, _ = s.db.Exec(
+				`INSERT OR REPLACE INTO ip_country_cache(ip,country_code,country_name,updated_at) VALUES(?,?,?,?)`,
+				r.Query, r.CountryCode, r.Country, now)
+		}
+		// Small back-off to stay under the 45 req/min rate limit.
+		if i+100 < len(uncached) {
+			time.Sleep(1500 * time.Millisecond)
+		}
+	}
+
+	// Apply cached countries to analytics_events rows that are still empty.
+	_, _ = s.db.Exec(`
+		UPDATE analytics_events
+		SET country_code = (SELECT country_code FROM ip_country_cache WHERE ip=remote_ip),
+		    country_name = (SELECT country_name FROM ip_country_cache WHERE ip=remote_ip)
+		WHERE country_code='' AND remote_ip!=''
+		  AND EXISTS (SELECT 1 FROM ip_country_cache WHERE ip=remote_ip)`)
+}
+
+type analyticsResponse struct {
+	TotalRequests int64              `json:"total_requests"`
+	PeriodLabel   string             `json:"period"`
+	ByCountry     []analyticsCountry `json:"by_country"`
+	ByStatus      []analyticsStatus  `json:"by_status"`
+	ByHour        []analyticsHour    `json:"by_hour"`
+	ByHost        []analyticsHost    `json:"by_host"`
+}
+type analyticsCountry struct {
+	Code  string `json:"code"`
+	Name  string `json:"name"`
+	Count int64  `json:"count"`
+}
+type analyticsStatus struct {
+	Status int   `json:"status"`
+	Count  int64 `json:"count"`
+}
+type analyticsHour struct {
+	Ts    int64 `json:"ts"`
+	Count int64 `json:"count"`
+}
+type analyticsHost struct {
+	Host  string `json:"host"`
+	Count int64  `json:"count"`
+}
+
+func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
+	period := r.URL.Query().Get("period")
+	app := strings.TrimSpace(r.URL.Query().Get("app"))
+
+	var since int64
+	var periodLabel string
+	now := time.Now().Unix()
+	switch period {
+	case "24h":
+		since = now - 86400
+		periodLabel = "24h"
+	case "30d":
+		since = now - 30*86400
+		periodLabel = "30d"
+	default:
+		since = now - 7*86400
+		periodLabel = "7d"
+	}
+
+	hostFilter := ""
+	hostArgs := []any{since}
+	if app != "" {
+		// Match events where the host belongs to the given app.
+		hostFilter = ` AND host IN (SELECT public_host FROM app_state WHERE app=? AND public_host!='')`
+		hostArgs = append(hostArgs, app)
+	}
+
+	// Total requests.
+	var total int64
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM analytics_events WHERE ts>=?`+hostFilter, hostArgs...).Scan(&total)
+
+	// By country.
+	countryRows, _ := s.db.Query(
+		`SELECT COALESCE(NULLIF(country_code,''),'??') AS cc,
+		        COALESCE(NULLIF(country_name,''),'Unknown') AS cn,
+		        COUNT(*) AS cnt
+		 FROM analytics_events WHERE ts>=?`+hostFilter+`
+		 GROUP BY cc ORDER BY cnt DESC LIMIT 30`,
+		hostArgs...)
+	var byCountry []analyticsCountry
+	if countryRows != nil {
+		for countryRows.Next() {
+			var c analyticsCountry
+			_ = countryRows.Scan(&c.Code, &c.Name, &c.Count)
+			byCountry = append(byCountry, c)
+		}
+		countryRows.Close()
+	}
+
+	// By status class (group into 2xx, 3xx, 4xx, 5xx).
+	statusRows, _ := s.db.Query(
+		`SELECT (status/100)*100 AS sc, COUNT(*) AS cnt
+		 FROM analytics_events WHERE ts>=?`+hostFilter+`
+		 GROUP BY sc ORDER BY sc`,
+		hostArgs...)
+	var byStatus []analyticsStatus
+	if statusRows != nil {
+		for statusRows.Next() {
+			var st analyticsStatus
+			_ = statusRows.Scan(&st.Status, &st.Count)
+			byStatus = append(byStatus, st)
+		}
+		statusRows.Close()
+	}
+
+	// By hour (bucket ts to nearest hour).
+	bucketSize := int64(3600)
+	if period == "30d" {
+		bucketSize = 86400 // daily buckets for 30-day view
+	}
+	hourRows, _ := s.db.Query(
+		`SELECT (ts/?)*? AS bucket, COUNT(*) AS cnt
+		 FROM analytics_events WHERE ts>=?`+hostFilter+`
+		 GROUP BY bucket ORDER BY bucket`,
+		append([]any{bucketSize, bucketSize}, hostArgs...)...)
+	var byHour []analyticsHour
+	if hourRows != nil {
+		for hourRows.Next() {
+			var h analyticsHour
+			_ = hourRows.Scan(&h.Ts, &h.Count)
+			byHour = append(byHour, h)
+		}
+		hourRows.Close()
+	}
+
+	// By host.
+	hostRows, _ := s.db.Query(
+		`SELECT host, COUNT(*) AS cnt
+		 FROM analytics_events WHERE ts>=?`+hostFilter+`
+		 GROUP BY host ORDER BY cnt DESC LIMIT 20`,
+		hostArgs...)
+	var byHost []analyticsHost
+	if hostRows != nil {
+		for hostRows.Next() {
+			var h analyticsHost
+			_ = hostRows.Scan(&h.Host, &h.Count)
+			byHost = append(byHost, h)
+		}
+		hostRows.Close()
+	}
+
+	resp := analyticsResponse{
+		TotalRequests: total,
+		PeriodLabel:   periodLabel,
+		ByCountry:     byCountry,
+		ByStatus:      byStatus,
+		ByHour:        byHour,
+		ByHost:        byHost,
+	}
+	if resp.ByCountry == nil {
+		resp.ByCountry = []analyticsCountry{}
+	}
+	if resp.ByStatus == nil {
+		resp.ByStatus = []analyticsStatus{}
+	}
+	if resp.ByHour == nil {
+		resp.ByHour = []analyticsHour{}
+	}
+	if resp.ByHost == nil {
+		resp.ByHost = []analyticsHost{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
 func (s *Server) startACMEListener() {
 	acmeAddr := getenv("RELAY_ACME_ADDR", ":80")
 	ln, err := net.Listen("tcp", acmeAddr)
@@ -7020,13 +7384,20 @@ func (s *Server) ensureGlobalProxy() error {
 	configPath := filepath.Join(configDir, "Caddyfile")
 
 	var cf strings.Builder
-	// Prepend a global options block when RELAY_ACME_EMAIL is set.  Caddy
-	// uses the email for Let's Encrypt account registration and expiry notices.
+	// Always emit a global options block so we can configure access logging
+	// (and optionally the ACME email for Let's Encrypt account registration).
+	cf.WriteString("{\n")
 	if email := strings.TrimSpace(os.Getenv("RELAY_ACME_EMAIL")); email != "" {
-		cf.WriteString("{\n")
 		cf.WriteString(fmt.Sprintf("\temail %s\n", email))
-		cf.WriteString("}\n\n")
 	}
+	cf.WriteString("\tlog {\n")
+	cf.WriteString("\t\toutput file /logs/access.log {\n")
+	cf.WriteString("\t\t\troll_size 50mb\n")
+	cf.WriteString("\t\t\troll_keep 3\n")
+	cf.WriteString("\t\t}\n")
+	cf.WriteString("\t\tformat json\n")
+	cf.WriteString("\t}\n")
+	cf.WriteString("}\n\n")
 	for _, r := range routes {
 		cf.WriteString(strings.TrimSpace(r.host) + " {\n")
 		cf.WriteString(fmt.Sprintf("\treverse_proxy host.docker.internal:%d\n", r.hostPort))
@@ -7048,6 +7419,7 @@ func (s *Server) ensureGlobalProxy() error {
 			Volumes: []string{
 				fmt.Sprintf("%s:/etc/caddy/Caddyfile:ro", dockerPath(configPath)),
 				fmt.Sprintf("%s:/data", dockerPath(dataPath)),
+				fmt.Sprintf("%s:/logs", dockerPath(s.caddyLogsDir)),
 			},
 			PortBindings: []string{"80:80", "443:443", "443:443/udp"},
 			ExtraHosts:   []string{"host.docker.internal:host-gateway"},
@@ -7620,6 +7992,26 @@ func migrateDB(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN host_port INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN spec_hash TEXT DEFAULT ''`)
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS server_config (key TEXT PRIMARY KEY, value TEXT)`)
+	// Analytics tables
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS analytics_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		ts INTEGER NOT NULL,
+		host TEXT NOT NULL DEFAULT '',
+		method TEXT NOT NULL DEFAULT '',
+		path TEXT NOT NULL DEFAULT '',
+		status INTEGER NOT NULL DEFAULT 0,
+		bytes INTEGER NOT NULL DEFAULT 0,
+		remote_ip TEXT NOT NULL DEFAULT '',
+		country_code TEXT NOT NULL DEFAULT '',
+		country_name TEXT NOT NULL DEFAULT ''
+	)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_analytics_ts ON analytics_events(ts)`)
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS ip_country_cache (
+		ip TEXT PRIMARY KEY,
+		country_code TEXT NOT NULL DEFAULT '',
+		country_name TEXT NOT NULL DEFAULT '',
+		updated_at INTEGER NOT NULL DEFAULT 0
+	)`)
 	return nil
 }
 
