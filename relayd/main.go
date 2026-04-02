@@ -408,6 +408,8 @@ type ContainerRuntime interface {
 	RemoveNetwork(name string)
 	// RemoveVolume deletes a named volume (ignores errors).
 	RemoveVolume(name string)
+	// Pull pulls an image from a registry (ignores errors).
+	Pull(image string) error
 	// Build builds an image from contextDir tagged as tag.
 	// dockerfilePath may be "" to use the default Dockerfile in contextDir.
 	Build(tag, contextDir, dockerfilePath string, logw io.Writer) error
@@ -526,6 +528,13 @@ func (r *DockerRuntime) RemoveVolume(name string) {
 		return
 	}
 	_ = exec.Command("docker", "volume", "rm", "-f", name).Run()
+}
+
+func (r *DockerRuntime) Pull(image string) error {
+	if strings.TrimSpace(image) == "" {
+		return nil
+	}
+	return exec.Command("docker", "pull", image).Run()
 }
 
 func (r *DockerRuntime) Build(tag, contextDir, dockerfilePath string, logw io.Writer) error {
@@ -6910,9 +6919,12 @@ func (s *Server) ensureGlobalProxy() error {
 
 	if !s.runtime.IsRunning(containerName) {
 		s.runtime.Remove(containerName)
+		image := getenv("RELAY_CADDY_IMAGE", "caddy:alpine")
+		// Ensure the image is available before attempting to run
+		_ = s.runtime.Pull(image)
 		spec := ContainerSpec{
 			Name:          containerName,
-			Image:         getenv("RELAY_CADDY_IMAGE", "caddy:alpine"),
+			Image:         image,
 			RestartPolicy: "always",
 			Volumes: []string{
 				fmt.Sprintf("%s:/etc/caddy/Caddyfile:ro", dockerPath(configPath)),

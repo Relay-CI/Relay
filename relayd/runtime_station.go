@@ -1111,6 +1111,14 @@ func (r *StationRuntime) Build(tag, contextDir, dockerfilePath string, logw io.W
 	return saveCmd.Run()
 }
 
+func (r *StationRuntime) Pull(image string) error {
+	if strings.TrimSpace(image) == "" {
+		return nil
+	}
+	// Station containers also use Docker images, so ensure the image is available
+	return exec.Command("docker", "pull", image).Run()
+}
+
 func (r *StationRuntime) RemoveImage(ref string) {
 	if strings.TrimSpace(ref) == "" {
 		return

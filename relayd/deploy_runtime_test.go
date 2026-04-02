@@ -323,6 +323,7 @@ func (m *mockRuntime) NetworkConnect(string, string) error           { return ni
 func (m *mockRuntime) EnsureNetwork(string) error                    { return nil }
 func (m *mockRuntime) RemoveNetwork(string)                          {}
 func (m *mockRuntime) RemoveVolume(string)                           {}
+func (m *mockRuntime) Pull(string) error                             { return nil }
 func (m *mockRuntime) Build(string, string, string, io.Writer) error { return nil }
 func (m *mockRuntime) RemoveImage(string)                            {}
 func (m *mockRuntime) ListImages(string) ([]string, error)           { return nil, nil }
