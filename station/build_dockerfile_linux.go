@@ -43,33 +43,13 @@ func BuildDockerfile(dockerfilePath, contextDir, outDir string, logf func(string
 	stageDirs := make(map[string]string)
 	var finalManifest *BuildManifest
 
-	// stagesUsedAsBase[i] = true if any later stage uses stage i as its FROM base.
-	// Stages only referenced via COPY --from (never as FROM) don't need their full
-	// merged overlay cached — only the upper layer (the files written by that stage's
-	// own instructions) is required. This avoids copying the entire base image through
-	// an overlayfs mount, which is always cross-filesystem and falls back to a slow
-	// byte-by-byte copy.
-	stagesUsedAsBase := make(map[int]bool)
-	for i, s := range df.Stages {
-		key := strings.ToLower(s.Name)
-		numKey := fmt.Sprintf("%d", i)
-		for _, later := range df.Stages[i+1:] {
-			ref := strings.ToLower(later.Image)
-			if ref == key || ref == numKey {
-				stagesUsedAsBase[i] = true
-				break
-			}
-		}
-	}
-
 	ctx := stageCtx{
-		outDir:           outDir,
-		stageDirs:        stageDirs,
-		stageHashes:      make(map[string]string),
-		contextDir:       contextDir,
-		logf:             logf,
-		logw:             logw,
-		stagesUsedAsBase: stagesUsedAsBase,
+		outDir:      outDir,
+		stageDirs:   stageDirs,
+		stageHashes: make(map[string]string),
+		contextDir:  contextDir,
+		logf:        logf,
+		logw:        logw,
 	}
 
 	for i, stage := range df.Stages {
@@ -105,12 +85,12 @@ type stageCtx struct {
 	contextDir       string
 	logf             func(string, ...any)
 	logw             io.Writer
-	stagesUsedAsBase map[int]bool // stage index → true if a later stage uses it as FROM base
 }
 
 type stageWorkspace struct {
 	rootfs   string // merged overlayfs dir, or plain dir when overlay unavailable
 	upperDir string // overlayfs upper layer; empty when not overlay-backed
+	baseDir  string // base rootfs used as the overlay lower dir; empty when not overlay-backed
 	cleanup  func()
 }
 
@@ -187,31 +167,9 @@ func buildStage(idx int, stage DFStage, isFinal bool, ctx stageCtx) (*BuildManif
 	if !isFinal && cacheKey != "" {
 		cacheDir := stageCacheDir(cacheKey)
 		if mkErr := os.MkdirAll(filepath.Dir(cacheDir), 0755); mkErr == nil {
-			// Stages that are only referenced via COPY --from (never as a FROM
-			// base for a subsequent stage) only need to expose the files written
-			// by their own instructions.  Copying from the overlayfs upper layer
-			// (~source + build output) is far cheaper than copying the full
-			// merged view (base image + all lower layers = potentially 600 MB+).
-			// Hard-linking across an overlayfs mount always fails (EXDEV), so
-			// the merged-view copy degrades to a slow byte-by-byte fallback.
-			cacheSrc := rootfs
-			if !ctx.stagesUsedAsBase[idx] && workspace.upperDir != "" {
-				cacheSrc = workspace.upperDir
-			}
-			if matErr := materializeStageRootfs(cacheSrc, cacheDir); matErr != nil {
-				ctx.logf("[build] stage %d: warn: stage cache save failed: %v", idx, matErr)
-				_ = os.RemoveAll(cacheDir)
-			} else {
-				// Write manifest as a final commit so a partially-written cache
-				// (e.g. from a previous interrupted deploy) is never mistaken for
-				// a valid one by loadManifest.
-				if mfErr := saveManifest(cacheDir, m); mfErr != nil {
-					ctx.logf("[build] stage %d: warn: stage cache manifest write failed: %v", idx, mfErr)
-					_ = os.RemoveAll(cacheDir)
-				} else {
-					recordStageHash(stage, cacheKey, ctx.stageHashes)
-					return m, cacheDir, false, nil
-				}
+			if saveErr := saveStageCache(workspace, cacheDir, m, ctx.logf, idx); saveErr == nil {
+				recordStageHash(stage, cacheKey, ctx.stageHashes)
+				return m, cacheDir, false, nil
 			}
 		}
 		recordStageHash(stage, cacheKey, ctx.stageHashes)
@@ -232,7 +190,7 @@ func prepareStageRootfs(idx int, stage DFStage, stageDir string, stageDirs map[s
 		return nil, nil, err
 	}
 	if overlayRootfs, upperDir, cleanup, overlayErr := createBuildOverlayRootfs(baseRootfs); overlayErr == nil {
-		return baseManifest, &stageWorkspace{rootfs: overlayRootfs, upperDir: upperDir, cleanup: cleanup}, nil
+		return baseManifest, &stageWorkspace{rootfs: overlayRootfs, upperDir: upperDir, baseDir: baseRootfs, cleanup: cleanup}, nil
 	}
 	if err := copyDirContents(baseRootfs, stageDir); err != nil {
 		return nil, nil, fmt.Errorf("seed rootfs from %s: %w", stage.Image, err)
@@ -276,6 +234,43 @@ func createBuildOverlayRootfs(lowerDir string) (merged, upper string, cleanup fu
 		_ = os.RemoveAll(base)
 	}
 	return merged, upper, cleanup, nil
+}
+
+// saveStageCache writes the stage's content to cacheDir and returns nil only
+// when the cache is fully committed (manifest written last as an atomic marker).
+//
+// When the workspace is overlay-backed we reconstruct the merged view from its
+// two constituent parts — base rootfs and upper layer — instead of reading
+// through the overlay mount point.  Both parts live under stateBaseDir() (same
+// tmpfs), so os.Link succeeds and the copy is effectively instant.  Reading
+// through the overlay mount always crosses a filesystem boundary (overlay →
+// tmpfs), forcing os.Link to fall back to a slow byte-by-byte io.Copy for
+// every file in the tree (hundreds of MB for a typical Node image).
+func saveStageCache(workspace *stageWorkspace, cacheDir string, m *BuildManifest, logf func(string, ...any), idx int) error {
+	var copyErr error
+	if workspace.baseDir != "" && workspace.upperDir != "" {
+		// Fast path: hardlink base + upper separately (same filesystem).
+		_ = os.RemoveAll(cacheDir)
+		if copyErr = hardlinkCopy(workspace.baseDir, cacheDir); copyErr == nil {
+			copyErr = hardlinkCopy(workspace.upperDir, cacheDir)
+		}
+	} else {
+		// Fallback: plain dir workspace — materialize from rootfs directly.
+		copyErr = materializeStageRootfs(workspace.rootfs, cacheDir)
+	}
+	if copyErr != nil {
+		logf("[build] stage %d: warn: stage cache save failed: %v", idx, copyErr)
+		_ = os.RemoveAll(cacheDir)
+		return copyErr
+	}
+	// Write manifest last as a commit marker — if interrupted before this
+	// point the cache dir has no manifest and loadManifest will reject it.
+	if mfErr := saveManifest(cacheDir, m); mfErr != nil {
+		logf("[build] stage %d: warn: stage cache manifest write failed: %v", idx, mfErr)
+		_ = os.RemoveAll(cacheDir)
+		return mfErr
+	}
+	return nil
 }
 
 func materializeStageRootfs(src, dest string) error {
