@@ -2336,7 +2336,7 @@ func (s *Server) reconcileProjectServices(log func(string, ...any), app string, 
 
 // ---------------------- Preview URL helper ----------------------
 
-// autoPreviewHost generates a hostname from RELAY_BASE_DOMAIN when set.
+// autoPreviewHost generates a hostname from RELAY_BASE_DOMAIN env var when set.
 // Returns "" if the env var is not configured (falls back to port mode).
 func autoPreviewHost(app, branch string) string {
 	base := strings.TrimSpace(os.Getenv("RELAY_BASE_DOMAIN"))
@@ -2344,6 +2344,60 @@ func autoPreviewHost(app, branch string) string {
 		return ""
 	}
 	return fmt.Sprintf("%s-%s.%s", safe(app), safe(branch), base)
+}
+
+// serverConfigGet reads a single key from the server_config table.
+// Returns "" if the key doesn't exist or on any error.
+func (s *Server) serverConfigGet(key string) string {
+	var val string
+	_ = s.db.QueryRow(`SELECT value FROM server_config WHERE key=?`, key).Scan(&val)
+	return strings.TrimSpace(val)
+}
+
+// serverBaseDomain returns the effective base domain: DB value first, then env var.
+func (s *Server) serverBaseDomain() string {
+	if base := s.serverConfigGet("base_domain"); base != "" {
+		return base
+	}
+	return strings.TrimSpace(os.Getenv("RELAY_BASE_DOMAIN"))
+}
+
+// autoPreviewHostFull generates a hostname using the effective base domain (DB or env var).
+func (s *Server) autoPreviewHostFull(app, branch string) string {
+	base := s.serverBaseDomain()
+	if base == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s-%s.%s", safe(app), safe(branch), base)
+}
+
+// handleServerConfig handles GET/POST /api/server/config.
+func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, 200, map[string]string{"base_domain": s.serverBaseDomain()})
+	case http.MethodPost:
+		var body struct {
+			BaseDomain string `json:"base_domain"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpError(w, 400, "invalid JSON")
+			return
+		}
+		_, err := s.db.Exec(
+			`INSERT INTO server_config (key, value) VALUES (?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+			"base_domain", strings.TrimSpace(body.BaseDomain),
+		)
+		if err != nil {
+			httpError(w, 500, "db write failed: "+err.Error())
+			return
+		}
+		go func() { _ = s.ensureGlobalProxy() }()
+		writeJSON(w, 200, map[string]string{"base_domain": strings.TrimSpace(body.BaseDomain)})
+	default:
+		httpError(w, 405, "method not allowed")
+	}
 }
 
 // ---------------------- Buildpack Plugins API ----------------------
@@ -3084,6 +3138,7 @@ func main() {
 	mux.HandleFunc("/api/apps/stop", s.auth(s.handleAppStop))
 	mux.HandleFunc("/api/apps/restart", s.auth(s.handleAppRestart))
 	mux.HandleFunc("/api/apps/config", s.auth(s.handleAppConfig))
+	mux.HandleFunc("/api/server/config", s.auth(s.handleServerConfig))
 	mux.HandleFunc("/api/apps/companions", s.auth(s.handleAppCompanions))
 	mux.HandleFunc("/api/apps/companions/restart", s.auth(s.handleCompanionRestart))
 	mux.HandleFunc("/api/apps/secrets", s.auth(s.handleAppSecrets))
@@ -3145,6 +3200,7 @@ func main() {
 			sockMux.HandleFunc("/api/apps/stop", s.auth(s.handleAppStop))
 			sockMux.HandleFunc("/api/apps/restart", s.auth(s.handleAppRestart))
 			sockMux.HandleFunc("/api/apps/config", s.auth(s.handleAppConfig))
+			sockMux.HandleFunc("/api/server/config", s.auth(s.handleServerConfig))
 			sockMux.HandleFunc("/api/apps/companions", s.auth(s.handleAppCompanions))
 			sockMux.HandleFunc("/api/apps/companions/restart", s.auth(s.handleCompanionRestart))
 			sockMux.HandleFunc("/api/apps/secrets", s.auth(s.handleAppSecrets))
@@ -6027,7 +6083,7 @@ func (s *Server) runDeploy(job DeployJob) {
 		req.ServicePort = plan.ServicePort
 	}
 	if req.PublicHost == "" {
-		if host := autoPreviewHost(req.App, req.Branch); host != "" {
+		if host := s.autoPreviewHostFull(req.App, req.Branch); host != "" {
 			req.PublicHost = host
 			req.Mode = "traefik"
 			log("auto preview URL: %s", host)
@@ -6311,7 +6367,7 @@ func (s *Server) assignPreviewHostPort(runtime ContainerRuntime, req *DeployRequ
 	if strings.TrimSpace(req.PublicHost) != "" {
 		return
 	}
-	if autoPreviewHost(req.App, req.Branch) != "" {
+	if s.autoPreviewHostFull(req.App, req.Branch) != "" {
 		return
 	}
 	if firstNonEmpty(strings.ToLower(strings.TrimSpace(req.Mode)), "port") != "port" {
@@ -7410,6 +7466,7 @@ func migrateDB(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN port INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN host_port INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN spec_hash TEXT DEFAULT ''`)
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS server_config (key TEXT PRIMARY KEY, value TEXT)`)
 	return nil
 }
 

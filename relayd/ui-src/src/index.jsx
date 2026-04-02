@@ -55,6 +55,14 @@ const NAV_ICONS = {
       <circle cx="8" cy="7" r="2" /><circle cx="16" cy="12" r="2" /><circle cx="8" cy="17" r="2" />
     </svg>
   ),
+  server: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="2" width="20" height="8" rx="2" ry="2"/>
+      <rect x="2" y="14" width="20" height="8" rx="2" ry="2"/>
+      <line x1="6" y1="6" x2="6.01" y2="6"/>
+      <line x1="6" y1="18" x2="6.01" y2="18"/>
+    </svg>
+  ),
 };
 
 async function api(path, options = {}) {
@@ -3118,6 +3126,143 @@ function EmptyState() {
   );
 }
 
+function ServerSettingsTab() {
+  const [baseDomain, setBaseDomain] = useState("");
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState(null);
+
+  useEffect(() => {
+    api("/api/server/config")
+      .then((data) => {
+        setBaseDomain(data?.base_domain || "");
+        setDraft(data?.base_domain || "");
+      })
+      .catch(() => {});
+  }, []);
+
+  const dirty = draft !== baseDomain;
+
+  async function save() {
+    setBusy(true);
+    setNotice(null);
+    try {
+      const saved = await api("/api/server/config", {
+        method: "POST",
+        body: JSON.stringify({ base_domain: draft }),
+      });
+      setBaseDomain(saved?.base_domain || "");
+      setDraft(saved?.base_domain || "");
+      setNotice({ tone: "ok", text: "Saved. New deploys without an explicit public host will auto-assign a subdomain." });
+    } catch (err) {
+      setNotice({ tone: "danger", text: err.message || "Save failed." });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const exampleHost = draft ? `myapp-main.${draft}` : "myapp-main.example.com";
+
+  return (
+    <section className="grid-two settings-page">
+      <div className="panel section-card section-card--wide">
+        <div className="section-card__header">
+          <div className="section-card__header-group">
+            <div className="section-icon section-icon--teal">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="2" y="2" width="20" height="8" rx="2" ry="2"/>
+                <rect x="2" y="14" width="20" height="8" rx="2" ry="2"/>
+                <line x1="6" y1="6" x2="6.01" y2="6"/>
+                <line x1="6" y1="18" x2="6.01" y2="18"/>
+              </svg>
+            </div>
+            <div>
+              <div className="eyebrow">Global Proxy / Domain Routing</div>
+              <h3>Server-level settings</h3>
+            </div>
+          </div>
+        </div>
+
+        <label className="field">
+          <span>Base Domain</span>
+          <input
+            className="text-input"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder="yourdomain.com"
+          />
+        </label>
+        <p className="muted">
+          When set, apps deployed without an explicit <code>public_host</code> get an auto-generated subdomain:{" "}
+          <code>{exampleHost}</code>. Relay also starts a Caddy reverse proxy container that handles TLS automatically.
+        </p>
+        <p className="muted">
+          You can also set this via the <code>RELAY_BASE_DOMAIN</code> environment variable. The value saved here takes precedence.
+        </p>
+
+        {notice && (
+          <div className={cx("settings-notice", notice.tone === "ok" && "settings-notice--ok", notice.tone === "danger" && "settings-notice--danger")}>
+            <span>{notice.text}</span>
+          </div>
+        )}
+
+        <div className="button-row">
+          <button type="button" className="primary-button" onClick={save} disabled={busy || !dirty}>
+            {busy ? "Saving..." : "Save Global Settings"}
+          </button>
+        </div>
+        <div className="settings-footnote">
+          The global proxy container (<code>relay-global-proxy</code>) is automatically restarted whenever app domain routing changes. Caddy handles TLS certificate provisioning for any domain you point at this server.
+        </div>
+      </div>
+
+      <div className="panel section-card">
+        <div className="section-card__header">
+          <div className="section-card__header-group">
+            <div className="section-icon section-icon--amber">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="12" y1="8" x2="12" y2="12"/>
+                <line x1="12" y1="16" x2="12.01" y2="16"/>
+              </svg>
+            </div>
+            <div>
+              <div className="eyebrow">How it Works</div>
+              <h3>Domain routing overview</h3>
+            </div>
+          </div>
+        </div>
+        <div className="stack-list">
+          <div className="row-card">
+            <div>
+              <div className="row-card__title">Auto subdomains</div>
+              <div className="row-card__meta">Set Base Domain here. New deploys auto-get <code>{"{app}-{branch}.{domain}"}</code>.</div>
+            </div>
+          </div>
+          <div className="row-card">
+            <div>
+              <div className="row-card__title">Custom domain per app</div>
+              <div className="row-card__meta">Set <code>Public Host</code> in the app's Settings tab to override the auto-assigned subdomain with any domain.</div>
+            </div>
+          </div>
+          <div className="row-card">
+            <div>
+              <div className="row-card__title">Caddy TLS</div>
+              <div className="row-card__meta">Relay runs a <code>caddy:alpine</code> container (<code>relay-global-proxy</code>) that terminates TLS and proxies to each app.</div>
+            </div>
+          </div>
+          <div className="row-card">
+            <div>
+              <div className="row-card__title">DNS requirement</div>
+              <div className="row-card__meta">Point your domain or wildcard (<code>*.yourdomain.com</code>) A record at this server's public IP.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function App() {
   const [authState, setAuthState] = useState("checking");
   const [loginError, setLoginError] = useState("");
@@ -3364,6 +3509,7 @@ function App() {
             ["deployments", "Deployments"],
             ["logs", "Logs"],
             ["settings", "Settings"],
+            ["server", "Server"],
           ].map(([id, label]) => (
             <button
               key={id}
@@ -3496,7 +3642,11 @@ function App() {
         {dashboard.error && <div className="error-banner">{dashboard.error}</div>}
 
         {!selectedProject ? (
-          <EmptyState />
+          activeTab === "server" ? (
+            <ServerSettingsTab />
+          ) : (
+            <EmptyState />
+          )
         ) : (
           <>
             <div className="metric-row">
@@ -3555,6 +3705,10 @@ function App() {
                 services={projectServices}
                 onUpdated={refreshDashboard}
               />
+            )}
+
+            {activeTab === "server" && (
+              <ServerSettingsTab />
             )}
           </>
         )}

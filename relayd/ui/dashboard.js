@@ -14698,6 +14698,12 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
       /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("circle", { cx: "8", cy: "7", r: "2" }),
       /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("circle", { cx: "16", cy: "12", r: "2" }),
       /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("circle", { cx: "8", cy: "17", r: "2" })
+    ] }),
+    server: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.5", strokeLinecap: "round", strokeLinejoin: "round", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("rect", { x: "2", y: "2", width: "20", height: "8", rx: "2", ry: "2" }),
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("rect", { x: "2", y: "14", width: "20", height: "8", rx: "2", ry: "2" }),
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("line", { x1: "6", y1: "6", x2: "6.01", y2: "6" }),
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("line", { x1: "6", y1: "18", x2: "6.01", y2: "18" })
     ] })
   };
   async function api(path, options = {}) {
@@ -17280,6 +17286,135 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
       /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("p", { children: "The project dropdown is now driven by `/api/projects`, so projects appear as soon as Relay has app state." })
     ] });
   }
+  function ServerSettingsTab() {
+    const [baseDomain, setBaseDomain] = (0, import_react9.useState)("");
+    const [draft, setDraft] = (0, import_react9.useState)("");
+    const [busy, setBusy] = (0, import_react9.useState)(false);
+    const [notice, setNotice] = (0, import_react9.useState)(null);
+    (0, import_react9.useEffect)(() => {
+      api("/api/server/config").then((data) => {
+        setBaseDomain(data?.base_domain || "");
+        setDraft(data?.base_domain || "");
+      }).catch(() => {
+      });
+    }, []);
+    const dirty = draft !== baseDomain;
+    async function save() {
+      setBusy(true);
+      setNotice(null);
+      try {
+        const saved = await api("/api/server/config", {
+          method: "POST",
+          body: JSON.stringify({ base_domain: draft })
+        });
+        setBaseDomain(saved?.base_domain || "");
+        setDraft(saved?.base_domain || "");
+        setNotice({ tone: "ok", text: "Saved. New deploys without an explicit public host will auto-assign a subdomain." });
+      } catch (err) {
+        setNotice({ tone: "danger", text: err.message || "Save failed." });
+      } finally {
+        setBusy(false);
+      }
+    }
+    const exampleHost = draft ? `myapp-main.${draft}` : "myapp-main.example.com";
+    return /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("section", { className: "grid-two settings-page", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "panel section-card section-card--wide", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "section-card__header", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "section-card__header-group", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "section-icon section-icon--teal", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("rect", { x: "2", y: "2", width: "20", height: "8", rx: "2", ry: "2" }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("rect", { x: "2", y: "14", width: "20", height: "8", rx: "2", ry: "2" }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("line", { x1: "6", y1: "6", x2: "6.01", y2: "6" }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("line", { x1: "6", y1: "18", x2: "6.01", y2: "18" })
+          ] }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "eyebrow", children: "Global Proxy / Domain Routing" }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("h3", { children: "Server-level settings" })
+          ] })
+        ] }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("label", { className: "field", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { children: "Base Domain" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(
+            "input",
+            {
+              className: "text-input",
+              value: draft,
+              onChange: (e) => setDraft(e.target.value),
+              placeholder: "yourdomain.com"
+            }
+          )
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("p", { className: "muted", children: [
+          "When set, apps deployed without an explicit ",
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("code", { children: "public_host" }),
+          " get an auto-generated subdomain:",
+          " ",
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("code", { children: exampleHost }),
+          ". Relay also starts a Caddy reverse proxy container that handles TLS automatically."
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("p", { className: "muted", children: [
+          "You can also set this via the ",
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("code", { children: "RELAY_BASE_DOMAIN" }),
+          " environment variable. The value saved here takes precedence."
+        ] }),
+        notice && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: cx2("settings-notice", notice.tone === "ok" && "settings-notice--ok", notice.tone === "danger" && "settings-notice--danger"), children: /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { children: notice.text }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "button-row", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "primary-button", onClick: save, disabled: busy || !dirty, children: busy ? "Saving..." : "Save Global Settings" }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "settings-footnote", children: [
+          "The global proxy container (",
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("code", { children: "relay-global-proxy" }),
+          ") is automatically restarted whenever app domain routing changes. Caddy handles TLS certificate provisioning for any domain you point at this server."
+        ] })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "panel section-card", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "section-card__header", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "section-card__header-group", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "section-icon section-icon--amber", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("circle", { cx: "12", cy: "12", r: "10" }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("line", { x1: "12", y1: "8", x2: "12", y2: "12" }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("line", { x1: "12", y1: "16", x2: "12.01", y2: "16" })
+          ] }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "eyebrow", children: "How it Works" }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("h3", { children: "Domain routing overview" })
+          ] })
+        ] }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "stack-list", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card__title", children: "Auto subdomains" }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "row-card__meta", children: [
+              "Set Base Domain here. New deploys auto-get ",
+              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("code", { children: "{app}-{branch}.{domain}" }),
+              "."
+            ] })
+          ] }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card__title", children: "Custom domain per app" }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "row-card__meta", children: [
+              "Set ",
+              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("code", { children: "Public Host" }),
+              " in the app's Settings tab to override the auto-assigned subdomain with any domain."
+            ] })
+          ] }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card__title", children: "Caddy TLS" }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "row-card__meta", children: [
+              "Relay runs a ",
+              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("code", { children: "caddy:alpine" }),
+              " container (",
+              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("code", { children: "relay-global-proxy" }),
+              ") that terminates TLS and proxies to each app."
+            ] })
+          ] }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card__title", children: "DNS requirement" }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "row-card__meta", children: [
+              "Point your domain or wildcard (",
+              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("code", { children: "*.yourdomain.com" }),
+              ") A record at this server's public IP."
+            ] })
+          ] }) })
+        ] })
+      ] })
+    ] });
+  }
   function App() {
     const [authState, setAuthState] = (0, import_react9.useState)("checking");
     const [loginError, setLoginError] = (0, import_react9.useState)("");
@@ -17493,7 +17628,8 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
           ["overview", "Overview"],
           ["deployments", "Deployments"],
           ["logs", "Logs"],
-          ["settings", "Settings"]
+          ["settings", "Settings"],
+          ["server", "Server"]
         ].map(([id, label]) => /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(
           "button",
           {
@@ -17596,7 +17732,7 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
           ] })
         ] }),
         dashboard.error && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "error-banner", children: dashboard.error }),
-        !selectedProject ? /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(EmptyState, {}) : /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(import_jsx_runtime27.Fragment, { children: [
+        !selectedProject ? activeTab === "server" ? /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(ServerSettingsTab, {}) : /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(EmptyState, {}) : /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(import_jsx_runtime27.Fragment, { children: [
           /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "metric-row", children: [
             /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(MetricCard, { label: "Environments", value: String(selectedProject.envs.length), meta: "active project lanes", tone: "teal" }),
             /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(MetricCard, { label: "Services", value: String(selectedProject.services.length), meta: "companion containers", accent: true }),
@@ -17655,7 +17791,8 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
               services: projectServices,
               onUpdated: refreshDashboard
             }
-          )
+          ),
+          activeTab === "server" && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(ServerSettingsTab, {})
         ] }),
         selectedDeploy && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(
           LogViewer,
