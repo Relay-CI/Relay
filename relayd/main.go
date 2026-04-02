@@ -605,6 +605,7 @@ type Server struct {
 	workspacesDir         string
 	logsDir               string
 	pluginsDir            string
+	httpAddr              string
 	corsOrigins           map[string]struct{}
 	allowAllCORS          bool
 	enablePluginMutations bool
@@ -2371,6 +2372,30 @@ func (s *Server) serverBaseDomain() string {
 	return strings.TrimSpace(os.Getenv("RELAY_BASE_DOMAIN"))
 }
 
+func (s *Server) serverDashboardHost() string {
+	if host := s.serverConfigGet("dashboard_host"); host != "" {
+		return host
+	}
+	return strings.TrimSpace(os.Getenv("RELAY_DASHBOARD_HOST"))
+}
+
+func listenAddrPort(addr string) int {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return 0
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err == nil {
+		p, _ := strconv.Atoi(port)
+		return p
+	}
+	if strings.HasPrefix(addr, ":") {
+		p, _ := strconv.Atoi(strings.TrimPrefix(addr, ":"))
+		return p
+	}
+	return 0
+}
+
 // autoPreviewHostFull generates a hostname using the effective base domain (DB or env var).
 func (s *Server) autoPreviewHostFull(app, branch string) string {
 	base := s.serverBaseDomain()
@@ -2384,26 +2409,47 @@ func (s *Server) autoPreviewHostFull(app, branch string) string {
 func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, 200, map[string]string{"base_domain": s.serverBaseDomain()})
+		writeJSON(w, 200, map[string]string{
+			"base_domain":    s.serverBaseDomain(),
+			"dashboard_host": s.serverDashboardHost(),
+		})
 	case http.MethodPost:
 		var body struct {
-			BaseDomain string `json:"base_domain"`
+			BaseDomain    string `json:"base_domain"`
+			DashboardHost string `json:"dashboard_host"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httpError(w, 400, "invalid JSON")
 			return
 		}
-		_, err := s.db.Exec(
-			`INSERT INTO server_config (key, value) VALUES (?, ?)
-			 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
-			"base_domain", strings.TrimSpace(body.BaseDomain),
-		)
+		tx, err := s.db.Begin()
 		if err != nil {
+			httpError(w, 500, "db begin failed: "+err.Error())
+			return
+		}
+		for key, value := range map[string]string{
+			"base_domain":    strings.TrimSpace(body.BaseDomain),
+			"dashboard_host": strings.TrimSpace(body.DashboardHost),
+		} {
+			if _, err := tx.Exec(
+				`INSERT INTO server_config (key, value) VALUES (?, ?)
+				 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+				key, value,
+			); err != nil {
+				_ = tx.Rollback()
+				httpError(w, 500, "db write failed: "+err.Error())
+				return
+			}
+		}
+		if err := tx.Commit(); err != nil {
 			httpError(w, 500, "db write failed: "+err.Error())
 			return
 		}
 		go func() { _ = s.ensureGlobalProxy() }()
-		writeJSON(w, 200, map[string]string{"base_domain": strings.TrimSpace(body.BaseDomain)})
+		writeJSON(w, 200, map[string]string{
+			"base_domain":    strings.TrimSpace(body.BaseDomain),
+			"dashboard_host": strings.TrimSpace(body.DashboardHost),
+		})
 	default:
 		httpError(w, 405, "method not allowed")
 	}
@@ -3086,6 +3132,7 @@ func main() {
 		workspacesDir:         filepath.Join(dataDir, "workspaces"),
 		logsDir:               filepath.Join(dataDir, "logs"),
 		pluginsDir:            filepath.Join(dataDir, "plugins"),
+		httpAddr:              getenv("RELAY_ADDR", ":8080"),
 		corsOrigins:           map[string]struct{}{},
 		allowAllCORS:          false,
 		enablePluginMutations: getenvBool("RELAY_ENABLE_PLUGIN_MUTATIONS", false),
@@ -3254,6 +3301,7 @@ func main() {
 	if runCfg.Addr != "" {
 		addr = runCfg.Addr
 	}
+	s.httpAddr = addr
 	httpServer := &http.Server{
 		Addr:    addr,
 		Handler: s.withCORS(mux),
@@ -5274,7 +5322,7 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.PublicHost != nil {
 			publicHost := strings.TrimSpace(*body.PublicHost)
-			if publicHost != "" && normalizedHostname(publicHost) == normalizedRequestHost(r) {
+			if publicHost != "" && (normalizedHostname(publicHost) == normalizedRequestHost(r) || normalizedHostname(publicHost) == normalizedHostname(s.serverDashboardHost())) {
 				httpError(w, 400, "public_host cannot match the Relay dashboard host; use a different subdomain for apps")
 				return
 			}
@@ -6894,6 +6942,11 @@ func (s *Server) ensureGlobalProxy() error {
 			continue
 		}
 		routes = append(routes, r)
+	}
+	if dashboardHost := strings.TrimSpace(s.serverDashboardHost()); dashboardHost != "" {
+		if relayPort := listenAddrPort(s.httpAddr); relayPort > 0 {
+			routes = append(routes, route{host: dashboardHost, hostPort: relayPort})
+		}
 	}
 
 	containerName := "relay-global-proxy"

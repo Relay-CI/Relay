@@ -17288,35 +17288,44 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
   }
   function ServerSettingsTab() {
     const [baseDomain, setBaseDomain] = (0, import_react9.useState)("");
-    const [draft, setDraft] = (0, import_react9.useState)("");
+    const [dashboardHost, setDashboardHost] = (0, import_react9.useState)("");
+    const [draft, setDraft] = (0, import_react9.useState)({ baseDomain: "", dashboardHost: "" });
     const [busy, setBusy] = (0, import_react9.useState)(false);
     const [notice, setNotice] = (0, import_react9.useState)(null);
     (0, import_react9.useEffect)(() => {
       api("/api/server/config").then((data) => {
         setBaseDomain(data?.base_domain || "");
-        setDraft(data?.base_domain || "");
+        setDashboardHost(data?.dashboard_host || "");
+        setDraft({
+          baseDomain: data?.base_domain || "",
+          dashboardHost: data?.dashboard_host || ""
+        });
       }).catch(() => {
       });
     }, []);
-    const dirty = draft !== baseDomain;
+    const dirty = draft.baseDomain !== baseDomain || draft.dashboardHost !== dashboardHost;
     async function save() {
       setBusy(true);
       setNotice(null);
       try {
         const saved = await api("/api/server/config", {
           method: "POST",
-          body: JSON.stringify({ base_domain: draft })
+          body: JSON.stringify({ base_domain: draft.baseDomain, dashboard_host: draft.dashboardHost })
         });
         setBaseDomain(saved?.base_domain || "");
-        setDraft(saved?.base_domain || "");
-        setNotice({ tone: "ok", text: "Saved. New deploys without an explicit public host will auto-assign a subdomain." });
+        setDashboardHost(saved?.dashboard_host || "");
+        setDraft({
+          baseDomain: saved?.base_domain || "",
+          dashboardHost: saved?.dashboard_host || ""
+        });
+        setNotice({ tone: "ok", text: "Saved. Caddy will route the dashboard host back to Relay, and new deploys without an explicit public host will auto-assign a subdomain." });
       } catch (err) {
         setNotice({ tone: "danger", text: err.message || "Save failed." });
       } finally {
         setBusy(false);
       }
     }
-    const exampleHost = draft ? `myapp-main.${draft}` : "myapp-main.example.com";
+    const exampleHost = draft.baseDomain ? `myapp-main.${draft.baseDomain}` : "myapp-main.example.com";
     return /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("section", { className: "grid-two settings-page", children: [
       /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "panel section-card section-card--wide", children: [
         /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "section-card__header", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "section-card__header-group", children: [
@@ -17337,9 +17346,21 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
             "input",
             {
               className: "text-input",
-              value: draft,
-              onChange: (e) => setDraft(e.target.value),
+              value: draft.baseDomain,
+              onChange: (e) => setDraft((current) => ({ ...current, baseDomain: e.target.value })),
               placeholder: "yourdomain.com"
+            }
+          )
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("label", { className: "field", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { children: "Dashboard Host" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(
+            "input",
+            {
+              className: "text-input",
+              value: draft.dashboardHost,
+              onChange: (e) => setDraft((current) => ({ ...current, dashboardHost: e.target.value })),
+              placeholder: "admin.yourdomain.com"
             }
           )
         ] }),
@@ -17352,9 +17373,15 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
           ". Relay also starts a Caddy reverse proxy container that handles TLS automatically."
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("p", { className: "muted", children: [
-          "You can also set this via the ",
+          "Set ",
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("code", { children: "Dashboard Host" }),
+          " to something like ",
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("code", { children: "admin.f4ust.com" }),
+          " so Relay owns that hostname, while apps use other hosts. You can also set these via ",
           /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("code", { children: "RELAY_BASE_DOMAIN" }),
-          " environment variable. The value saved here takes precedence."
+          " and ",
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("code", { children: "RELAY_DASHBOARD_HOST" }),
+          ". Saved values here take precedence."
         ] }),
         notice && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: cx2("settings-notice", notice.tone === "ok" && "settings-notice--ok", notice.tone === "danger" && "settings-notice--danger"), children: /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { children: notice.text }) }),
         /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "button-row", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "primary-button", onClick: save, disabled: busy || !dirty, children: busy ? "Saving..." : "Save Global Settings" }) }),
@@ -17382,6 +17409,16 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
             /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "row-card__meta", children: [
               "Set Base Domain here. New deploys auto-get ",
               /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("code", { children: "{app}-{branch}.{domain}" }),
+              "."
+            ] })
+          ] }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card__title", children: "Dashboard host" }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "row-card__meta", children: [
+              "Set ",
+              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("code", { children: "Dashboard Host" }),
+              " to route the Relay admin itself through Caddy, for example ",
+              /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("code", { children: "admin.f4ust.com" }),
               "."
             ] })
           ] }) }),

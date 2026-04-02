@@ -3128,7 +3128,8 @@ function EmptyState() {
 
 function ServerSettingsTab() {
   const [baseDomain, setBaseDomain] = useState("");
-  const [draft, setDraft] = useState("");
+  const [dashboardHost, setDashboardHost] = useState("");
+  const [draft, setDraft] = useState({ baseDomain: "", dashboardHost: "" });
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null);
 
@@ -3136,12 +3137,16 @@ function ServerSettingsTab() {
     api("/api/server/config")
       .then((data) => {
         setBaseDomain(data?.base_domain || "");
-        setDraft(data?.base_domain || "");
+        setDashboardHost(data?.dashboard_host || "");
+        setDraft({
+          baseDomain: data?.base_domain || "",
+          dashboardHost: data?.dashboard_host || "",
+        });
       })
       .catch(() => {});
   }, []);
 
-  const dirty = draft !== baseDomain;
+  const dirty = draft.baseDomain !== baseDomain || draft.dashboardHost !== dashboardHost;
 
   async function save() {
     setBusy(true);
@@ -3149,11 +3154,15 @@ function ServerSettingsTab() {
     try {
       const saved = await api("/api/server/config", {
         method: "POST",
-        body: JSON.stringify({ base_domain: draft }),
+        body: JSON.stringify({ base_domain: draft.baseDomain, dashboard_host: draft.dashboardHost }),
       });
       setBaseDomain(saved?.base_domain || "");
-      setDraft(saved?.base_domain || "");
-      setNotice({ tone: "ok", text: "Saved. New deploys without an explicit public host will auto-assign a subdomain." });
+      setDashboardHost(saved?.dashboard_host || "");
+      setDraft({
+        baseDomain: saved?.base_domain || "",
+        dashboardHost: saved?.dashboard_host || "",
+      });
+      setNotice({ tone: "ok", text: "Saved. Caddy will route the dashboard host back to Relay, and new deploys without an explicit public host will auto-assign a subdomain." });
     } catch (err) {
       setNotice({ tone: "danger", text: err.message || "Save failed." });
     } finally {
@@ -3161,7 +3170,7 @@ function ServerSettingsTab() {
     }
   }
 
-  const exampleHost = draft ? `myapp-main.${draft}` : "myapp-main.example.com";
+  const exampleHost = draft.baseDomain ? `myapp-main.${draft.baseDomain}` : "myapp-main.example.com";
 
   return (
     <section className="grid-two settings-page">
@@ -3187,9 +3196,18 @@ function ServerSettingsTab() {
           <span>Base Domain</span>
           <input
             className="text-input"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            value={draft.baseDomain}
+            onChange={(e) => setDraft((current) => ({ ...current, baseDomain: e.target.value }))}
             placeholder="yourdomain.com"
+          />
+        </label>
+        <label className="field">
+          <span>Dashboard Host</span>
+          <input
+            className="text-input"
+            value={draft.dashboardHost}
+            onChange={(e) => setDraft((current) => ({ ...current, dashboardHost: e.target.value }))}
+            placeholder="admin.yourdomain.com"
           />
         </label>
         <p className="muted">
@@ -3197,7 +3215,7 @@ function ServerSettingsTab() {
           <code>{exampleHost}</code>. Relay also starts a Caddy reverse proxy container that handles TLS automatically.
         </p>
         <p className="muted">
-          You can also set this via the <code>RELAY_BASE_DOMAIN</code> environment variable. The value saved here takes precedence.
+          Set <code>Dashboard Host</code> to something like <code>admin.f4ust.com</code> so Relay owns that hostname, while apps use other hosts. You can also set these via <code>RELAY_BASE_DOMAIN</code> and <code>RELAY_DASHBOARD_HOST</code>. Saved values here take precedence.
         </p>
 
         {notice && (
@@ -3237,6 +3255,12 @@ function ServerSettingsTab() {
             <div>
               <div className="row-card__title">Auto subdomains</div>
               <div className="row-card__meta">Set Base Domain here. New deploys auto-get <code>{"{app}-{branch}.{domain}"}</code>.</div>
+            </div>
+          </div>
+          <div className="row-card">
+            <div>
+              <div className="row-card__title">Dashboard host</div>
+              <div className="row-card__meta">Set <code>Dashboard Host</code> to route the Relay admin itself through Caddy, for example <code>admin.f4ust.com</code>.</div>
             </div>
           </div>
           <div className="row-card">
