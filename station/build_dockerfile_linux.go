@@ -359,6 +359,7 @@ func runInChroot(rootfs, workdir string, envMap map[string]string, shell string,
 
 	// Re-exec ourselves with a magic subcommand that sets up chroot + exec.
 	cmd := exec.Command(self, "__station_run__", rootfs, workdir, shell)
+	cmd.Stdin = strings.NewReader("") // prevent Go from opening /dev/null for stdin
 	cmd.Stdout = logw
 	cmd.Stderr = logw
 
