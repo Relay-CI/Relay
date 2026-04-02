@@ -5273,7 +5273,12 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 			st.ServicePort = *body.ServicePort
 		}
 		if body.PublicHost != nil {
-			st.PublicHost = strings.TrimSpace(*body.PublicHost)
+			publicHost := strings.TrimSpace(*body.PublicHost)
+			if publicHost != "" && normalizedHostname(publicHost) == normalizedRequestHost(r) {
+				httpError(w, 400, "public_host cannot match the Relay dashboard host; use a different subdomain for apps")
+				return
+			}
+			st.PublicHost = publicHost
 		}
 		if body.WebhookSecret != nil {
 			st.WebhookSecret = strings.TrimSpace(*body.WebhookSecret)
@@ -7132,6 +7137,28 @@ func isSameOriginRequest(r *http.Request) bool {
 		host = fh
 	}
 	return strings.EqualFold(u.Host, host)
+}
+
+func normalizedRequestHost(r *http.Request) string {
+	host := strings.TrimSpace(r.Host)
+	if fh := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); fh != "" {
+		host = fh
+	}
+	host = strings.TrimSpace(strings.Split(host, ",")[0])
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	host = strings.TrimSuffix(strings.TrimSpace(host), ".")
+	return strings.ToLower(host)
+}
+
+func normalizedHostname(value string) string {
+	host := strings.TrimSpace(value)
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	host = strings.TrimSuffix(strings.TrimSpace(host), ".")
+	return strings.ToLower(host)
 }
 
 func requiresSameOrigin(method string) bool {
