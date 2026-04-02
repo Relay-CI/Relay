@@ -1559,7 +1559,7 @@ func (s *Server) runStationApp(log func(string, ...any), req DeployRequest, snap
 			recreateProxy = true
 		}
 	}
-	if !recreateProxy && edgeProxyPublishedPortChanged(runtime, req.App, req.Env, req.Branch, hostPort, mode) {
+	if !recreateProxy && edgeProxyPublishedPortChanged(runtime, req.App, req.Env, req.Branch, hostPort, mode, req.PublicHost) {
 		recreateProxy = true
 	}
 	if err := s.ensurestationEdgeProxy(log, req.App, req.Env, req.Branch, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, recreateProxy); err != nil {

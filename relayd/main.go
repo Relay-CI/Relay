@@ -2932,6 +2932,7 @@ func (s *Server) deleteProjectData(app string) (map[string]int64, []string, erro
 	s.buildLock.Unlock()
 
 	s.broadcastSnapshot()
+	go func() { _ = s.ensureGlobalProxy() }()
 
 	return map[string]int64{
 		"lanes":            appStateCount,
@@ -3046,6 +3047,9 @@ func main() {
 	_ = s.loadSessionsFromDB()
 	_ = s.loadDeploysFromDB()
 	_ = s.reconcileStaleDeploysOnStartup()
+
+	// Restore global domain proxy state from DB
+	go func() { _ = s.ensureGlobalProxy() }()
 
 	// Start worker pool: use half of available CPUs (at least 1)
 	n := runtime.NumCPU() / 2
@@ -5215,6 +5219,8 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.broadcastSnapshot()
+		// Refresh global domain proxy if public_host was part of the update
+		go func() { _ = s.ensureGlobalProxy() }()
 		writeJSON(w, 200, st)
 
 	case http.MethodGet:
@@ -6203,6 +6209,13 @@ func (s *Server) runDeploy(job DeployJob) {
 		_ = plan.Cleanup(repoDir)
 	}
 
+	// Refresh global domain proxy after every successful deploy
+	go func() {
+		if err := s.ensureGlobalProxy(); err != nil {
+			log("global proxy update: %v", err)
+		}
+	}()
+
 	log("deploy success. image=%s", artifactRef)
 }
 
@@ -6393,7 +6406,7 @@ func (s *Server) previewHostPortReservedByOtherApp(app string, env DeployEnv, br
 	return false
 }
 
-func edgeProxyPublishedPortChanged(runtime ContainerRuntime, app string, env DeployEnv, branch string, hostPort int, mode string) bool {
+func edgeProxyPublishedPortChanged(runtime ContainerRuntime, app string, env DeployEnv, branch string, hostPort int, mode string, publicHost string) bool {
 	if runtime == nil {
 		return false
 	}
@@ -6403,6 +6416,9 @@ func edgeProxyPublishedPortChanged(runtime ContainerRuntime, app string, env Dep
 	}
 	published := runtime.PublishedPort(containerName, 3000)
 	if firstNonEmpty(strings.ToLower(strings.TrimSpace(mode)), "port") == "port" {
+		return published != firstNonZero(hostPort, defaultHostPort(env))
+	}
+	if strings.TrimSpace(publicHost) != "" {
 		return published != firstNonZero(hostPort, defaultHostPort(env))
 	}
 	return published != 0
@@ -6695,7 +6711,7 @@ func (s *Server) runSlotContainer(log func(string, ...any), app string, env Depl
 	return s.runSlotContainerWithRuntime(s.runtime, log, app, env, branch, slot, image, servicePort, networkName, extraEnv)
 }
 
-func (s *Server) ensureEdgeProxy(log func(string, ...any), app string, env DeployEnv, branch string, networkName string, activeSlot string, standbySlot string, servicePort int, hostPort int, mode string, trafficMode string, recreate bool) error {
+func (s *Server) ensureEdgeProxy(log func(string, ...any), app string, env DeployEnv, branch string, networkName string, activeSlot string, standbySlot string, servicePort int, hostPort int, mode string, trafficMode string, publicHost string, recreate bool) error {
 	activeSlot = normalizeActiveSlot(activeSlot)
 	standbySlot = normalizeActiveSlot(standbySlot)
 	if standbySlot != "" && !s.runtime.IsRunning(appSlotContainerName(app, env, branch, standbySlot)) {
@@ -6721,8 +6737,11 @@ func (s *Server) ensureEdgeProxy(log func(string, ...any), app string, env Deplo
 	if recreate || !s.runtime.IsRunning(containerName) {
 		s.runtime.Remove(containerName)
 		portBindings := []string{}
-		if strings.ToLower(strings.TrimSpace(mode)) == "port" {
+		normMode := strings.ToLower(strings.TrimSpace(mode))
+		if normMode == "port" {
 			portBindings = []string{fmt.Sprintf("%d:3000", hostPort)}
+		} else if strings.TrimSpace(publicHost) != "" {
+			portBindings = []string{fmt.Sprintf("127.0.0.1:%d:3000", hostPort)}
 		}
 		spec := ContainerSpec{
 			Name:          containerName,
@@ -6751,11 +6770,11 @@ func (s *Server) ensureEdgeProxy(log func(string, ...any), app string, env Deplo
 	return nil
 }
 
-func (s *Server) cleanupStandbySlotAfter(app string, env DeployEnv, branch string, activeSlot string, oldSlot string, servicePort int, hostPort int, mode string, trafficMode string, wait time.Duration) {
+func (s *Server) cleanupStandbySlotAfter(app string, env DeployEnv, branch string, activeSlot string, oldSlot string, servicePort int, hostPort int, mode string, trafficMode string, publicHost string, wait time.Duration) {
 	name := appSlotContainerName(app, env, branch, oldSlot)
 	if wait <= 0 {
 		s.runtime.Remove(name)
-		_ = s.ensureEdgeProxy(nil, app, env, branch, appNetworkName(app, env, branch), activeSlot, "", servicePort, hostPort, mode, trafficMode, false)
+		_ = s.ensureEdgeProxy(nil, app, env, branch, appNetworkName(app, env, branch), activeSlot, "", servicePort, hostPort, mode, trafficMode, publicHost, false)
 		if st, err := s.getAppState(app, env, branch); err == nil && st != nil {
 			if normalizeActiveSlot(st.ActiveSlot) == normalizeActiveSlot(activeSlot) && normalizeActiveSlot(st.StandbySlot) == normalizeActiveSlot(oldSlot) {
 				st.StandbySlot = ""
@@ -6769,7 +6788,7 @@ func (s *Server) cleanupStandbySlotAfter(app string, env DeployEnv, branch strin
 	go func() {
 		time.Sleep(wait)
 		s.runtime.Remove(name)
-		_ = s.ensureEdgeProxy(nil, app, env, branch, appNetworkName(app, env, branch), activeSlot, "", servicePort, hostPort, mode, trafficMode, false)
+		_ = s.ensureEdgeProxy(nil, app, env, branch, appNetworkName(app, env, branch), activeSlot, "", servicePort, hostPort, mode, trafficMode, publicHost, false)
 		if st, err := s.getAppState(app, env, branch); err == nil && st != nil {
 			if normalizeActiveSlot(st.ActiveSlot) == normalizeActiveSlot(activeSlot) && normalizeActiveSlot(st.StandbySlot) == normalizeActiveSlot(oldSlot) {
 				st.StandbySlot = ""
@@ -6779,6 +6798,84 @@ func (s *Server) cleanupStandbySlotAfter(app string, env DeployEnv, branch strin
 			}
 		}
 	}()
+}
+
+// ensureGlobalProxy maintains a Caddy container that routes public_host domains
+// to their respective per-app edge proxy ports, handling TLS automatically.
+// It is called (in a goroutine) after any deploy or app config change.
+func (s *Server) ensureGlobalProxy() error {
+	rows, err := s.db.Query(`SELECT public_host, COALESCE(host_port, 0) FROM app_state WHERE public_host != '' AND COALESCE(stopped,0)=0`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type route struct {
+		host     string
+		hostPort int
+	}
+	var routes []route
+	for rows.Next() {
+		var r route
+		if err := rows.Scan(&r.host, &r.hostPort); err != nil {
+			continue
+		}
+		if r.hostPort <= 0 || strings.TrimSpace(r.host) == "" {
+			continue
+		}
+		routes = append(routes, r)
+	}
+
+	containerName := "relay-global-proxy"
+	if len(routes) == 0 {
+		s.runtime.Remove(containerName)
+		return nil
+	}
+
+	configDir := filepath.Join(s.dataDir, "global-proxy")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		return err
+	}
+	dataPath := filepath.Join(configDir, "data")
+	if err := os.MkdirAll(dataPath, 0755); err != nil {
+		return err
+	}
+	configPath := filepath.Join(configDir, "Caddyfile")
+
+	var cf strings.Builder
+	for _, r := range routes {
+		cf.WriteString(strings.TrimSpace(r.host) + " {\n")
+		cf.WriteString(fmt.Sprintf("\treverse_proxy host.docker.internal:%d\n", r.hostPort))
+		cf.WriteString("}\n\n")
+	}
+	if err := os.WriteFile(configPath, []byte(cf.String()), 0644); err != nil {
+		return err
+	}
+
+	if !s.runtime.IsRunning(containerName) {
+		s.runtime.Remove(containerName)
+		spec := ContainerSpec{
+			Name:          containerName,
+			Image:         getenv("RELAY_CADDY_IMAGE", "caddy:alpine"),
+			RestartPolicy: "always",
+			Volumes: []string{
+				fmt.Sprintf("%s:/etc/caddy/Caddyfile:ro", dockerPath(configPath)),
+				fmt.Sprintf("%s:/data", dockerPath(dataPath)),
+			},
+			PortBindings: []string{"80:80", "443:443", "443:443/udp"},
+			ExtraHosts:   []string{"host.docker.internal:host-gateway"},
+		}
+		if err := s.runtime.RunDetached(spec); err != nil {
+			return fmt.Errorf("global proxy start: %w", err)
+		}
+		return nil
+	}
+
+	out, reloadErr := s.runtime.Exec(containerName, []string{"caddy", "reload", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"})
+	if reloadErr != nil {
+		return fmt.Errorf("global proxy reload: %v (%s)", reloadErr, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func (s *Server) currentActiveSlotWithRuntime(runtime ContainerRuntime, app string, env DeployEnv, branch string, state *AppState) string {
@@ -6827,14 +6924,14 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 		prevMode := firstNonEmpty(strings.ToLower(strings.TrimSpace(state.Mode)), "port")
 		prevTrafficMode := firstNonEmpty(normalizeTrafficMode(state.TrafficMode), "edge")
 		prevHostPort := firstNonZero(state.HostPort, defaultHostPort(req.Env))
-		if prevMode != mode || prevHostPort != hostPort || prevTrafficMode != trafficMode {
+		if prevMode != mode || prevHostPort != hostPort || prevTrafficMode != trafficMode || state.PublicHost != req.PublicHost {
 			recreateEdge = true
 		}
 	}
-	if !recreateEdge && edgeProxyPublishedPortChanged(s.runtime, req.App, req.Env, req.Branch, hostPort, mode) {
+	if !recreateEdge && edgeProxyPublishedPortChanged(s.runtime, req.App, req.Env, req.Branch, hostPort, mode, req.PublicHost) {
 		recreateEdge = true
 	}
-	if err := s.ensureEdgeProxy(log, req.App, req.Env, req.Branch, networkName, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, recreateEdge); err != nil {
+	if err := s.ensureEdgeProxy(log, req.App, req.Env, req.Branch, networkName, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, recreateEdge); err != nil {
 		if log != nil {
 			log("edge proxy failed: %v", err)
 		}
@@ -6856,7 +6953,7 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 			_ = s.saveAppState(state)
 			s.broadcastSnapshot()
 		}
-		s.cleanupStandbySlotAfter(req.App, req.Env, req.Branch, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, rolloutDrainDuration())
+		s.cleanupStandbySlotAfter(req.App, req.Env, req.Branch, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, rolloutDrainDuration())
 	} else if state != nil {
 		state.ActiveSlot = nextSlot
 		state.StandbySlot = ""
