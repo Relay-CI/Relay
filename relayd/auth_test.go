@@ -137,3 +137,27 @@ func TestHandleServerConfigRejectsInvalidDashboardHost(t *testing.T) {
 		t.Fatalf("expected invalid hostname to be rejected, got %d (%s)", rec.Code, rec.Body.String())
 	}
 }
+
+func TestHandleAuthCLIStartUsesExistingSession(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	ownerToken := createUserSessionForTest(t, s, "owner-user", "owner")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/cli/start", strings.NewReader(`{"cli_port":52702}`))
+	req.AddCookie(&http.Cookie{Name: dashboardSessionCookie, Value: ownerToken})
+	rec := httptest.NewRecorder()
+
+	s.handleAuthCLIStart(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	redirect, _ := body["cli_redirect"].(string)
+	if !strings.Contains(redirect, "http://localhost:52702/callback?code=") {
+		t.Fatalf("expected cli redirect for callback port, got %#v", body)
+	}
+}

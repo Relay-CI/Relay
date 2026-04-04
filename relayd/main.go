@@ -3283,6 +3283,7 @@ func main() {
 	mux.HandleFunc("/api/auth/setup", s.handleAuthSetup)
 	mux.HandleFunc("/api/auth/login", s.handleAuthLogin)
 	mux.HandleFunc("/api/auth/me", s.handleAuthMe)
+	mux.HandleFunc("/api/auth/cli/start", s.handleAuthCLIStart)
 	mux.HandleFunc("/api/auth/cli/exchange", s.handleAuthCLIExchange)
 	mux.HandleFunc("/api/deploys", authReadDeployerWrite(s.handleDeploys))
 	mux.HandleFunc("/api/deploys/", authAny(s.handleDeployByID))
@@ -3358,6 +3359,7 @@ func main() {
 			sockMux.HandleFunc("/api/auth/setup", s.handleAuthSetup)
 			sockMux.HandleFunc("/api/auth/login", s.handleAuthLogin)
 			sockMux.HandleFunc("/api/auth/me", s.handleAuthMe)
+			sockMux.HandleFunc("/api/auth/cli/start", s.handleAuthCLIStart)
 			sockMux.HandleFunc("/api/auth/cli/exchange", s.handleAuthCLIExchange)
 			sockMux.HandleFunc("/api/deploys", authReadDeployerWrite(s.handleDeploys))
 			sockMux.HandleFunc("/api/deploys/", authAny(s.handleDeployByID))
@@ -8222,14 +8224,10 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	// CLI browser flow: if cli_port given, generate a short-lived auth code
 	// that the CLI can exchange for a bearer token.
 	if body.CLIPort > 0 {
-		code := newID() + newID()
-		if _, codeErr := s.db.Exec(
-			`INSERT INTO auth_codes (code, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)`,
-			code, u.ID, time.Now().UnixMilli(), time.Now().Add(5*time.Minute).UnixMilli(),
-		); codeErr == nil {
-			resp["cli_code"] = code
-			resp["cli_redirect"] = fmt.Sprintf("http://localhost:%d/callback?code=%s&user=%s&role=%s",
-				body.CLIPort, code, url.QueryEscape(u.Username), url.QueryEscape(u.Role))
+		if cliResp, err := s.createCLIAuthResponse(u.ID, u.Username, u.Role, body.CLIPort); err == nil {
+			for k, v := range cliResp {
+				resp[k] = v
+			}
 		}
 	}
 	writeJSON(w, 200, resp)
@@ -8251,6 +8249,56 @@ func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"authenticated": true, "username": sess.Username, "role": sess.Role})
+}
+
+func (s *Server) createCLIAuthResponse(userID string, username string, role string, cliPort int) (map[string]any, error) {
+	if cliPort <= 0 || cliPort > 65535 {
+		return nil, fmt.Errorf("invalid cli port")
+	}
+	code := newID() + newID()
+	if _, err := s.db.Exec(
+		`INSERT INTO auth_codes (code, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)`,
+		code, userID, time.Now().UnixMilli(), time.Now().Add(5*time.Minute).UnixMilli(),
+	); err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"cli_code": code,
+		"cli_redirect": fmt.Sprintf("http://localhost:%d/callback?code=%s&user=%s&role=%s",
+			cliPort, code, url.QueryEscape(username), url.QueryEscape(role)),
+	}, nil
+}
+
+// POST /api/auth/cli/start — mint a short-lived auth code from an existing signed-in browser session.
+func (s *Server) handleAuthCLIStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpError(w, 405, "method not allowed")
+		return
+	}
+	if !s.hasUsers() {
+		writeJSON(w, 200, map[string]any{"setup_required": true})
+		return
+	}
+	sess := s.validateUserSession(r)
+	if sess == nil {
+		httpError(w, 401, "unauthorized")
+		return
+	}
+	var body struct {
+		CLIPort int `json:"cli_port"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpError(w, 400, "invalid json")
+		return
+	}
+	resp, err := s.createCLIAuthResponse(sess.UserID, sess.Username, sess.Role, body.CLIPort)
+	if err != nil {
+		httpError(w, 400, err.Error())
+		return
+	}
+	resp["username"] = sess.Username
+	resp["role"] = sess.Role
+	writeJSON(w, 200, resp)
 }
 
 // POST /api/auth/cli/exchange — exchange a short-lived auth code for a bearer token.

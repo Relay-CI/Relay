@@ -15343,7 +15343,7 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
       /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { children: label })
     ] }) });
   }
-  function LoginScreen({ onLogin, error, legacyMode, setupAvailable, onUseSetup }) {
+  function LoginScreen({ onLogin, error, legacyMode, setupAvailable, onUseSetup, cliMode }) {
     const [username, setUsername] = (0, import_react9.useState)("");
     const [password, setPassword] = (0, import_react9.useState)("");
     const [token, setToken] = (0, import_react9.useState)("");
@@ -15363,10 +15363,10 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
         },
         children: [
           /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(RelayMark, { className: "brand__glyph", title: "Relay mark" }),
-          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "eyebrow", children: "Secure Agent Access" }),
-          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("h1", { className: "login-card__title", children: "Relay Control Room" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "eyebrow", children: cliMode ? "CLI Sign-In Request" : "Secure Agent Access" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("h1", { className: "login-card__title", children: cliMode ? "Approve Relay CLI Access" : "Relay Control Room" }),
           legacyMode ? /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(import_jsx_runtime27.Fragment, { children: [
-            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("p", { className: "login-card__body", children: "Enter your relay token to access the dashboard." }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("p", { className: "login-card__body", children: cliMode ? "Enter your relay token to complete this Relay CLI login." : "Enter your relay token to access the dashboard." }),
             /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(
               "input",
               {
@@ -15379,7 +15379,7 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
               }
             )
           ] }) : /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(import_jsx_runtime27.Fragment, { children: [
-            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("p", { className: "login-card__body", children: "Sign in to manage your deployments." }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("p", { className: "login-card__body", children: cliMode ? "Sign in to grant this local Relay CLI session access with your account." : "Sign in to manage your deployments." }),
             /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(
               "input",
               {
@@ -15421,6 +15421,24 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
         ]
       }
     ) });
+  }
+  function CLIAccessPrompt({ currentUser, error, pending, onContinue, onSwitchAccount }) {
+    return /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "screen-center", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "panel login-card cli-access-card", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(RelayMark, { className: "brand__glyph", title: "Relay mark" }),
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "eyebrow", children: "CLI Access Request" }),
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("h1", { className: "login-card__title", children: "Use your current dashboard session?" }),
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("p", { className: "login-card__body", children: "Relay CLI is asking the admin panel for a local login token. Continue as the account already signed into this browser, or switch accounts first." }),
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "cli-access-card__identity", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "cli-access-card__label", children: "Current session" }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("strong", { children: currentUser.username }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { children: currentUser.role })
+      ] }),
+      error && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "error-banner", children: error }),
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "cli-access-card__actions", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "primary-button", onClick: onContinue, disabled: pending, children: pending ? "Redirecting\u2026" : `Continue as ${currentUser.username}` }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "ghost-button", onClick: onSwitchAccount, disabled: pending, children: "Sign in with another account" })
+      ] })
+    ] }) });
   }
   function SetupScreen({ onSetup, error, legacyModeAvailable, onUseLegacyLogin }) {
     const [username, setUsername] = (0, import_react9.useState)("");
@@ -17906,6 +17924,7 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
     const [loginError, setLoginError] = (0, import_react9.useState)("");
     const [legacyMode, setLegacyMode] = (0, import_react9.useState)(false);
     const [setupAvailable, setSetupAvailable] = (0, import_react9.useState)(false);
+    const [cliHandoffPending, setCliHandoffPending] = (0, import_react9.useState)(false);
     const [currentUser, setCurrentUser] = (0, import_react9.useState)(null);
     const [activeTab, setActiveTab] = (0, import_react9.useState)("overview");
     const [selectedProjectName, setSelectedProjectName] = (0, import_react9.useState)("");
@@ -18096,6 +18115,36 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
         setLoginError(err.message);
       }
     }
+    async function startCliHandoff() {
+      if (!cliParams.enabled) return;
+      setCliHandoffPending(true);
+      setLoginError("");
+      try {
+        const resp = await api("/api/auth/cli/start", {
+          method: "POST",
+          body: JSON.stringify({ cli_port: cliParams.port })
+        });
+        if (resp?.cli_redirect) {
+          window.location.assign(resp.cli_redirect);
+          return;
+        }
+        throw new Error("CLI redirect was not returned.");
+      } catch (err) {
+        setLoginError(err.message || "CLI login handoff failed.");
+        setCliHandoffPending(false);
+      }
+    }
+    async function switchCliAccount() {
+      setCliHandoffPending(false);
+      setLoginError("");
+      try {
+        await api("/api/auth/session", { method: "DELETE" });
+      } catch {
+      }
+      setCurrentUser(null);
+      setSelectedDeploy(null);
+      setAuthState("login");
+    }
     async function handleSetup(creds) {
       setLoginError("");
       try {
@@ -18139,10 +18188,23 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
           error: loginError,
           legacyMode,
           setupAvailable,
+          cliMode: cliParams.enabled,
           onUseSetup: () => {
             setLoginError("");
             setAuthState("setup");
           }
+        }
+      );
+    }
+    if (cliParams.enabled && currentUser && !legacyMode) {
+      return /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(
+        CLIAccessPrompt,
+        {
+          currentUser,
+          error: loginError,
+          pending: cliHandoffPending,
+          onContinue: startCliHandoff,
+          onSwitchAccount: switchCliAccount
         }
       );
     }

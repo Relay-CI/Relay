@@ -810,7 +810,7 @@ function SplashScreen({ label }) {
   );
 }
 
-function LoginScreen({ onLogin, error, legacyMode, setupAvailable, onUseSetup }) {
+function LoginScreen({ onLogin, error, legacyMode, setupAvailable, onUseSetup, cliMode }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [token, setToken] = useState("");
@@ -831,12 +831,12 @@ function LoginScreen({ onLogin, error, legacyMode, setupAvailable, onUseSetup })
         }}
       >
         <RelayMark className="brand__glyph" title="Relay mark" />
-        <div className="eyebrow">Secure Agent Access</div>
-        <h1 className="login-card__title">Relay Control Room</h1>
+        <div className="eyebrow">{cliMode ? "CLI Sign-In Request" : "Secure Agent Access"}</div>
+        <h1 className="login-card__title">{cliMode ? "Approve Relay CLI Access" : "Relay Control Room"}</h1>
         {legacyMode ? (
           <>
             <p className="login-card__body">
-              Enter your relay token to access the dashboard.
+              {cliMode ? "Enter your relay token to complete this Relay CLI login." : "Enter your relay token to access the dashboard."}
             </p>
             <input
               className="text-input"
@@ -850,7 +850,7 @@ function LoginScreen({ onLogin, error, legacyMode, setupAvailable, onUseSetup })
         ) : (
           <>
             <p className="login-card__body">
-              Sign in to manage your deployments.
+              {cliMode ? "Sign in to grant this local Relay CLI session access with your account." : "Sign in to manage your deployments."}
             </p>
             <input
               className="text-input"
@@ -889,6 +889,35 @@ function LoginScreen({ onLogin, error, legacyMode, setupAvailable, onUseSetup })
           </button>
         )}
       </form>
+    </div>
+  );
+}
+
+function CLIAccessPrompt({ currentUser, error, pending, onContinue, onSwitchAccount }) {
+  return (
+    <div className="screen-center">
+      <div className="panel login-card cli-access-card">
+        <RelayMark className="brand__glyph" title="Relay mark" />
+        <div className="eyebrow">CLI Access Request</div>
+        <h1 className="login-card__title">Use your current dashboard session?</h1>
+        <p className="login-card__body">
+          Relay CLI is asking the admin panel for a local login token. Continue as the account already signed into this browser, or switch accounts first.
+        </p>
+        <div className="cli-access-card__identity">
+          <div className="cli-access-card__label">Current session</div>
+          <strong>{currentUser.username}</strong>
+          <span>{currentUser.role}</span>
+        </div>
+        {error && <div className="error-banner">{error}</div>}
+        <div className="cli-access-card__actions">
+          <button type="button" className="primary-button" onClick={onContinue} disabled={pending}>
+            {pending ? "Redirecting…" : `Continue as ${currentUser.username}`}
+          </button>
+          <button type="button" className="ghost-button" onClick={onSwitchAccount} disabled={pending}>
+            Sign in with another account
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -3813,6 +3842,7 @@ function App() {
   const [loginError, setLoginError] = useState("");
   const [legacyMode, setLegacyMode] = useState(false);
   const [setupAvailable, setSetupAvailable] = useState(false);
+  const [cliHandoffPending, setCliHandoffPending] = useState(false);
   const [currentUser, setCurrentUser] = useState(null); // { username, role }
   const [activeTab, setActiveTab] = useState("overview");
   const [selectedProjectName, setSelectedProjectName] = useState("");
@@ -4026,6 +4056,37 @@ function App() {
     }
   }
 
+  async function startCliHandoff() {
+    if (!cliParams.enabled) return;
+    setCliHandoffPending(true);
+    setLoginError("");
+    try {
+      const resp = await api("/api/auth/cli/start", {
+        method: "POST",
+        body: JSON.stringify({ cli_port: cliParams.port }),
+      });
+      if (resp?.cli_redirect) {
+        window.location.assign(resp.cli_redirect);
+        return;
+      }
+      throw new Error("CLI redirect was not returned.");
+    } catch (err) {
+      setLoginError(err.message || "CLI login handoff failed.");
+      setCliHandoffPending(false);
+    }
+  }
+
+  async function switchCliAccount() {
+    setCliHandoffPending(false);
+    setLoginError("");
+    try {
+      await api("/api/auth/session", { method: "DELETE" });
+    } catch {}
+    setCurrentUser(null);
+    setSelectedDeploy(null);
+    setAuthState("login");
+  }
+
   async function handleSetup(creds) {
     setLoginError("");
     try {
@@ -4071,10 +4132,23 @@ function App() {
         error={loginError}
         legacyMode={legacyMode}
         setupAvailable={setupAvailable}
+        cliMode={cliParams.enabled}
         onUseSetup={() => {
           setLoginError("");
           setAuthState("setup");
         }}
+      />
+    );
+  }
+
+  if (cliParams.enabled && currentUser && !legacyMode) {
+    return (
+      <CLIAccessPrompt
+        currentUser={currentUser}
+        error={loginError}
+        pending={cliHandoffPending}
+        onContinue={startCliHandoff}
+        onSwitchAccount={switchCliAccount}
       />
     );
   }

@@ -857,8 +857,22 @@ async function main() {
     console.log(`\n  ${c.bold}Opening browser to log in…${c.reset}`);
     console.log(`  ${c.dim}If it doesn't open, visit:${c.reset}  ${c.cyan}${loginUrl}${c.reset}\n`);
     try {
-      const openCmd = process.platform === "win32" ? "start" : process.platform === "darwin" ? "open" : "xdg-open";
-      require("child_process").exec(`${openCmd} "${loginUrl}"`);
+      const { spawn } = require("child_process");
+      if (process.platform === "win32") {
+        const child = spawn("cmd", ["/c", "start", "", loginUrl], {
+          detached: true,
+          stdio: "ignore",
+          windowsHide: true,
+        });
+        child.unref();
+      } else {
+        const openCmd = process.platform === "darwin" ? "open" : "xdg-open";
+        const child = spawn(openCmd, [loginUrl], {
+          detached: true,
+          stdio: "ignore",
+        });
+        child.unref();
+      }
     } catch (_) {}
     const authCode = await authCodePromise.catch((e) => die(e.message));
 
