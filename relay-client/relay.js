@@ -44,7 +44,7 @@ const os = require("os");
 const crypto = require("crypto");
 const { execSync, spawnSync } = require("child_process");
 const { resolveDeployArgs, resolveServerArgs, resolveTransport } = require("./deploy");
-const { saveRelayConfig, getWorkspaceVersion, setWorkspaceVersion } = require("./config");
+const { loadRelayConfig, saveRelayConfig, getWorkspaceVersion, setWorkspaceVersion } = require("./config");
 
 const CLI_VERSION = (() => {
   try {
@@ -832,14 +832,15 @@ async function main() {
   // â”€â”€ projects â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // ── login ─────────────────────────────────────────────────────────────────────
   if (cmd === "login") {
-    const serverUrl = args.url || process.env.RELAY_URL || await prompt("Server URL", "http://127.0.0.1:8080");
+    const existingCfg = loadRelayConfig(process.cwd()).data || {};
+    const serverUrl = args.url || process.env.RELAY_URL || existingCfg.url || await prompt("Server URL", "http://127.0.0.1:8080");
     // Find a free port for the local callback server.
     const callbackPort = await new Promise((resolve) => {
       const srv = http.createServer();
       srv.listen(0, "127.0.0.1", () => { const p = srv.address().port; srv.close(() => resolve(p)); });
     });
     // Start local callback server — waits for browser to redirect back with code.
-    const authCode = await new Promise((resolve, reject) => {
+    const authCodePromise = new Promise((resolve, reject) => {
       const srv = http.createServer((req, res) => {
         const u = new URL(req.url, `http://127.0.0.1:${callbackPort}`);
         const code = u.searchParams.get("code");
@@ -850,7 +851,7 @@ async function main() {
       });
       srv.listen(callbackPort, "127.0.0.1");
       setTimeout(() => { srv.close(); reject(new Error("login timed out")); }, 5 * 60 * 1000);
-    }).catch((e) => die(e.message));
+    });
 
     const loginUrl = `${serverUrl}/dashboard/?cli=1&port=${callbackPort}`;
     console.log(`\n  ${c.bold}Opening browser to log in…${c.reset}`);
@@ -859,6 +860,7 @@ async function main() {
       const openCmd = process.platform === "win32" ? "start" : process.platform === "darwin" ? "open" : "xdg-open";
       require("child_process").exec(`${openCmd} "${loginUrl}"`);
     } catch (_) {}
+    const authCode = await authCodePromise.catch((e) => die(e.message));
 
     // Exchange one-time code for a bearer token.
     let tokenResp;
