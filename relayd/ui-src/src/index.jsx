@@ -3993,6 +3993,16 @@ function App() {
         ? "warn"
         : "teal";
   const isOwner = currentUser?.role === "owner";
+  const cliParams = useMemo(() => {
+    const params = new URLSearchParams(window.location.search);
+    const rawPort = params.get("port") || "";
+    const cliEnabled = params.get("cli") === "1";
+    const port = Number.parseInt(rawPort, 10);
+    return {
+      enabled: cliEnabled && Number.isInteger(port) && port > 0 && port <= 65535,
+      port: Number.isInteger(port) ? port : 0,
+    };
+  }, []);
 
   async function handleLogin(creds) {
     setLoginError("");
@@ -4001,8 +4011,13 @@ function App() {
         // Legacy: POST token to old session endpoint
         await api("/api/auth/session", { method: "POST", body: JSON.stringify({ token: creds }) });
       } else {
-        const resp = await api("/api/auth/login", { method: "POST", body: JSON.stringify(creds) });
+        const body = cliParams.enabled ? { ...creds, cli_port: cliParams.port } : creds;
+        const resp = await api("/api/auth/login", { method: "POST", body: JSON.stringify(body) });
         if (resp?.setup_required) { setSetupAvailable(true); setAuthState("setup"); return; }
+        if (cliParams.enabled && resp?.cli_redirect) {
+          window.location.assign(resp.cli_redirect);
+          return;
+        }
         if (resp?.username) setCurrentUser({ username: resp.username, role: resp.role });
       }
       setAuthState("ready");

@@ -18062,16 +18062,31 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
     const currentOperationMeta = selectedEnv?.latestDeploy ? deployPhaseText(selectedEnv.latestDeploy) : "waiting for first deploy";
     const currentOperationTone = selectedEnv?.latestDeploy?.status === "failed" || selectedEnv?.latestDeploy?.status === "error" ? "danger" : dashboard.isLive ? "warn" : "teal";
     const isOwner = currentUser?.role === "owner";
+    const cliParams = (0, import_react9.useMemo)(() => {
+      const params = new URLSearchParams(window.location.search);
+      const rawPort = params.get("port") || "";
+      const cliEnabled = params.get("cli") === "1";
+      const port = Number.parseInt(rawPort, 10);
+      return {
+        enabled: cliEnabled && Number.isInteger(port) && port > 0 && port <= 65535,
+        port: Number.isInteger(port) ? port : 0
+      };
+    }, []);
     async function handleLogin(creds) {
       setLoginError("");
       try {
         if (legacyMode) {
           await api("/api/auth/session", { method: "POST", body: JSON.stringify({ token: creds }) });
         } else {
-          const resp = await api("/api/auth/login", { method: "POST", body: JSON.stringify(creds) });
+          const body = cliParams.enabled ? { ...creds, cli_port: cliParams.port } : creds;
+          const resp = await api("/api/auth/login", { method: "POST", body: JSON.stringify(body) });
           if (resp?.setup_required) {
             setSetupAvailable(true);
             setAuthState("setup");
+            return;
+          }
+          if (cliParams.enabled && resp?.cli_redirect) {
+            window.location.assign(resp.cli_redirect);
             return;
           }
           if (resp?.username) setCurrentUser({ username: resp.username, role: resp.role });
