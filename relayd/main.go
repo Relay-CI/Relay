@@ -2459,14 +2459,28 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 400, "invalid JSON")
 			return
 		}
+		baseDomain := strings.TrimSpace(body.BaseDomain)
+		dashboardHost := strings.TrimSpace(body.DashboardHost)
+		if err := validateProxyHostname(baseDomain, "base_domain"); err != nil {
+			httpError(w, 400, err.Error())
+			return
+		}
+		if err := validateProxyHostname(dashboardHost, "dashboard_host"); err != nil {
+			httpError(w, 400, err.Error())
+			return
+		}
+		previous := map[string]string{
+			"base_domain":    s.serverConfigGet("base_domain"),
+			"dashboard_host": s.serverConfigGet("dashboard_host"),
+		}
 		tx, err := s.db.Begin()
 		if err != nil {
 			httpError(w, 500, "db begin failed: "+err.Error())
 			return
 		}
 		for key, value := range map[string]string{
-			"base_domain":    strings.TrimSpace(body.BaseDomain),
-			"dashboard_host": strings.TrimSpace(body.DashboardHost),
+			"base_domain":    baseDomain,
+			"dashboard_host": dashboardHost,
 		} {
 			if _, err := tx.Exec(
 				`INSERT INTO server_config (key, value) VALUES (?, ?)
@@ -2482,14 +2496,36 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 500, "db write failed: "+err.Error())
 			return
 		}
-		go func() { _ = s.ensureGlobalProxy() }()
+		if err := s.ensureGlobalProxy(); err != nil {
+			_ = s.writeServerConfig(previous)
+			httpError(w, 500, "failed to refresh global proxy: "+err.Error())
+			return
+		}
 		writeJSON(w, 200, map[string]string{
-			"base_domain":    strings.TrimSpace(body.BaseDomain),
-			"dashboard_host": strings.TrimSpace(body.DashboardHost),
+			"base_domain":    baseDomain,
+			"dashboard_host": dashboardHost,
 		})
 	default:
 		httpError(w, 405, "method not allowed")
 	}
+}
+
+func (s *Server) writeServerConfig(values map[string]string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	for key, value := range values {
+		if _, err := tx.Exec(
+			`INSERT INTO server_config (key, value) VALUES (?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+			key, strings.TrimSpace(value),
+		); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // ---------------------- Buildpack Plugins API ----------------------
@@ -3238,54 +3274,59 @@ func main() {
 	})
 
 	// API (auth)
+	authAny := s.auth
+	authOwner := s.authWithRoles("owner")
+	authDeployer := s.authWithRoles("owner", "deployer")
+	authReadOnly := s.authByMethod(nil, nil)
+	authReadDeployerWrite := s.authByMethod(nil, []string{"owner", "deployer"})
 	mux.HandleFunc("/api/auth/session", s.handleDashboardSession)
 	mux.HandleFunc("/api/auth/setup", s.handleAuthSetup)
 	mux.HandleFunc("/api/auth/login", s.handleAuthLogin)
 	mux.HandleFunc("/api/auth/me", s.handleAuthMe)
 	mux.HandleFunc("/api/auth/cli/exchange", s.handleAuthCLIExchange)
-	mux.HandleFunc("/api/deploys", s.auth(s.handleDeploys))
-	mux.HandleFunc("/api/deploys/", s.auth(s.handleDeployByID))
-	mux.HandleFunc("/api/deploys/rollback", s.auth(s.handleRollback))
-	mux.HandleFunc("/api/apps/start", s.auth(s.handleAppStart))
-	mux.HandleFunc("/api/apps/stop", s.auth(s.handleAppStop))
-	mux.HandleFunc("/api/apps/restart", s.auth(s.handleAppRestart))
-	mux.HandleFunc("/api/apps/config", s.auth(s.handleAppConfig))
-	mux.HandleFunc("/api/server/config", s.auth(s.handleServerConfig))
-	mux.HandleFunc("/api/apps/companions", s.auth(s.handleAppCompanions))
-	mux.HandleFunc("/api/apps/companions/restart", s.auth(s.handleCompanionRestart))
-	mux.HandleFunc("/api/apps/secrets", s.auth(s.handleAppSecrets))
-	mux.HandleFunc("/api/plugins/buildpacks", s.auth(s.handleBuildpackPlugins))
-	mux.HandleFunc("/api/plugins/buildpacks/", s.auth(s.handleBuildpackPluginByName))
+	mux.HandleFunc("/api/deploys", authReadDeployerWrite(s.handleDeploys))
+	mux.HandleFunc("/api/deploys/", authAny(s.handleDeployByID))
+	mux.HandleFunc("/api/deploys/rollback", authDeployer(s.handleRollback))
+	mux.HandleFunc("/api/apps/start", authDeployer(s.handleAppStart))
+	mux.HandleFunc("/api/apps/stop", authDeployer(s.handleAppStop))
+	mux.HandleFunc("/api/apps/restart", authDeployer(s.handleAppRestart))
+	mux.HandleFunc("/api/apps/config", authReadDeployerWrite(s.handleAppConfig))
+	mux.HandleFunc("/api/server/config", authOwner(s.handleServerConfig))
+	mux.HandleFunc("/api/apps/companions", authReadDeployerWrite(s.handleAppCompanions))
+	mux.HandleFunc("/api/apps/companions/restart", authDeployer(s.handleCompanionRestart))
+	mux.HandleFunc("/api/apps/secrets", authDeployer(s.handleAppSecrets))
+	mux.HandleFunc("/api/plugins/buildpacks", authOwner(s.handleBuildpackPlugins))
+	mux.HandleFunc("/api/plugins/buildpacks/", authOwner(s.handleBuildpackPluginByName))
 
-	mux.HandleFunc("/api/logs/", s.auth(s.handleLogsByID))
-	mux.HandleFunc("/api/logs/stream/", s.auth(s.handleLogsStream))
-	mux.HandleFunc("/api/runtime/logs/targets", s.auth(s.handleRuntimeLogTargets))
-	mux.HandleFunc("/api/runtime/logs/stream", s.auth(s.handleRuntimeLogStream))
-	mux.HandleFunc("/api/events", s.auth(s.handleEvents))
+	mux.HandleFunc("/api/logs/", authAny(s.handleLogsByID))
+	mux.HandleFunc("/api/logs/stream/", authAny(s.handleLogsStream))
+	mux.HandleFunc("/api/runtime/logs/targets", authAny(s.handleRuntimeLogTargets))
+	mux.HandleFunc("/api/runtime/logs/stream", authAny(s.handleRuntimeLogStream))
+	mux.HandleFunc("/api/events", authAny(s.handleEvents))
 
 	// Sync
-	mux.HandleFunc("/api/sync/start", s.auth(s.handleSyncStart))
-	mux.HandleFunc("/api/sync/plan/", s.auth(s.handleSyncPlan))
-	mux.HandleFunc("/api/sync/upload/", s.auth(s.handleSyncUpload))
-	mux.HandleFunc("/api/sync/bundle/", s.auth(s.handleSyncBundle))
-	mux.HandleFunc("/api/sync/delete/", s.auth(s.handleSyncDelete))
-	mux.HandleFunc("/api/sync/finish/", s.auth(s.handleSyncFinish))
-	mux.HandleFunc("/api/sync/pull/", s.auth(s.handleSyncPull))
+	mux.HandleFunc("/api/sync/start", authDeployer(s.handleSyncStart))
+	mux.HandleFunc("/api/sync/plan/", authDeployer(s.handleSyncPlan))
+	mux.HandleFunc("/api/sync/upload/", authDeployer(s.handleSyncUpload))
+	mux.HandleFunc("/api/sync/bundle/", authDeployer(s.handleSyncBundle))
+	mux.HandleFunc("/api/sync/delete/", authDeployer(s.handleSyncDelete))
+	mux.HandleFunc("/api/sync/finish/", authDeployer(s.handleSyncFinish))
+	mux.HandleFunc("/api/sync/pull/", authDeployer(s.handleSyncPull))
 
 	// Projects (multi-service view)
-	mux.HandleFunc("/api/projects", s.auth(s.handleProjects))
-	mux.HandleFunc("/api/projects/delete", s.auth(s.handleProjectDelete))
+	mux.HandleFunc("/api/projects", authReadOnly(s.handleProjects))
+	mux.HandleFunc("/api/projects/delete", authOwner(s.handleProjectDelete))
 
 	// Webhooks (unauthenticated, use provider-specific secrets if configured)
 	mux.HandleFunc("/api/webhooks/github", s.handleGithubWebhook)
-	mux.HandleFunc("/api/analytics", s.auth(s.handleAnalytics))
+	mux.HandleFunc("/api/analytics", authAny(s.handleAnalytics))
 
 	// User management (owner only, enforced inside handlers)
-	mux.HandleFunc("/api/users", s.auth(s.handleUsers))
-	mux.HandleFunc("/api/users/", s.auth(s.handleUserByID))
+	mux.HandleFunc("/api/users", authOwner(s.handleUsers))
+	mux.HandleFunc("/api/users/", authOwner(s.handleUserByID))
 
 	// Audit log
-	mux.HandleFunc("/api/audit", s.auth(s.handleAuditLog))
+	mux.HandleFunc("/api/audit", authOwner(s.handleAuditLog))
 
 	// ── Unix-domain socket (local API transport) ──────────────────────────────
 	// The socket is the recommended transport for the relay CLI when both the
@@ -3318,37 +3359,37 @@ func main() {
 			sockMux.HandleFunc("/api/auth/login", s.handleAuthLogin)
 			sockMux.HandleFunc("/api/auth/me", s.handleAuthMe)
 			sockMux.HandleFunc("/api/auth/cli/exchange", s.handleAuthCLIExchange)
-			sockMux.HandleFunc("/api/deploys", s.auth(s.handleDeploys))
-			sockMux.HandleFunc("/api/deploys/", s.auth(s.handleDeployByID))
-			sockMux.HandleFunc("/api/deploys/rollback", s.auth(s.handleRollback))
-			sockMux.HandleFunc("/api/apps/start", s.auth(s.handleAppStart))
-			sockMux.HandleFunc("/api/apps/stop", s.auth(s.handleAppStop))
-			sockMux.HandleFunc("/api/apps/restart", s.auth(s.handleAppRestart))
-			sockMux.HandleFunc("/api/apps/config", s.auth(s.handleAppConfig))
-			sockMux.HandleFunc("/api/server/config", s.auth(s.handleServerConfig))
-			sockMux.HandleFunc("/api/apps/companions", s.auth(s.handleAppCompanions))
-			sockMux.HandleFunc("/api/apps/companions/restart", s.auth(s.handleCompanionRestart))
-			sockMux.HandleFunc("/api/apps/secrets", s.auth(s.handleAppSecrets))
-			sockMux.HandleFunc("/api/plugins/buildpacks", s.auth(s.handleBuildpackPlugins))
-			sockMux.HandleFunc("/api/plugins/buildpacks/", s.auth(s.handleBuildpackPluginByName))
-			sockMux.HandleFunc("/api/logs/", s.auth(s.handleLogsByID))
-			sockMux.HandleFunc("/api/logs/stream/", s.auth(s.handleLogsStream))
-			sockMux.HandleFunc("/api/runtime/logs/targets", s.auth(s.handleRuntimeLogTargets))
-			sockMux.HandleFunc("/api/runtime/logs/stream", s.auth(s.handleRuntimeLogStream))
-			sockMux.HandleFunc("/api/events", s.auth(s.handleEvents))
-			sockMux.HandleFunc("/api/sync/start", s.auth(s.handleSyncStart))
-			sockMux.HandleFunc("/api/sync/plan/", s.auth(s.handleSyncPlan))
-			sockMux.HandleFunc("/api/sync/upload/", s.auth(s.handleSyncUpload))
-			sockMux.HandleFunc("/api/sync/bundle/", s.auth(s.handleSyncBundle))
-			sockMux.HandleFunc("/api/sync/delete/", s.auth(s.handleSyncDelete))
-			sockMux.HandleFunc("/api/sync/finish/", s.auth(s.handleSyncFinish))
-			sockMux.HandleFunc("/api/sync/pull/", s.auth(s.handleSyncPull))
-			sockMux.HandleFunc("/api/projects", s.auth(s.handleProjects))
-			sockMux.HandleFunc("/api/projects/delete", s.auth(s.handleProjectDelete))
+			sockMux.HandleFunc("/api/deploys", authReadDeployerWrite(s.handleDeploys))
+			sockMux.HandleFunc("/api/deploys/", authAny(s.handleDeployByID))
+			sockMux.HandleFunc("/api/deploys/rollback", authDeployer(s.handleRollback))
+			sockMux.HandleFunc("/api/apps/start", authDeployer(s.handleAppStart))
+			sockMux.HandleFunc("/api/apps/stop", authDeployer(s.handleAppStop))
+			sockMux.HandleFunc("/api/apps/restart", authDeployer(s.handleAppRestart))
+			sockMux.HandleFunc("/api/apps/config", authReadDeployerWrite(s.handleAppConfig))
+			sockMux.HandleFunc("/api/server/config", authOwner(s.handleServerConfig))
+			sockMux.HandleFunc("/api/apps/companions", authReadDeployerWrite(s.handleAppCompanions))
+			sockMux.HandleFunc("/api/apps/companions/restart", authDeployer(s.handleCompanionRestart))
+			sockMux.HandleFunc("/api/apps/secrets", authDeployer(s.handleAppSecrets))
+			sockMux.HandleFunc("/api/plugins/buildpacks", authOwner(s.handleBuildpackPlugins))
+			sockMux.HandleFunc("/api/plugins/buildpacks/", authOwner(s.handleBuildpackPluginByName))
+			sockMux.HandleFunc("/api/logs/", authAny(s.handleLogsByID))
+			sockMux.HandleFunc("/api/logs/stream/", authAny(s.handleLogsStream))
+			sockMux.HandleFunc("/api/runtime/logs/targets", authAny(s.handleRuntimeLogTargets))
+			sockMux.HandleFunc("/api/runtime/logs/stream", authAny(s.handleRuntimeLogStream))
+			sockMux.HandleFunc("/api/events", authAny(s.handleEvents))
+			sockMux.HandleFunc("/api/sync/start", authDeployer(s.handleSyncStart))
+			sockMux.HandleFunc("/api/sync/plan/", authDeployer(s.handleSyncPlan))
+			sockMux.HandleFunc("/api/sync/upload/", authDeployer(s.handleSyncUpload))
+			sockMux.HandleFunc("/api/sync/bundle/", authDeployer(s.handleSyncBundle))
+			sockMux.HandleFunc("/api/sync/delete/", authDeployer(s.handleSyncDelete))
+			sockMux.HandleFunc("/api/sync/finish/", authDeployer(s.handleSyncFinish))
+			sockMux.HandleFunc("/api/sync/pull/", authDeployer(s.handleSyncPull))
+			sockMux.HandleFunc("/api/projects", authReadOnly(s.handleProjects))
+			sockMux.HandleFunc("/api/projects/delete", authOwner(s.handleProjectDelete))
 			sockMux.HandleFunc("/api/webhooks/github", s.handleGithubWebhook)
-			sockMux.HandleFunc("/api/users", s.auth(s.handleUsers))
-			sockMux.HandleFunc("/api/users/", s.auth(s.handleUserByID))
-			sockMux.HandleFunc("/api/audit", s.auth(s.handleAuditLog))
+			sockMux.HandleFunc("/api/users", authOwner(s.handleUsers))
+			sockMux.HandleFunc("/api/users/", authOwner(s.handleUserByID))
+			sockMux.HandleFunc("/api/audit", authOwner(s.handleAuditLog))
 			socketServer := &http.Server{
 				Handler:           sockMux,
 				ReadHeaderTimeout: 10 * time.Second,
@@ -5417,7 +5458,12 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		var previousState *AppState
 		st, _ := s.getAppState(body.App, body.Env, body.Branch)
+		if st != nil {
+			copyState := *st
+			previousState = &copyState
+		}
 		if st == nil {
 			st = &AppState{
 				App:    body.App,
@@ -5472,6 +5518,10 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.PublicHost != nil {
 			publicHost := strings.TrimSpace(*body.PublicHost)
+			if err := validateProxyHostname(publicHost, "public_host"); err != nil {
+				httpError(w, 400, err.Error())
+				return
+			}
 			if publicHost != "" && (normalizedHostname(publicHost) == normalizedRequestHost(r) || normalizedHostname(publicHost) == normalizedHostname(s.serverDashboardHost())) {
 				httpError(w, 400, "public_host cannot match the Relay dashboard host; use a different subdomain for apps")
 				return
@@ -5486,9 +5536,24 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 500, "failed to save app state: "+err.Error())
 			return
 		}
+		proxyNeedsRefresh := false
+		if previousState == nil {
+			proxyNeedsRefresh = strings.TrimSpace(st.PublicHost) != ""
+		} else {
+			proxyNeedsRefresh = strings.TrimSpace(previousState.PublicHost) != strings.TrimSpace(st.PublicHost) || previousState.HostPort != st.HostPort
+		}
+		if proxyNeedsRefresh {
+			if err := s.ensureGlobalProxy(); err != nil {
+				if previousState != nil {
+					_ = s.saveAppState(previousState)
+				} else {
+					_, _ = s.db.Exec(`DELETE FROM app_state WHERE app=? AND env=? AND branch=?`, st.App, string(st.Env), st.Branch)
+				}
+				httpError(w, 500, "failed to refresh global proxy: "+err.Error())
+				return
+			}
+		}
 		s.broadcastSnapshot()
-		// Refresh global domain proxy if public_host was part of the update
-		go func() { _ = s.ensureGlobalProxy() }()
 		writeJSON(w, 200, st)
 
 	case http.MethodGet:
@@ -7788,6 +7853,41 @@ func normalizedHostname(value string) string {
 	return strings.ToLower(host)
 }
 
+func validateProxyHostname(value string, field string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	if strings.Contains(value, "://") {
+		return fmt.Errorf("%s must be a hostname only, without a URL scheme", field)
+	}
+	if strings.ContainsAny(value, "/\\{}[]()\"'`\r\n\t ") {
+		return fmt.Errorf("%s must be a plain hostname", field)
+	}
+	if strings.Contains(value, ":") {
+		return fmt.Errorf("%s must not include a port", field)
+	}
+	host := normalizedHostname(value)
+	if host == "" {
+		return fmt.Errorf("%s must be a valid hostname", field)
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 {
+			return fmt.Errorf("%s must be a valid hostname", field)
+		}
+		for i, ch := range label {
+			if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') {
+				continue
+			}
+			if ch == '-' && i > 0 && i < len(label)-1 {
+				continue
+			}
+			return fmt.Errorf("%s must be a valid hostname", field)
+		}
+	}
+	return nil
+}
+
 func requiresSameOrigin(method string) bool {
 	switch method {
 	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
@@ -7861,22 +7961,24 @@ func (s *Server) pluginMutationsEnabled() bool {
 func (s *Server) handleDashboardSession(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		if s.hasUsers() {
-			sess := s.validateUserSession(r)
-			if sess == nil {
-				writeJSON(w, 200, map[string]any{"authenticated": false})
+		if !s.hasUsers() {
+			token, _ := s.requestToken(r)
+			if s.validateToken(token) {
+				writeJSON(w, 200, map[string]any{"authenticated": true, "legacy_mode": true})
 				return
 			}
-			writeJSON(w, 200, map[string]any{"authenticated": true, "username": sess.Username, "role": sess.Role})
+			writeJSON(w, 200, map[string]any{
+				"setup_required": true,
+				"legacy_mode":    strings.TrimSpace(s.apiToken) != "",
+			})
 			return
 		}
-		// Legacy token mode
-		token, _ := s.requestToken(r)
-		if !s.validateToken(token) {
-			writeJSON(w, 200, map[string]any{"authenticated": false, "legacy_mode": true})
+		sess := s.validateUserSession(r)
+		if sess == nil {
+			writeJSON(w, 200, map[string]any{"authenticated": false})
 			return
 		}
-		writeJSON(w, 200, map[string]any{"authenticated": true, "legacy_mode": true})
+		writeJSON(w, 200, map[string]any{"authenticated": true, "username": sess.Username, "role": sess.Role})
 	case http.MethodPost:
 		if s.hasUsers() {
 			httpError(w, 410, "use POST /api/auth/login")
@@ -7910,7 +8012,28 @@ func (s *Server) handleDashboardSession(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
-func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
+func userRoleAllowed(role string, allowedRoles []string) bool {
+	if len(allowedRoles) == 0 {
+		return true
+	}
+	for _, allowed := range allowedRoles {
+		if role == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+func isReadOnlyMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) authorize(next http.HandlerFunc, allowedRoles []string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Requests arriving over the Unix socket are pre-authenticated by
 		// filesystem ACL (socket mode 0600, owned by the server process user).
@@ -7928,6 +8051,10 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 			_, source := s.requestToken(r)
 			if source == "cookie" && requiresSameOrigin(r.Method) && !isSameOriginRequest(r) {
 				httpError(w, 403, "origin check failed")
+				return
+			}
+			if !userRoleAllowed(sess.Role, allowedRoles) {
+				httpError(w, 403, "insufficient role")
 				return
 			}
 			next(w, r)
@@ -7948,6 +8075,28 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		next(w, r)
+	}
+}
+
+func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
+	return s.authorize(next, nil)
+}
+
+func (s *Server) authWithRoles(allowedRoles ...string) func(http.HandlerFunc) http.HandlerFunc {
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		return s.authorize(next, allowedRoles)
+	}
+}
+
+func (s *Server) authByMethod(readRoles []string, writeRoles []string) func(http.HandlerFunc) http.HandlerFunc {
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			allowedRoles := writeRoles
+			if isReadOnlyMethod(r.Method) {
+				allowedRoles = readRoles
+			}
+			s.authorize(next, allowedRoles)(w, r)
+		}
 	}
 }
 

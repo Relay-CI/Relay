@@ -15343,7 +15343,7 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
       /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { children: label })
     ] }) });
   }
-  function LoginScreen({ onLogin, error, legacyMode }) {
+  function LoginScreen({ onLogin, error, legacyMode, setupAvailable, onUseSetup }) {
     const [username, setUsername] = (0, import_react9.useState)("");
     const [password, setPassword] = (0, import_react9.useState)("");
     const [token, setToken] = (0, import_react9.useState)("");
@@ -15416,12 +15416,13 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
           legacyMode && /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "helper-row", children: [
             "Token source ",
             /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "helper-pill", children: "data/token.txt" })
-          ] })
+          ] }),
+          legacyMode && setupAvailable && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "ghost-button ghost-button--compact", onClick: onUseSetup, children: "Create an owner account instead" })
         ]
       }
     ) });
   }
-  function SetupScreen({ onSetup, error }) {
+  function SetupScreen({ onSetup, error, legacyModeAvailable, onUseLegacyLogin }) {
     const [username, setUsername] = (0, import_react9.useState)("");
     const [password, setPassword] = (0, import_react9.useState)("");
     const [confirm2, setConfirm] = (0, import_react9.useState)("");
@@ -15489,7 +15490,8 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
               disabled: !username || password.length < 8 || mismatch || pending,
               children: pending ? "Creating account\u2026" : "Create Account"
             }
-          )
+          ),
+          legacyModeAvailable && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "ghost-button ghost-button--compact", onClick: onUseLegacyLogin, children: "Use legacy token instead" })
         ]
       }
     ) });
@@ -16309,7 +16311,7 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
       ] })
     ] }) });
   }
-  function SettingsTab({ project, selectedEnv, services, onUpdated }) {
+  function SettingsTab({ project, selectedEnv, services, currentUser, onUpdated }) {
     const [config, setConfig] = (0, import_react9.useState)(() => buildSettingsConfig(selectedEnv));
     const [secrets, setSecrets] = (0, import_react9.useState)([]);
     const [draftSecret, setDraftSecret] = (0, import_react9.useState)({ key: "", value: "" });
@@ -16329,6 +16331,7 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
     const [deleteProjectText, setDeleteProjectText] = (0, import_react9.useState)("");
     const [deleteProjectBusy, setDeleteProjectBusy] = (0, import_react9.useState)(false);
     const [deleteProjectError, setDeleteProjectError] = (0, import_react9.useState)("");
+    const canDeleteProject = currentUser?.role === "owner";
     const webhookURL = `${window.location.origin}/api/webhooks/github`;
     const updateConfig = (0, import_react9.useCallback)((patch) => {
       setConfig((current) => applyEngineConstraints({ ...current, ...patch }));
@@ -17083,7 +17086,7 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
           ] }, secret.key))
         ] })
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "panel section-card danger-zone", children: [
+      canDeleteProject && /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "panel section-card danger-zone", children: [
         /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "section-card__header", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "section-card__header-group", children: [
           /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "section-icon section-icon--danger", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", children: [
             /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("path", { d: "M3 6h18" }),
@@ -17728,11 +17731,13 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
     ] });
   }
   function ServerSettingsTab({ currentUser }) {
+    const isOwner = currentUser?.role === "owner";
     const [baseDomain, setBaseDomain] = (0, import_react9.useState)("");
     const [dashboardHost, setDashboardHost] = (0, import_react9.useState)("");
     const [draft, setDraft] = (0, import_react9.useState)({ baseDomain: "", dashboardHost: "" });
     const [busy, setBusy] = (0, import_react9.useState)(false);
     const [notice, setNotice] = (0, import_react9.useState)(null);
+    if (!isOwner) return null;
     (0, import_react9.useEffect)(() => {
       api("/api/server/config").then((data) => {
         setBaseDomain(data?.base_domain || "");
@@ -17900,6 +17905,7 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
     const [authState, setAuthState] = (0, import_react9.useState)("checking");
     const [loginError, setLoginError] = (0, import_react9.useState)("");
     const [legacyMode, setLegacyMode] = (0, import_react9.useState)(false);
+    const [setupAvailable, setSetupAvailable] = (0, import_react9.useState)(false);
     const [currentUser, setCurrentUser] = (0, import_react9.useState)(null);
     const [activeTab, setActiveTab] = (0, import_react9.useState)("overview");
     const [selectedProjectName, setSelectedProjectName] = (0, import_react9.useState)("");
@@ -17910,17 +17916,17 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
       let cancelled = false;
       api("/api/auth/session").then((session) => {
         if (cancelled) return;
+        setLegacyMode(!!session?.legacy_mode);
+        setSetupAvailable(!!session?.setup_required);
         if (session?.setup_required) {
           setAuthState("setup");
           return;
         }
         if (session?.authenticated) {
-          setLegacyMode(!!session.legacy_mode);
           if (session.username) setCurrentUser({ username: session.username, role: session.role });
           setAuthState("ready");
           return;
         }
-        setLegacyMode(!!session?.legacy_mode);
         setAuthState("login");
       }).catch(() => {
         if (!cancelled) setAuthState("login");
@@ -18055,6 +18061,7 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
     const currentOperationValue = selectedEnv?.latestDeploy ? operationLabel(selectedEnv.latestDeploy.source).toUpperCase() : "IDLE";
     const currentOperationMeta = selectedEnv?.latestDeploy ? deployPhaseText(selectedEnv.latestDeploy) : "waiting for first deploy";
     const currentOperationTone = selectedEnv?.latestDeploy?.status === "failed" || selectedEnv?.latestDeploy?.status === "error" ? "danger" : dashboard.isLive ? "warn" : "teal";
+    const isOwner = currentUser?.role === "owner";
     async function handleLogin(creds) {
       setLoginError("");
       try {
@@ -18063,6 +18070,7 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
         } else {
           const resp = await api("/api/auth/login", { method: "POST", body: JSON.stringify(creds) });
           if (resp?.setup_required) {
+            setSetupAvailable(true);
             setAuthState("setup");
             return;
           }
@@ -18078,6 +18086,8 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
       try {
         const resp = await api("/api/auth/setup", { method: "POST", body: JSON.stringify(creds) });
         if (resp?.username) setCurrentUser({ username: resp.username, role: resp.role });
+        setLegacyMode(false);
+        setSetupAvailable(false);
         setAuthState("ready");
       } catch (err) {
         setLoginError(err.message);
@@ -18086,17 +18096,40 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
     async function handleLogout() {
       await api("/api/auth/session", { method: "DELETE" });
       setCurrentUser(null);
-      setAuthState("login");
+      setAuthState(setupAvailable ? "setup" : "login");
       setSelectedDeploy(null);
     }
     if (authState === "checking") {
       return /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(SplashScreen, { label: "Checking dashboard session" });
     }
     if (authState === "setup") {
-      return /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(SetupScreen, { onSetup: handleSetup, error: loginError });
+      return /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(
+        SetupScreen,
+        {
+          onSetup: handleSetup,
+          error: loginError,
+          legacyModeAvailable: legacyMode,
+          onUseLegacyLogin: () => {
+            setLoginError("");
+            setAuthState("login");
+          }
+        }
+      );
     }
     if (authState !== "ready") {
-      return /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(LoginScreen, { onLogin: handleLogin, error: loginError, legacyMode });
+      return /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(
+        LoginScreen,
+        {
+          onLogin: handleLogin,
+          error: loginError,
+          legacyMode,
+          setupAvailable,
+          onUseSetup: () => {
+            setLoginError("");
+            setAuthState("setup");
+          }
+        }
+      );
     }
     if (dashboard.loading) {
       return /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(SplashScreen, { label: "Loading projects, services, and deploy history" });
@@ -18144,7 +18177,7 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
           ["logs", "Logs"],
           ["analytics", "Analytics"],
           ["settings", "Settings"],
-          ["server", "Server"]
+          ...isOwner ? [["server", "Server"]] : []
         ].map(([id, label]) => /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(
           "button",
           {
@@ -18308,10 +18341,11 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
               project: selectedProject,
               selectedEnv,
               services: projectServices,
+              currentUser,
               onUpdated: refreshDashboard
             }
           ),
-          activeTab === "server" && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(ServerSettingsTab, { currentUser }),
+          activeTab === "server" && isOwner && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(ServerSettingsTab, { currentUser }),
           activeTab === "analytics" && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(AnalyticsTab, { selectedEnv })
         ] }),
         selectedDeploy && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(

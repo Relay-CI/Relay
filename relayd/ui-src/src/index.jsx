@@ -810,7 +810,7 @@ function SplashScreen({ label }) {
   );
 }
 
-function LoginScreen({ onLogin, error, legacyMode }) {
+function LoginScreen({ onLogin, error, legacyMode, setupAvailable, onUseSetup }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [token, setToken] = useState("");
@@ -883,12 +883,17 @@ function LoginScreen({ onLogin, error, legacyMode }) {
             Token source <span className="helper-pill">data/token.txt</span>
           </div>
         )}
+        {legacyMode && setupAvailable && (
+          <button type="button" className="ghost-button ghost-button--compact" onClick={onUseSetup}>
+            Create an owner account instead
+          </button>
+        )}
       </form>
     </div>
   );
 }
 
-function SetupScreen({ onSetup, error }) {
+function SetupScreen({ onSetup, error, legacyModeAvailable, onUseLegacyLogin }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -949,6 +954,11 @@ function SetupScreen({ onSetup, error }) {
         >
           {pending ? "Creating account…" : "Create Account"}
         </button>
+        {legacyModeAvailable && (
+          <button type="button" className="ghost-button ghost-button--compact" onClick={onUseLegacyLogin}>
+            Use legacy token instead
+          </button>
+        )}
       </form>
     </div>
   );
@@ -2044,7 +2054,7 @@ function LogsTab({ project, selectedEnv, deploys, envMap, onOpenDeploy }) {
   );
 }
 
-function SettingsTab({ project, selectedEnv, services, onUpdated }) {
+function SettingsTab({ project, selectedEnv, services, currentUser, onUpdated }) {
   const [config, setConfig] = useState(() => buildSettingsConfig(selectedEnv));
   const [secrets, setSecrets] = useState([]);
   const [draftSecret, setDraftSecret] = useState({ key: "", value: "" });
@@ -2064,6 +2074,7 @@ function SettingsTab({ project, selectedEnv, services, onUpdated }) {
   const [deleteProjectText, setDeleteProjectText] = useState("");
   const [deleteProjectBusy, setDeleteProjectBusy] = useState(false);
   const [deleteProjectError, setDeleteProjectError] = useState("");
+  const canDeleteProject = currentUser?.role === "owner";
   const webhookURL = `${window.location.origin}/api/webhooks/github`;
   const updateConfig = useCallback((patch) => {
     setConfig((current) => applyEngineConstraints({ ...current, ...patch }));
@@ -2884,6 +2895,7 @@ function SettingsTab({ project, selectedEnv, services, onUpdated }) {
         </div>
       </div>
 
+      {canDeleteProject && (
       <div className="panel section-card danger-zone">
         <div className="section-card__header">
           <div className="section-card__header-group">
@@ -2926,6 +2938,7 @@ function SettingsTab({ project, selectedEnv, services, onUpdated }) {
           </button>
         </div>
       </div>
+      )}
 
       <div className="panel section-card">
         <div className="section-card__header">
@@ -3628,11 +3641,14 @@ function AuditLogPanel() {
 }
 
 function ServerSettingsTab({ currentUser }) {
+  const isOwner = currentUser?.role === "owner";
   const [baseDomain, setBaseDomain] = useState("");
   const [dashboardHost, setDashboardHost] = useState("");
   const [draft, setDraft] = useState({ baseDomain: "", dashboardHost: "" });
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null);
+
+  if (!isOwner) return null;
 
   useEffect(() => {
     api("/api/server/config")
@@ -3796,6 +3812,7 @@ function App() {
   const [authState, setAuthState] = useState("checking"); // checking | setup | login | ready
   const [loginError, setLoginError] = useState("");
   const [legacyMode, setLegacyMode] = useState(false);
+  const [setupAvailable, setSetupAvailable] = useState(false);
   const [currentUser, setCurrentUser] = useState(null); // { username, role }
   const [activeTab, setActiveTab] = useState("overview");
   const [selectedProjectName, setSelectedProjectName] = useState("");
@@ -3808,14 +3825,14 @@ function App() {
     api("/api/auth/session")
       .then((session) => {
         if (cancelled) return;
+        setLegacyMode(!!session?.legacy_mode);
+        setSetupAvailable(!!session?.setup_required);
         if (session?.setup_required) { setAuthState("setup"); return; }
         if (session?.authenticated) {
-          setLegacyMode(!!session.legacy_mode);
           if (session.username) setCurrentUser({ username: session.username, role: session.role });
           setAuthState("ready");
           return;
         }
-        setLegacyMode(!!session?.legacy_mode);
         setAuthState("login");
       })
       .catch(() => {
@@ -3975,6 +3992,7 @@ function App() {
       : dashboard.isLive
         ? "warn"
         : "teal";
+  const isOwner = currentUser?.role === "owner";
 
   async function handleLogin(creds) {
     setLoginError("");
@@ -3984,7 +4002,7 @@ function App() {
         await api("/api/auth/session", { method: "POST", body: JSON.stringify({ token: creds }) });
       } else {
         const resp = await api("/api/auth/login", { method: "POST", body: JSON.stringify(creds) });
-        if (resp?.setup_required) { setAuthState("setup"); return; }
+        if (resp?.setup_required) { setSetupAvailable(true); setAuthState("setup"); return; }
         if (resp?.username) setCurrentUser({ username: resp.username, role: resp.role });
       }
       setAuthState("ready");
@@ -3998,6 +4016,8 @@ function App() {
     try {
       const resp = await api("/api/auth/setup", { method: "POST", body: JSON.stringify(creds) });
       if (resp?.username) setCurrentUser({ username: resp.username, role: resp.role });
+      setLegacyMode(false);
+      setSetupAvailable(false);
       setAuthState("ready");
     } catch (err) {
       setLoginError(err.message);
@@ -4007,7 +4027,7 @@ function App() {
   async function handleLogout() {
     await api("/api/auth/session", { method: "DELETE" });
     setCurrentUser(null);
-    setAuthState("login");
+    setAuthState(setupAvailable ? "setup" : "login");
     setSelectedDeploy(null);
   }
 
@@ -4016,11 +4036,32 @@ function App() {
   }
 
   if (authState === "setup") {
-    return <SetupScreen onSetup={handleSetup} error={loginError} />;
+    return (
+      <SetupScreen
+        onSetup={handleSetup}
+        error={loginError}
+        legacyModeAvailable={legacyMode}
+        onUseLegacyLogin={() => {
+          setLoginError("");
+          setAuthState("login");
+        }}
+      />
+    );
   }
 
   if (authState !== "ready") {
-    return <LoginScreen onLogin={handleLogin} error={loginError} legacyMode={legacyMode} />;
+    return (
+      <LoginScreen
+        onLogin={handleLogin}
+        error={loginError}
+        legacyMode={legacyMode}
+        setupAvailable={setupAvailable}
+        onUseSetup={() => {
+          setLoginError("");
+          setAuthState("setup");
+        }}
+      />
+    );
   }
 
   if (dashboard.loading) {
@@ -4067,7 +4108,7 @@ function App() {
             ["logs", "Logs"],
             ["analytics", "Analytics"],
             ["settings", "Settings"],
-            ["server", "Server"],
+            ...(isOwner ? [["server", "Server"]] : []),
           ].map(([id, label]) => (
             <button
               key={id}
@@ -4271,11 +4312,12 @@ function App() {
                 project={selectedProject}
                 selectedEnv={selectedEnv}
                 services={projectServices}
+                currentUser={currentUser}
                 onUpdated={refreshDashboard}
               />
             )}
 
-            {activeTab === "server" && (
+            {activeTab === "server" && isOwner && (
               <ServerSettingsTab currentUser={currentUser} />
             )}
 
