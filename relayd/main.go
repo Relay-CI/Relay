@@ -6,12 +6,15 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
 	"embed"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -217,25 +220,31 @@ type DeployRequest struct {
 	TrafficMode string `json:"traffic_mode"` // "edge" or "session"
 	Source      string `json:"source"`       // "git" or "sync"
 	Engine      string `json:"engine"`       // "docker" or "station"/"vessel"; overrides stored app state when set
+
+	CommitMessage string `json:"commit_message,omitempty"`
+	DeployedBy    string `json:"-"` // username of the user who triggered the deploy
 }
 
 type Deploy struct {
-	ID         string       `json:"id"`
-	App        string       `json:"app"`
-	RepoURL    string       `json:"repo_url"`
-	Branch     string       `json:"branch"`
-	CommitSHA  string       `json:"commit_sha"`
-	Env        DeployEnv    `json:"env"`
-	Status     DeployStatus `json:"status"`
-	CreatedAt  time.Time    `json:"created_at"`
-	StartedAt  *time.Time   `json:"started_at,omitempty"`
-	EndedAt    *time.Time   `json:"ended_at,omitempty"`
-	Error      string       `json:"error,omitempty"`
-	LogPath    string       `json:"log_path"`
-	ImageTag   string       `json:"image_tag,omitempty"`
-	PrevImage  string       `json:"previous_image_tag,omitempty"`
-	PreviewURL string       `json:"preview_url,omitempty"`
-	Source     string       `json:"source,omitempty"`
+	ID            string       `json:"id"`
+	App           string       `json:"app"`
+	RepoURL       string       `json:"repo_url"`
+	Branch        string       `json:"branch"`
+	CommitSHA     string       `json:"commit_sha"`
+	Env           DeployEnv    `json:"env"`
+	Status        DeployStatus `json:"status"`
+	CreatedAt     time.Time    `json:"created_at"`
+	StartedAt     *time.Time   `json:"started_at,omitempty"`
+	EndedAt       *time.Time   `json:"ended_at,omitempty"`
+	Error         string       `json:"error,omitempty"`
+	LogPath       string       `json:"log_path"`
+	ImageTag      string       `json:"image_tag,omitempty"`
+	PrevImage     string       `json:"previous_image_tag,omitempty"`
+	PreviewURL    string       `json:"preview_url,omitempty"`
+	Source        string       `json:"source,omitempty"`
+	BuildNumber   int          `json:"build_number,omitempty"`
+	DeployedBy    string       `json:"deployed_by,omitempty"`
+	CommitMessage string       `json:"commit_message,omitempty"`
 }
 
 type DeployJob struct {
@@ -338,13 +347,15 @@ type AppSecret struct {
 }
 
 type SyncStartRequest struct {
-	App    string    `json:"app"`
-	Branch string    `json:"branch"`
-	Env    DeployEnv `json:"env"`
+	App         string    `json:"app"`
+	Branch      string    `json:"branch"`
+	Env         DeployEnv `json:"env"`
+	BaseVersion string    `json:"base_version,omitempty"`
 }
 
 type SyncStartResponse struct {
-	SessionID string `json:"session_id"`
+	SessionID        string `json:"session_id"`
+	WorkspaceVersion string `json:"workspace_version,omitempty"`
 }
 
 type ManifestFile struct {
@@ -381,6 +392,29 @@ type SyncSession struct {
 	UploadedBytes int64
 	MaxBytes      int64
 	uploadMu      sync.Mutex
+}
+
+// ─── User auth ───────────────────────────────────────────────────────────────
+
+type User struct {
+	ID           string
+	Username     string
+	PasswordHash string
+	Role         string // "owner", "deployer", "viewer"
+}
+
+type UserSession struct {
+	Token    string
+	UserID   string
+	Username string
+	Role     string
+}
+
+type AuthCode struct {
+	Code     string
+	UserID   string
+	Username string
+	Role     string
 }
 
 // ─── Container runtime abstraction ───────────────────────────────────────────
@@ -614,7 +648,8 @@ type Server struct {
 
 	db *sql.DB
 
-	apiToken string
+	apiToken  string
+	secretKey []byte // 32-byte AES-256 key for encrypting secrets at rest; nil = no encryption
 
 	buildpacks []Buildpack
 
@@ -3126,6 +3161,13 @@ func main() {
 		panic(err)
 	}
 
+	// Derive a 32-byte AES-256 key from RELAY_SECRET_KEY for encrypting secrets at rest.
+	var secretKey []byte
+	if rawKey := strings.TrimSpace(os.Getenv("RELAY_SECRET_KEY")); rawKey != "" {
+		h := sha256.Sum256([]byte(rawKey))
+		secretKey = h[:]
+	}
+
 	s := &Server{
 		deploys:               make(map[string]*Deploy),
 		queue:                 make(chan DeployJob, 200),
@@ -3142,6 +3184,7 @@ func main() {
 		enablePluginMutations: getenvBool("RELAY_ENABLE_PLUGIN_MUTATIONS", false),
 		db:                    db,
 		apiToken:              apiToken,
+		secretKey:             secretKey,
 		buildpacks:            defaultBuildpacks(),
 		building:              make(map[string]bool),
 		eventsChans:           make(map[chan []byte]struct{}),
@@ -3196,6 +3239,10 @@ func main() {
 
 	// API (auth)
 	mux.HandleFunc("/api/auth/session", s.handleDashboardSession)
+	mux.HandleFunc("/api/auth/setup", s.handleAuthSetup)
+	mux.HandleFunc("/api/auth/login", s.handleAuthLogin)
+	mux.HandleFunc("/api/auth/me", s.handleAuthMe)
+	mux.HandleFunc("/api/auth/cli/exchange", s.handleAuthCLIExchange)
 	mux.HandleFunc("/api/deploys", s.auth(s.handleDeploys))
 	mux.HandleFunc("/api/deploys/", s.auth(s.handleDeployByID))
 	mux.HandleFunc("/api/deploys/rollback", s.auth(s.handleRollback))
@@ -3223,6 +3270,7 @@ func main() {
 	mux.HandleFunc("/api/sync/bundle/", s.auth(s.handleSyncBundle))
 	mux.HandleFunc("/api/sync/delete/", s.auth(s.handleSyncDelete))
 	mux.HandleFunc("/api/sync/finish/", s.auth(s.handleSyncFinish))
+	mux.HandleFunc("/api/sync/pull/", s.auth(s.handleSyncPull))
 
 	// Projects (multi-service view)
 	mux.HandleFunc("/api/projects", s.auth(s.handleProjects))
@@ -3231,6 +3279,13 @@ func main() {
 	// Webhooks (unauthenticated, use provider-specific secrets if configured)
 	mux.HandleFunc("/api/webhooks/github", s.handleGithubWebhook)
 	mux.HandleFunc("/api/analytics", s.auth(s.handleAnalytics))
+
+	// User management (owner only, enforced inside handlers)
+	mux.HandleFunc("/api/users", s.auth(s.handleUsers))
+	mux.HandleFunc("/api/users/", s.auth(s.handleUserByID))
+
+	// Audit log
+	mux.HandleFunc("/api/audit", s.auth(s.handleAuditLog))
 
 	// ── Unix-domain socket (local API transport) ──────────────────────────────
 	// The socket is the recommended transport for the relay CLI when both the
@@ -3259,6 +3314,10 @@ func main() {
 			sockMux.HandleFunc("/health", s.handleHealth)
 			sockMux.HandleFunc("/api/version", s.handleVersion)
 			sockMux.HandleFunc("/api/auth/session", s.handleDashboardSession)
+			sockMux.HandleFunc("/api/auth/setup", s.handleAuthSetup)
+			sockMux.HandleFunc("/api/auth/login", s.handleAuthLogin)
+			sockMux.HandleFunc("/api/auth/me", s.handleAuthMe)
+			sockMux.HandleFunc("/api/auth/cli/exchange", s.handleAuthCLIExchange)
 			sockMux.HandleFunc("/api/deploys", s.auth(s.handleDeploys))
 			sockMux.HandleFunc("/api/deploys/", s.auth(s.handleDeployByID))
 			sockMux.HandleFunc("/api/deploys/rollback", s.auth(s.handleRollback))
@@ -3283,9 +3342,13 @@ func main() {
 			sockMux.HandleFunc("/api/sync/bundle/", s.auth(s.handleSyncBundle))
 			sockMux.HandleFunc("/api/sync/delete/", s.auth(s.handleSyncDelete))
 			sockMux.HandleFunc("/api/sync/finish/", s.auth(s.handleSyncFinish))
+			sockMux.HandleFunc("/api/sync/pull/", s.auth(s.handleSyncPull))
 			sockMux.HandleFunc("/api/projects", s.auth(s.handleProjects))
 			sockMux.HandleFunc("/api/projects/delete", s.auth(s.handleProjectDelete))
 			sockMux.HandleFunc("/api/webhooks/github", s.handleGithubWebhook)
+			sockMux.HandleFunc("/api/users", s.auth(s.handleUsers))
+			sockMux.HandleFunc("/api/users/", s.auth(s.handleUserByID))
+			sockMux.HandleFunc("/api/audit", s.auth(s.handleAuditLog))
 			socketServer := &http.Server{
 				Handler:           sockMux,
 				ReadHeaderTimeout: 10 * time.Second,
@@ -4347,6 +4410,30 @@ func (s *Server) handleSyncStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Workspace conflict check: if the caller has a known base version, verify
+	// it still matches the server's current workspace. A mismatch means someone
+	// else deployed in between and the caller needs to run "relay pull" first.
+	if req.BaseVersion != "" {
+		if st, err := s.getAppState(req.App, req.Env, req.Branch); err == nil && st != nil && st.RepoHash != "" {
+			if req.BaseVersion != st.RepoHash {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error":          "workspace behind server",
+					"server_version": st.RepoHash,
+					"hint":           "run: relay pull",
+				})
+				return
+			}
+		}
+	}
+
+	// Capture current workspace version to return to client (before this deploy).
+	wsVersion := ""
+	if st, err := s.getAppState(req.App, req.Env, req.Branch); err == nil && st != nil {
+		wsVersion = st.RepoHash
+	}
+
 	sessionID := newID()
 	workspace := filepath.Join(s.workspacesDir, fmt.Sprintf("%s__%s__%s", safe(req.App), safe(string(req.Env)), safe(req.Branch)))
 	repoDir := filepath.Join(workspace, "repo")
@@ -4380,7 +4467,7 @@ func (s *Server) handleSyncStart(w http.ResponseWriter, r *http.Request) {
 	s.syncMu.Unlock()
 
 	_ = s.saveSessionToDB(sess)
-	writeJSON(w, 200, SyncStartResponse{SessionID: sessionID})
+	writeJSON(w, 200, SyncStartResponse{SessionID: sessionID, WorkspaceVersion: wsVersion})
 }
 
 func (s *Server) handleSyncPlan(w http.ResponseWriter, r *http.Request) {
@@ -4713,6 +4800,9 @@ func (s *Server) handleSyncFinish(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, err.Error())
 		return
 	}
+	// Snapshot the workspace fingerprint now (after files are applied, before
+	// the async build starts) so we can return it to the client.
+	newWorkspaceVersion := repoFingerprint(sess.RepoDir)
 
 	var body struct {
 		Mode        string `json:"mode"`
@@ -4740,9 +4830,27 @@ func (s *Server) handleSyncFinish(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Capture who triggered this deploy from the authenticated session.
+	deployedBy := ""
+	if userSess := s.validateUserSession(r); userSess != nil {
+		deployedBy = userSess.Username
+	}
+
 	deployID := newID()
 	logPath := filepath.Join(s.logsDir, deployID+".log")
-	deploy := &Deploy{ID: deployID, App: sess.App, RepoURL: "", Branch: sess.Branch, Env: sess.Env, Status: StatusQueued, CreatedAt: time.Now(), LogPath: logPath}
+	buildNum := s.nextBuildNumber(sess.App)
+	deploy := &Deploy{
+		ID:          deployID,
+		App:         sess.App,
+		RepoURL:     "",
+		Branch:      sess.Branch,
+		Env:         sess.Env,
+		Status:      StatusQueued,
+		CreatedAt:   time.Now(),
+		LogPath:     logPath,
+		BuildNumber: buildNum,
+		DeployedBy:  deployedBy,
+	}
 
 	mode := strings.ToLower(strings.TrimSpace(body.Mode))
 
@@ -4766,6 +4874,7 @@ func (s *Server) handleSyncFinish(w http.ResponseWriter, r *http.Request) {
 		BuildCmd:         body.BuildCmd,
 		StartCmd:         body.StartCmd,
 		Engine:           normalizeEngine(body.Engine),
+		DeployedBy:       deployedBy,
 	}
 
 	s.mu.Lock()
@@ -4773,6 +4882,7 @@ func (s *Server) handleSyncFinish(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	_ = s.saveDeployToDB(deploy, req)
+	s.auditLog(deployedBy, "deploy.trigger", sess.App, fmt.Sprintf("build #%d env=%s branch=%s", buildNum, sess.Env, sess.Branch))
 	s.queue <- DeployJob{ID: deployID, Req: req}
 	s.broadcastSnapshot()
 
@@ -4781,7 +4891,16 @@ func (s *Server) handleSyncFinish(w http.ResponseWriter, r *http.Request) {
 	s.syncMu.Unlock()
 	_ = s.deleteSessionFromDB(sessionID)
 
-	writeJSON(w, 200, deploy)
+	writeJSON(w, 200, map[string]any{
+		"id":                deploy.ID,
+		"app":               deploy.App,
+		"branch":            deploy.Branch,
+		"env":               deploy.Env,
+		"status":            deploy.Status,
+		"created_at":        deploy.CreatedAt,
+		"build_number":      deploy.BuildNumber,
+		"workspace_version": newWorkspaceVersion,
+	})
 }
 
 func (s *Server) handleGithubWebhook(w http.ResponseWriter, r *http.Request) {
@@ -4825,6 +4944,9 @@ func (s *Server) handleGithubWebhook(w http.ResponseWriter, r *http.Request) {
 			CloneURL string `json:"clone_url"`
 			HTMLURL  string `json:"html_url"`
 		} `json:"repository"`
+		HeadCommit struct {
+			Message string `json:"message"`
+		} `json:"head_commit"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -4886,16 +5008,20 @@ func (s *Server) handleGithubWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 
 		deployID := newID()
+		commitMsg := strings.SplitN(strings.TrimSpace(payload.HeadCommit.Message), "\n", 2)[0]
+		buildNum := s.nextBuildNumber(st.App)
 		deploy := &Deploy{
-			ID:        deployID,
-			App:       st.App,
-			RepoURL:   payload.Repository.CloneURL,
-			Branch:    st.Branch,
-			CommitSHA: payload.After,
-			Env:       st.Env,
-			Status:    StatusQueued,
-			CreatedAt: time.Now(),
-			LogPath:   filepath.Join(s.logsDir, deployID+".log"),
+			ID:            deployID,
+			App:           st.App,
+			RepoURL:       payload.Repository.CloneURL,
+			Branch:        st.Branch,
+			CommitSHA:     payload.After,
+			Env:           st.Env,
+			Status:        StatusQueued,
+			CreatedAt:     time.Now(),
+			LogPath:       filepath.Join(s.logsDir, deployID+".log"),
+			BuildNumber:   buildNum,
+			CommitMessage: commitMsg,
 		}
 
 		req := DeployRequest{
@@ -4910,6 +5036,7 @@ func (s *Server) handleGithubWebhook(w http.ResponseWriter, r *http.Request) {
 			HostPortExplicit: st.HostPortExplicit,
 			ServicePort:      st.ServicePort,
 			PublicHost:       st.PublicHost,
+			CommitMessage:    commitMsg,
 		}
 
 		s.mu.Lock()
@@ -4917,6 +5044,11 @@ func (s *Server) handleGithubWebhook(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 
 		_ = s.saveDeployToDB(deploy, req)
+		shortSHA := payload.After
+		if len(shortSHA) > 7 {
+			shortSHA = shortSHA[:7]
+		}
+		s.auditLog("github", "deploy.trigger", st.App, fmt.Sprintf("build #%d commit=%s env=%s", buildNum, shortSHA, st.Env))
 		s.queue <- DeployJob{ID: deployID, Req: req}
 		s.broadcastSnapshot()
 		count++
@@ -5621,6 +5753,7 @@ func (s *Server) handleAppSecrets(w http.ResponseWriter, r *http.Request) {
 			if err := rows.Scan(&sec.App, &sec.Env, &sec.Branch, &sec.Key, &sec.Value); err != nil {
 				continue
 			}
+			sec.Value = s.decryptSecret(sec.Value)
 			out = append(out, sec)
 		}
 		writeJSON(w, 200, out)
@@ -5636,12 +5769,19 @@ func (s *Server) handleAppSecrets(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		encrypted := s.encryptSecret(sec.Value)
 		_, err := s.db.Exec(`INSERT OR REPLACE INTO app_secrets (app, env, branch, key, value) VALUES (?, ?, ?, ?, ?)`,
-			sec.App, sec.Env, sec.Branch, sec.Key, sec.Value)
+			sec.App, sec.Env, sec.Branch, sec.Key, encrypted)
 		if err != nil {
 			httpError(w, 500, "failed to save secret: "+err.Error())
 			return
 		}
+		// Audit secret writes (log key name only, never the value)
+		actor := ""
+		if userSess := s.validateUserSession(r); userSess != nil {
+			actor = userSess.Username
+		}
+		s.auditLog(actor, "secret.set", sec.App, fmt.Sprintf("key=%s env=%s branch=%s", sec.Key, sec.Env, sec.Branch))
 		writeJSON(w, 200, map[string]bool{"ok": true})
 
 	case http.MethodDelete:
@@ -5687,6 +5827,7 @@ func (s *Server) getAppSecrets(app string, env DeployEnv, branch string) (map[st
 		if err := rows.Scan(&k, &v, &e, &b); err != nil {
 			continue
 		}
+		v = s.decryptSecret(v)
 
 		spec := 0
 		if e == string(env) {
@@ -7720,13 +7861,28 @@ func (s *Server) pluginMutationsEnabled() bool {
 func (s *Server) handleDashboardSession(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		token, _ := s.requestToken(r)
-		if !s.validateToken(token) {
-			writeJSON(w, 200, map[string]any{"authenticated": false})
+		if s.hasUsers() {
+			sess := s.validateUserSession(r)
+			if sess == nil {
+				writeJSON(w, 200, map[string]any{"authenticated": false})
+				return
+			}
+			writeJSON(w, 200, map[string]any{"authenticated": true, "username": sess.Username, "role": sess.Role})
 			return
 		}
-		writeJSON(w, 200, map[string]any{"authenticated": true})
+		// Legacy token mode
+		token, _ := s.requestToken(r)
+		if !s.validateToken(token) {
+			writeJSON(w, 200, map[string]any{"authenticated": false, "legacy_mode": true})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"authenticated": true, "legacy_mode": true})
 	case http.MethodPost:
+		if s.hasUsers() {
+			httpError(w, 410, "use POST /api/auth/login")
+			return
+		}
+		// Legacy token mode
 		var body struct {
 			Token string `json:"token"`
 		}
@@ -7741,6 +7897,12 @@ func (s *Server) handleDashboardSession(w http.ResponseWriter, r *http.Request) 
 		setDashboardSessionCookie(w, r, strings.TrimSpace(body.Token))
 		writeJSON(w, 200, map[string]any{"authenticated": true})
 	case http.MethodDelete:
+		if s.hasUsers() {
+			token, _ := s.requestToken(r)
+			if token != "" {
+				_, _ = s.db.Exec(`DELETE FROM user_sessions WHERE token=?`, token)
+			}
+		}
 		clearDashboardSessionCookie(w, r)
 		writeJSON(w, 200, map[string]any{"authenticated": false})
 	default:
@@ -7756,6 +7918,22 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 			next(w, r)
 			return
 		}
+		if s.hasUsers() {
+			// New user-session auth.
+			sess := s.validateUserSession(r)
+			if sess == nil {
+				httpError(w, 401, "unauthorized")
+				return
+			}
+			_, source := s.requestToken(r)
+			if source == "cookie" && requiresSameOrigin(r.Method) && !isSameOriginRequest(r) {
+				httpError(w, 403, "origin check failed")
+				return
+			}
+			next(w, r)
+			return
+		}
+		// Legacy token auth (backward compat for installs without user accounts).
 		token, source := s.requestToken(r)
 		if token == "" {
 			httpError(w, 401, "missing token")
@@ -7771,6 +7949,297 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// ─── User auth helpers ────────────────────────────────────────────────────────
+
+func (s *Server) hasUsers() bool {
+	var count int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&count)
+	return count > 0
+}
+
+func (s *Server) validateUserSession(r *http.Request) *UserSession {
+	token, _ := s.requestToken(r)
+	if token == "" {
+		return nil
+	}
+	var sess UserSession
+	var expiresAt int64
+	err := s.db.QueryRow(
+		`SELECT us.token, us.user_id, u.username, u.role, us.expires_at
+		 FROM user_sessions us JOIN users u ON u.id = us.user_id
+		 WHERE us.token=? AND us.expires_at>?`,
+		token, time.Now().UnixMilli(),
+	).Scan(&sess.Token, &sess.UserID, &sess.Username, &sess.Role, &expiresAt)
+	if err != nil {
+		return nil
+	}
+	return &sess
+}
+
+func (s *Server) createUserSession(userID string) (string, error) {
+	token := newID() + newID() // 64 hex chars
+	_, err := s.db.Exec(
+		`INSERT INTO user_sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)`,
+		token, userID, time.Now().UnixMilli(), time.Now().Add(30*24*time.Hour).UnixMilli(),
+	)
+	return token, err
+}
+
+// ─── Auth endpoints ───────────────────────────────────────────────────────────
+
+// POST /api/auth/setup — create first owner account (only when no users exist).
+func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpError(w, 405, "method not allowed")
+		return
+	}
+	if s.hasUsers() {
+		httpError(w, 409, "already set up")
+		return
+	}
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpError(w, 400, "invalid json")
+		return
+	}
+	body.Username = strings.TrimSpace(body.Username)
+	if body.Username == "" || len(body.Password) < 8 {
+		httpError(w, 400, "username required; password must be at least 8 characters")
+		return
+	}
+	hash, err := hashPassword(body.Password)
+	if err != nil {
+		httpError(w, 500, "failed to hash password")
+		return
+	}
+	id := newID()
+	if _, err = s.db.Exec(
+		`INSERT INTO users (id, username, password_hash, role, created_at) VALUES (?, ?, ?, 'owner', ?)`,
+		id, body.Username, hash, time.Now().UnixMilli(),
+	); err != nil {
+		httpError(w, 500, "failed to create user")
+		return
+	}
+	token, err := s.createUserSession(id)
+	if err != nil {
+		httpError(w, 500, "user created but session failed")
+		return
+	}
+	setDashboardSessionCookie(w, r, token)
+	writeJSON(w, 200, map[string]any{"username": body.Username, "role": "owner"})
+}
+
+// POST /api/auth/login
+func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpError(w, 405, "method not allowed")
+		return
+	}
+	if !s.hasUsers() {
+		writeJSON(w, 200, map[string]any{"setup_required": true})
+		return
+	}
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+		CLIPort  int    `json:"cli_port,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpError(w, 400, "invalid json")
+		return
+	}
+	var u User
+	err := s.db.QueryRow(
+		`SELECT id, username, password_hash, role FROM users WHERE username=?`,
+		strings.TrimSpace(body.Username),
+	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role)
+	if err != nil || !checkPassword(body.Password, u.PasswordHash) {
+		time.Sleep(300 * time.Millisecond) // slow down brute-force
+		httpError(w, 403, "invalid credentials")
+		return
+	}
+	token, err := s.createUserSession(u.ID)
+	if err != nil {
+		httpError(w, 500, "session error")
+		return
+	}
+	setDashboardSessionCookie(w, r, token)
+	resp := map[string]any{"username": u.Username, "role": u.Role}
+	// CLI browser flow: if cli_port given, generate a short-lived auth code
+	// that the CLI can exchange for a bearer token.
+	if body.CLIPort > 0 {
+		code := newID() + newID()
+		if _, codeErr := s.db.Exec(
+			`INSERT INTO auth_codes (code, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)`,
+			code, u.ID, time.Now().UnixMilli(), time.Now().Add(5*time.Minute).UnixMilli(),
+		); codeErr == nil {
+			resp["cli_code"] = code
+			resp["cli_redirect"] = fmt.Sprintf("http://localhost:%d/callback?code=%s&user=%s&role=%s",
+				body.CLIPort, code, url.QueryEscape(u.Username), url.QueryEscape(u.Role))
+		}
+	}
+	writeJSON(w, 200, resp)
+}
+
+// GET /api/auth/me
+func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, 405, "method not allowed")
+		return
+	}
+	if !s.hasUsers() {
+		writeJSON(w, 200, map[string]any{"setup_required": true})
+		return
+	}
+	sess := s.validateUserSession(r)
+	if sess == nil {
+		writeJSON(w, 200, map[string]any{"authenticated": false})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"authenticated": true, "username": sess.Username, "role": sess.Role})
+}
+
+// POST /api/auth/cli/exchange — exchange a short-lived auth code for a bearer token.
+func (s *Server) handleAuthCLIExchange(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpError(w, 405, "method not allowed")
+		return
+	}
+	var body struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Code == "" {
+		httpError(w, 400, "invalid request")
+		return
+	}
+	var userID string
+	var expiresAt int64
+	if err := s.db.QueryRow(
+		`SELECT user_id, expires_at FROM auth_codes WHERE code=?`, body.Code,
+	).Scan(&userID, &expiresAt); err != nil || time.Now().UnixMilli() > expiresAt {
+		httpError(w, 403, "invalid or expired code")
+		return
+	}
+	_, _ = s.db.Exec(`DELETE FROM auth_codes WHERE code=?`, body.Code)
+	var u User
+	if err := s.db.QueryRow(
+		`SELECT id, username, role FROM users WHERE id=?`, userID,
+	).Scan(&u.ID, &u.Username, &u.Role); err != nil {
+		httpError(w, 500, "user lookup failed")
+		return
+	}
+	token, err := s.createUserSession(u.ID)
+	if err != nil {
+		httpError(w, 500, "session error")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"token": token, "username": u.Username, "role": u.Role})
+}
+
+// GET /api/sync/pull/{app}/{env}/{branch} — download current workspace as tar.
+func (s *Server) handleSyncPull(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, 405, "method not allowed")
+		return
+	}
+	parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/api/sync/pull/"), "/", 3)
+	if len(parts) < 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		httpError(w, 400, "usage: /api/sync/pull/{app}/{env}/{branch}")
+		return
+	}
+	appName, envStr, branch := parts[0], parts[1], parts[2]
+	workspace := filepath.Join(s.workspacesDir, fmt.Sprintf("%s__%s__%s", safe(appName), safe(envStr), safe(branch)))
+	repoDir := filepath.Join(workspace, "repo")
+	if _, err := os.Stat(repoDir); err != nil {
+		httpError(w, 404, "no workspace found for this app/env/branch — deploy first")
+		return
+	}
+	wsVersion := ""
+	if st, err := s.getAppState(appName, DeployEnv(envStr), branch); err == nil && st != nil {
+		wsVersion = st.RepoHash
+	}
+	w.Header().Set("Content-Type", "application/x-tar")
+	w.Header().Set("X-Workspace-Version", wsVersion)
+	tw := tar.NewWriter(w)
+	_ = filepath.Walk(repoDir, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
+			return nil
+		}
+		rel, _ := filepath.Rel(repoDir, p)
+		rel = filepath.ToSlash(rel)
+		if shouldIgnoreRepoPath(rel) {
+			return nil
+		}
+		data, readErr := os.ReadFile(p)
+		if readErr != nil {
+			return nil
+		}
+		_ = tw.WriteHeader(&tar.Header{
+			Typeflag: tar.TypeReg,
+			Name:     rel,
+			Mode:     0644,
+			Size:     int64(len(data)),
+			ModTime:  info.ModTime(),
+		})
+		_, _ = tw.Write(data)
+		return nil
+	})
+	_ = tw.Close()
+}
+
+// ─── Password hashing (PBKDF2-style, stdlib only) ─────────────────────────────
+
+const pwHashIter = 100_000
+
+func hashPassword(password string) (string, error) {
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return "", err
+	}
+	h := pbkdf2HMACSHA256([]byte(password), salt, pwHashIter)
+	return hex.EncodeToString(salt) + ":" + hex.EncodeToString(h), nil
+}
+
+func checkPassword(password, stored string) bool {
+	parts := strings.SplitN(stored, ":", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	salt, err := hex.DecodeString(parts[0])
+	if err != nil {
+		return false
+	}
+	expected, err2 := hex.DecodeString(parts[1])
+	if err2 != nil {
+		return false
+	}
+	got := pbkdf2HMACSHA256([]byte(password), salt, pwHashIter)
+	return subtle.ConstantTimeCompare(got, expected) == 1
+}
+
+// pbkdf2HMACSHA256 is a single-block PBKDF2 with HMAC-SHA256 as the PRF.
+// Using stdlib only (no golang.org/x/crypto dependency).
+func pbkdf2HMACSHA256(password, salt []byte, iter int) []byte {
+	mac := hmac.New(sha256.New, password)
+	mac.Write(salt)
+	mac.Write([]byte{0, 0, 0, 1})
+	u := mac.Sum(nil)
+	out := make([]byte, len(u))
+	copy(out, u)
+	for i := 1; i < iter; i++ {
+		mac.Reset()
+		mac.Write(u)
+		u = mac.Sum(nil)
+		for j := range out {
+			out[j] ^= u[j]
+		}
+	}
+	return out
 }
 
 func (s *Server) withCORS(next http.Handler) http.HandlerFunc {
@@ -7979,6 +8448,9 @@ func migrateDB(db *sql.DB) error {
 	}
 	// Best-effort schema upgrades for existing databases.
 	_, _ = db.Exec(`ALTER TABLE deploys ADD COLUMN preview_url TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE deploys ADD COLUMN build_number INTEGER DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE deploys ADD COLUMN deployed_by TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE deploys ADD COLUMN commit_message TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN webhook_secret TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN engine TEXT DEFAULT 'docker'`)
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN active_slot TEXT DEFAULT ''`)
@@ -7992,6 +8464,25 @@ func migrateDB(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN host_port INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN spec_hash TEXT DEFAULT ''`)
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS server_config (key TEXT PRIMARY KEY, value TEXT)`)
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS users (
+		id TEXT PRIMARY KEY,
+		username TEXT UNIQUE NOT NULL,
+		password_hash TEXT NOT NULL,
+		role TEXT NOT NULL DEFAULT 'deployer',
+		created_at INTEGER
+	)`)
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS user_sessions (
+		token TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL,
+		created_at INTEGER,
+		expires_at INTEGER
+	)`)
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS auth_codes (
+		code TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL,
+		created_at INTEGER,
+		expires_at INTEGER
+	)`)
 	// Analytics tables
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS analytics_events (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -8012,7 +8503,280 @@ func migrateDB(db *sql.DB) error {
 		country_name TEXT NOT NULL DEFAULT '',
 		updated_at INTEGER NOT NULL DEFAULT 0
 	)`)
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS audit_log (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		ts INTEGER NOT NULL,
+		actor TEXT NOT NULL DEFAULT '',
+		action TEXT NOT NULL DEFAULT '',
+		target TEXT NOT NULL DEFAULT '',
+		detail TEXT NOT NULL DEFAULT ''
+	)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)`)
 	return nil
+}
+
+// ─── Audit log ───────────────────────────────────────────────────────────────
+
+func (s *Server) auditLog(actor, action, target, detail string) {
+	_, _ = s.db.Exec(
+		`INSERT INTO audit_log (ts, actor, action, target, detail) VALUES (?, ?, ?, ?, ?)`,
+		time.Now().UnixMilli(), actor, action, target, detail,
+	)
+}
+
+// GET /api/audit — returns recent audit entries (owner only)
+func (s *Server) handleAuditLog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, 405, "method not allowed")
+		return
+	}
+	limit := 200
+	if lStr := r.URL.Query().Get("limit"); lStr != "" {
+		if l, err := strconv.Atoi(lStr); err == nil && l > 0 && l <= 1000 {
+			limit = l
+		}
+	}
+	rows, err := s.db.Query(
+		`SELECT id, ts, actor, action, target, detail FROM audit_log ORDER BY ts DESC LIMIT ?`, limit,
+	)
+	if err != nil {
+		httpError(w, 500, err.Error())
+		return
+	}
+	defer rows.Close()
+	type entry struct {
+		ID     int64  `json:"id"`
+		TS     int64  `json:"ts"`
+		Actor  string `json:"actor"`
+		Action string `json:"action"`
+		Target string `json:"target"`
+		Detail string `json:"detail"`
+	}
+	out := []entry{}
+	for rows.Next() {
+		var e entry
+		if err := rows.Scan(&e.ID, &e.TS, &e.Actor, &e.Action, &e.Target, &e.Detail); err != nil {
+			continue
+		}
+		out = append(out, e)
+	}
+	writeJSON(w, 200, out)
+}
+
+// ─── Secrets encryption ───────────────────────────────────────────────────────
+
+// encryptSecret encrypts plaintext using AES-256-GCM. Returns the plaintext
+// unchanged if no secret key is configured or on any error.
+func (s *Server) encryptSecret(plaintext string) string {
+	if len(s.secretKey) != 32 {
+		return plaintext
+	}
+	block, err := aes.NewCipher(s.secretKey)
+	if err != nil {
+		return plaintext
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return plaintext
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err = rand.Read(nonce); err != nil {
+		return plaintext
+	}
+	ct := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
+	return "enc:" + base64.StdEncoding.EncodeToString(ct)
+}
+
+// decryptSecret decrypts a value previously encrypted by encryptSecret.
+// Returns the value unchanged if it is not encrypted or on any error.
+func (s *Server) decryptSecret(ciphertext string) string {
+	if len(s.secretKey) != 32 || !strings.HasPrefix(ciphertext, "enc:") {
+		return ciphertext
+	}
+	data, err := base64.StdEncoding.DecodeString(ciphertext[4:])
+	if err != nil {
+		return ciphertext
+	}
+	block, err := aes.NewCipher(s.secretKey)
+	if err != nil {
+		return ciphertext
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return ciphertext
+	}
+	ns := gcm.NonceSize()
+	if len(data) < ns {
+		return ciphertext
+	}
+	plaintext, err := gcm.Open(nil, data[:ns], data[ns:], nil)
+	if err != nil {
+		return ciphertext
+	}
+	return string(plaintext)
+}
+
+// ─── Build numbering ─────────────────────────────────────────────────────────
+
+// nextBuildNumber returns the next sequential build number for an app.
+func (s *Server) nextBuildNumber(app string) int {
+	var n int
+	_ = s.db.QueryRow(
+		`SELECT COALESCE(MAX(build_number), 0) + 1 FROM deploys WHERE app=?`, app,
+	).Scan(&n)
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// ─── User management API ──────────────────────────────────────────────────────
+
+// GET  /api/users — list users (owner only)
+// POST /api/users — create user (owner only)
+func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
+	if !s.hasUsers() {
+		httpError(w, 404, "user accounts not enabled")
+		return
+	}
+	sess := s.validateUserSession(r)
+	if sess == nil {
+		httpError(w, 401, "unauthorized")
+		return
+	}
+	if sess.Role != "owner" {
+		httpError(w, 403, "owner role required")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		rows, err := s.db.Query(
+			`SELECT id, username, role, created_at FROM users ORDER BY created_at ASC`,
+		)
+		if err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+		defer rows.Close()
+		type userRow struct {
+			ID        string `json:"id"`
+			Username  string `json:"username"`
+			Role      string `json:"role"`
+			CreatedAt int64  `json:"created_at"`
+		}
+		out := []userRow{}
+		for rows.Next() {
+			var u userRow
+			if err := rows.Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt); err != nil {
+				continue
+			}
+			out = append(out, u)
+		}
+		writeJSON(w, 200, out)
+
+	case http.MethodPost:
+		var body struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+			Role     string `json:"role"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpError(w, 400, "invalid json")
+			return
+		}
+		body.Username = strings.TrimSpace(body.Username)
+		if body.Username == "" || len(body.Password) < 8 {
+			httpError(w, 400, "username required; password must be at least 8 characters")
+			return
+		}
+		role := body.Role
+		if role != "owner" && role != "deployer" && role != "viewer" {
+			role = "deployer"
+		}
+		hash, err := hashPassword(body.Password)
+		if err != nil {
+			httpError(w, 500, "failed to hash password")
+			return
+		}
+		id := newID()
+		if _, err = s.db.Exec(
+			`INSERT INTO users (id, username, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)`,
+			id, body.Username, hash, role, time.Now().UnixMilli(),
+		); err != nil {
+			httpError(w, 409, "username already exists")
+			return
+		}
+		s.auditLog(sess.Username, "user.create", body.Username, "role="+role)
+		writeJSON(w, 200, map[string]any{"id": id, "username": body.Username, "role": role})
+
+	default:
+		httpError(w, 405, "method not allowed")
+	}
+}
+
+// DELETE /api/users/{id} — delete a user (owner only)
+// PATCH  /api/users/{id} — change role (owner only)
+func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
+	if !s.hasUsers() {
+		httpError(w, 404, "user accounts not enabled")
+		return
+	}
+	sess := s.validateUserSession(r)
+	if sess == nil {
+		httpError(w, 401, "unauthorized")
+		return
+	}
+	if sess.Role != "owner" {
+		httpError(w, 403, "owner role required")
+		return
+	}
+	userID := strings.TrimPrefix(r.URL.Path, "/api/users/")
+	if userID == "" {
+		httpError(w, 400, "user id required")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodDelete:
+		if userID == sess.UserID {
+			httpError(w, 400, "cannot delete your own account")
+			return
+		}
+		var username string
+		_ = s.db.QueryRow(`SELECT username FROM users WHERE id=?`, userID).Scan(&username)
+		if _, err := s.db.Exec(`DELETE FROM users WHERE id=?`, userID); err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+		_, _ = s.db.Exec(`DELETE FROM user_sessions WHERE user_id=?`, userID)
+		s.auditLog(sess.Username, "user.delete", username, "")
+		writeJSON(w, 200, map[string]bool{"ok": true})
+
+	case http.MethodPatch:
+		var body struct {
+			Role string `json:"role"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpError(w, 400, "invalid json")
+			return
+		}
+		if body.Role != "owner" && body.Role != "deployer" && body.Role != "viewer" {
+			httpError(w, 400, "role must be owner, deployer, or viewer")
+			return
+		}
+		var username string
+		_ = s.db.QueryRow(`SELECT username FROM users WHERE id=?`, userID).Scan(&username)
+		if _, err := s.db.Exec(`UPDATE users SET role=? WHERE id=?`, body.Role, userID); err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+		s.auditLog(sess.Username, "user.role", username, "role="+body.Role)
+		writeJSON(w, 200, map[string]any{"id": userID, "role": body.Role})
+
+	default:
+		httpError(w, 405, "method not allowed")
+	}
 }
 
 func (s *Server) setDeployPreviewURL(id, url string) error {
@@ -8047,15 +8811,22 @@ func previewURLFromConfig(mode string, publicHost string, hostPort int) string {
 
 func (s *Server) saveDeployToDB(d *Deploy, req DeployRequest) error {
 	d.Source = req.Source
+	if req.CommitMessage != "" {
+		d.CommitMessage = req.CommitMessage
+	}
+	if req.DeployedBy != "" {
+		d.DeployedBy = req.DeployedBy
+	}
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO deploys
-		(id, app, repo_url, branch, commit_sha, env, status, created_at, started_at, ended_at, error, log_path, image_tag, previous_image_tag, preview_url)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, app, repo_url, branch, commit_sha, env, status, created_at, started_at, ended_at, error, log_path, image_tag, previous_image_tag, preview_url, build_number, deployed_by, commit_message)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		d.ID, d.App, d.RepoURL, d.Branch, d.CommitSHA, string(d.Env), string(d.Status),
 		d.CreatedAt.UnixMilli(),
 		timePtrToMillis(d.StartedAt),
 		timePtrToMillis(d.EndedAt),
 		d.Error, d.LogPath, d.ImageTag, d.PrevImage, d.PreviewURL,
+		d.BuildNumber, d.DeployedBy, d.CommitMessage,
 	)
 	if err != nil {
 		return err
@@ -8092,7 +8863,7 @@ func failDeploy(s *Server, d *Deploy, err error, msg string) {
 }
 
 func (s *Server) listDeploysFromDB() ([]*Deploy, error) {
-	rows, err := s.db.Query(`SELECT d.id, d.app, d.repo_url, d.branch, d.commit_sha, d.env, d.status, d.created_at, d.started_at, d.ended_at, d.error, d.log_path, d.image_tag, d.previous_image_tag, COALESCE(d.preview_url,''), COALESCE(r.source,'')
+	rows, err := s.db.Query(`SELECT d.id, d.app, d.repo_url, d.branch, d.commit_sha, d.env, d.status, d.created_at, d.started_at, d.ended_at, d.error, d.log_path, d.image_tag, d.previous_image_tag, COALESCE(d.preview_url,''), COALESCE(r.source,''), COALESCE(d.build_number,0), COALESCE(d.deployed_by,''), COALESCE(d.commit_message,'')
 		FROM deploys d
 		LEFT JOIN deploy_requests r ON r.id = d.id
 		ORDER BY d.created_at DESC LIMIT 200`)
@@ -8110,7 +8881,7 @@ func (s *Server) listDeploysFromDB() ([]*Deploy, error) {
 		var img, prev sql.NullString
 
 		var purl string
-		if err := rows.Scan(&d.ID, &d.App, &d.RepoURL, &d.Branch, &d.CommitSHA, &env, &st, &created, &started, &ended, &errTxt, &d.LogPath, &img, &prev, &purl, &d.Source); err != nil {
+		if err := rows.Scan(&d.ID, &d.App, &d.RepoURL, &d.Branch, &d.CommitSHA, &env, &st, &created, &started, &ended, &errTxt, &d.LogPath, &img, &prev, &purl, &d.Source, &d.BuildNumber, &d.DeployedBy, &d.CommitMessage); err != nil {
 			continue
 		}
 		d.Env = DeployEnv(env)
@@ -8141,7 +8912,7 @@ func (s *Server) listDeploysFromDB() ([]*Deploy, error) {
 }
 
 func (s *Server) getDeployFromDB(id string) (*Deploy, error) {
-	row := s.db.QueryRow(`SELECT d.id, d.app, d.repo_url, d.branch, d.commit_sha, d.env, d.status, d.created_at, d.started_at, d.ended_at, d.error, d.log_path, d.image_tag, d.previous_image_tag, COALESCE(d.preview_url,''), COALESCE(r.source,'')
+	row := s.db.QueryRow(`SELECT d.id, d.app, d.repo_url, d.branch, d.commit_sha, d.env, d.status, d.created_at, d.started_at, d.ended_at, d.error, d.log_path, d.image_tag, d.previous_image_tag, COALESCE(d.preview_url,''), COALESCE(r.source,''), COALESCE(d.build_number,0), COALESCE(d.deployed_by,''), COALESCE(d.commit_message,'')
 		FROM deploys d
 		LEFT JOIN deploy_requests r ON r.id = d.id
 		WHERE d.id=?`, id)
@@ -8152,7 +8923,7 @@ func (s *Server) getDeployFromDB(id string) (*Deploy, error) {
 	var errTxt sql.NullString
 	var img, prev sql.NullString
 
-	if err := row.Scan(&d.ID, &d.App, &d.RepoURL, &d.Branch, &d.CommitSHA, &env, &st, &created, &started, &ended, &errTxt, &d.LogPath, &img, &prev, &purl, &d.Source); err != nil {
+	if err := row.Scan(&d.ID, &d.App, &d.RepoURL, &d.Branch, &d.CommitSHA, &env, &st, &created, &started, &ended, &errTxt, &d.LogPath, &img, &prev, &purl, &d.Source, &d.BuildNumber, &d.DeployedBy, &d.CommitMessage); err != nil {
 		return nil, err
 	}
 	d.PreviewURL = purl

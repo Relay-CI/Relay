@@ -1,4 +1,4 @@
-﻿# Relay
+# Relay
 
 Self-hosted deployment platform — sync changed files, auto-detect buildpacks, roll out containers. No GitHub Actions, no cloud platform required.
 
@@ -44,7 +44,7 @@ For Linux production (keeps running after SSH closes and restarts on reboot):
 sudo relayd service install --user relay --group relay --data-dir /var/lib/relayd
 ```
 
-On first run it creates `data/token.txt` — your auth token. Open `http://<server>:8080` for the dashboard.
+On first run with no user accounts configured, open `http://<server>:8080` — the dashboard walks you through creating the first owner account. If you prefer a static token instead, set `RELAY_TOKEN` and the browser will prompt for it.
 
 **2. Init your project** (run inside your app folder)
 
@@ -52,7 +52,7 @@ On first run it creates `data/token.txt` — your auth token. Open `http://<serv
 relay init
 ```
 
-Walks through server URL, token, app name, env, and branch. Writes `.relay.json`.
+Walks through server URL, token or login, app name, env, and branch. Writes `.relay.json`.
 
 **3. Deploy**
 
@@ -60,7 +60,7 @@ Walks through server URL, token, app name, env, and branch. Writes `.relay.json`
 relay deploy --stream
 ```
 
-Relay detects your buildpack, syncs only changed files, builds a container, and does a zero-downtime rollout.
+Relay detects your buildpack, syncs only changed files, builds a container, and does a zero-downtime rollout. Each deploy gets a sequential build number (`#1`, `#2`, …) visible in the dashboard.
 
 ---
 
@@ -69,6 +69,7 @@ Relay detects your buildpack, syncs only changed files, builds a container, and 
 ```
 relay init                         Interactive setup → writes .relay.json
 relay deploy [--stream]            Sync + build + rollout
+relay pull                         Download server workspace to local directory
 relay status                       Latest deploy status
 relay logs <id>                    Stream build logs
 relay list                         Recent deploys
@@ -76,6 +77,8 @@ relay projects                     All projects and environments
 relay rollback                     Roll back to previous image
 relay start / stop / restart       Control a running container
 relay secrets list/add/rm          Manage app secrets
+relay login                        Browser-based login → saves bearer token
+relay logout                       Clear saved session token
 relay plugin list/install/remove   Manage server-side buildpack plugins
 relay version                      Show relay/relayd/station versions
 relay agent install [--version v]  Download relayd + station binaries
@@ -121,6 +124,24 @@ Switch per app in the dashboard under **Settings → Runtime / Routing**.
 
 ## Auth
 
+Relay supports two auth modes:
+
+### User accounts (recommended)
+
+On first run with an empty `users` table, the dashboard prompts for setup. Create the first **owner** account, then add additional users from **Server → User Management**.
+
+| Role | Can deploy | Can manage secrets | Can manage users |
+|---|---|---|---|
+| `owner` | ✓ | ✓ | ✓ |
+| `deployer` | ✓ | ✓ | — |
+| `viewer` | — | — | — |
+
+Use `relay login` for browser-based CLI auth — opens a browser tab, you log in once, and the token is saved to `~/.relay-state.json`.
+
+### Legacy token mode
+
+If `RELAY_TOKEN` is set (or `data/token.txt` exists) and no users have been created, the server operates in legacy single-token mode. All existing setups continue to work unchanged.
+
 Every request to `relayd` must include your token:
 
 ```
@@ -129,6 +150,44 @@ Authorization: Bearer <token>
 ```
 
 The web dashboard uses an HttpOnly session cookie after login.
+
+---
+
+## Build Tracking
+
+Every deploy is assigned a sequential **build number** per app (`#1`, `#2`, …). The dashboard shows:
+
+- **Build number** — `#42` in the deployment list header
+- **Deployed by** — the username who triggered each deploy (for sync/CLI deploys)
+- **Commit message** — first line of the git commit message (for webhook-triggered deploys)
+
+---
+
+## Secrets Encryption at Rest
+
+Set `RELAY_SECRET_KEY` to enable AES-256-GCM encryption for all secrets stored in `relay.db`:
+
+```bash
+RELAY_SECRET_KEY="your-strong-passphrase" relayd
+```
+
+The key is hashed to 32 bytes (SHA-256) before use. Secrets written before this key was set remain readable as plain text. New writes are stored as `enc:<base64>`. The deploy path decrypts transparently.
+
+---
+
+## Audit Log
+
+Every significant action is recorded in `relay.db` and exposed at `GET /api/audit`:
+
+| Action | Trigger |
+|---|---|
+| `deploy.trigger` | CLI deploy or GitHub webhook push |
+| `secret.set` | Secret created or updated |
+| `user.create` | New user account created |
+| `user.delete` | User account removed |
+| `user.role` | User role changed |
+
+The **Server → Activity Log** panel in the dashboard shows the last 100 entries with actor, target, and timestamp.
 
 ---
 
@@ -154,11 +213,13 @@ Sample: [`plugins/astro-static.json`](plugins/astro-static.json)
 ## Production Checklist
 
 - Put `relayd` behind TLS + a reverse proxy (nginx, Caddy, Traefik)
-- Set `RELAY_TOKEN` explicitly instead of relying on auto-generated `token.txt`
+- Create an owner account through the dashboard on first boot (or set `RELAY_TOKEN` for legacy mode)
+- Set `RELAY_SECRET_KEY` to encrypt secrets at rest
 - Set `RELAY_CORS_ORIGINS` to your domain allowlist
 - Set `RELAY_ENABLE_PLUGIN_MUTATIONS=false` unless actively managing plugins
 - Persist `RELAY_DATA_DIR` on a durable volume and back it up
 - `relayd` creates `relay.db`, `logs/`, and `token.txt` inside `RELAY_DATA_DIR` (defaults to `./data`)
+- Review the Audit Log in the dashboard regularly — especially after onboarding new team members
 
 ---
 

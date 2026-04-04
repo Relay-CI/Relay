@@ -15343,7 +15343,9 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
       /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { children: label })
     ] }) });
   }
-  function LoginScreen({ onLogin, error }) {
+  function LoginScreen({ onLogin, error, legacyMode }) {
+    const [username, setUsername] = (0, import_react9.useState)("");
+    const [password, setPassword] = (0, import_react9.useState)("");
     const [token, setToken] = (0, import_react9.useState)("");
     const [pending, setPending] = (0, import_react9.useState)(false);
     return /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "screen-center", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(
@@ -15354,34 +15356,140 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
           event.preventDefault();
           setPending(true);
           try {
-            await onLogin(token);
+            await onLogin(legacyMode ? token : { username, password });
           } finally {
             setPending(false);
           }
         },
         children: [
-          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("input", { type: "text", name: "username", autoComplete: "username", value: "relay-admin", readOnly: true, hidden: true }),
           /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(RelayMark, { className: "brand__glyph", title: "Relay mark" }),
           /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "eyebrow", children: "Secure Agent Access" }),
           /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("h1", { className: "login-card__title", children: "Relay Control Room" }),
-          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("p", { className: "login-card__body", children: "Dashboard sessions are now stored in an HttpOnly cookie. The token never needs to live in browser storage." }),
+          legacyMode ? /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(import_jsx_runtime27.Fragment, { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("p", { className: "login-card__body", children: "Enter your relay token to access the dashboard." }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(
+              "input",
+              {
+                className: "text-input",
+                type: "password",
+                autoComplete: "current-password",
+                placeholder: "Paste relay token",
+                value: token,
+                onChange: (e) => setToken(e.target.value)
+              }
+            )
+          ] }) : /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(import_jsx_runtime27.Fragment, { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("p", { className: "login-card__body", children: "Sign in to manage your deployments." }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(
+              "input",
+              {
+                className: "text-input",
+                type: "text",
+                autoComplete: "username",
+                placeholder: "Username",
+                value: username,
+                onChange: (e) => setUsername(e.target.value)
+              }
+            ),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(
+              "input",
+              {
+                className: "text-input",
+                type: "password",
+                autoComplete: "current-password",
+                placeholder: "Password",
+                value: password,
+                onChange: (e) => setPassword(e.target.value)
+              }
+            )
+          ] }),
+          error && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "error-banner", children: error }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(
+            "button",
+            {
+              type: "submit",
+              className: "primary-button",
+              disabled: (legacyMode ? !token : !username || !password) || pending,
+              children: pending ? "Signing in\u2026" : "Sign In"
+            }
+          ),
+          legacyMode && /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "helper-row", children: [
+            "Token source ",
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "helper-pill", children: "data/token.txt" })
+          ] })
+        ]
+      }
+    ) });
+  }
+  function SetupScreen({ onSetup, error }) {
+    const [username, setUsername] = (0, import_react9.useState)("");
+    const [password, setPassword] = (0, import_react9.useState)("");
+    const [confirm2, setConfirm] = (0, import_react9.useState)("");
+    const [pending, setPending] = (0, import_react9.useState)(false);
+    const mismatch = confirm2 && password !== confirm2;
+    return /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "screen-center", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(
+      "form",
+      {
+        className: "panel login-card",
+        onSubmit: async (event) => {
+          event.preventDefault();
+          if (mismatch) return;
+          setPending(true);
+          try {
+            await onSetup({ username, password });
+          } finally {
+            setPending(false);
+          }
+        },
+        children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(RelayMark, { className: "brand__glyph", title: "Relay mark" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "eyebrow", children: "First-time Setup" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("h1", { className: "login-card__title", children: "Create Owner Account" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("p", { className: "login-card__body", children: "No accounts exist yet. Create the first owner account to secure your dashboard." }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(
+            "input",
+            {
+              className: "text-input",
+              type: "text",
+              autoComplete: "username",
+              placeholder: "Username",
+              value: username,
+              onChange: (e) => setUsername(e.target.value)
+            }
+          ),
           /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(
             "input",
             {
               className: "text-input",
               type: "password",
-              autoComplete: "current-password",
-              placeholder: "Paste relay token",
-              value: token,
-              onChange: (event) => setToken(event.target.value)
+              autoComplete: "new-password",
+              placeholder: "Password (min 8 chars)",
+              value: password,
+              onChange: (e) => setPassword(e.target.value)
             }
           ),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(
+            "input",
+            {
+              className: "text-input",
+              type: "password",
+              autoComplete: "new-password",
+              placeholder: "Confirm password",
+              value: confirm2,
+              onChange: (e) => setConfirm(e.target.value)
+            }
+          ),
+          mismatch && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "error-banner", children: "Passwords do not match" }),
           error && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "error-banner", children: error }),
-          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "submit", className: "primary-button", disabled: !token || pending, children: pending ? "Authorizing..." : "Enter Dashboard" }),
-          /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "helper-row", children: [
-            "Token source",
-            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "helper-pill", children: "data/token.txt" })
-          ] })
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(
+            "button",
+            {
+              type: "submit",
+              className: "primary-button",
+              disabled: !username || password.length < 8 || mismatch || pending,
+              children: pending ? "Creating account\u2026" : "Create Account"
+            }
+          )
         ]
       }
     ) });
@@ -15856,7 +15964,7 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
       /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "deployments-summary-grid", children: [
         /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "panel ops-stat-card", children: [
           /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "eyebrow", children: "Latest Build" }),
-          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "ops-stat-card__value", children: latestDeploy ? latestDeploy.id.slice(0, 8) : "No deploys" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "ops-stat-card__value", children: latestDeploy ? latestDeploy.build_number ? `#${latestDeploy.build_number}` : latestDeploy.id.slice(0, 8) : "No deploys" }),
           /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "ops-stat-card__meta", children: latestDeploy ? `${deployPhaseText(latestDeploy)} \xB7 ${deployDurationLabel(latestDeploy)} \xB7 ${formatDateTime(latestDeploy.created_at)}` : "Trigger a deploy to populate the board." })
         ] }),
         /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "panel ops-stat-card", children: [
@@ -15894,7 +16002,7 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
             /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "deployment-entry__top", children: [
               /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { children: [
                 /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "deployment-entry__headline", children: [
-                  /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "deployment-entry__id", onClick: () => onOpenDeploy(deploy), children: deploy.id.slice(0, 8) }),
+                  /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "deployment-entry__id", onClick: () => onOpenDeploy(deploy), children: deploy.build_number ? `#${deploy.build_number}` : deploy.id.slice(0, 8) }),
                   /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("span", { className: cx2("status-chip", deployStatusClass(deploy.status)), children: [
                     /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "status-dot" }),
                     deployPhaseText(deploy)
@@ -15909,8 +16017,13 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
                     deploy.branch
                   ] }),
                   /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { children: formatDateTime(deploy.created_at) }),
-                  /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "mono", children: formatCommitSHA(deploy.commit_sha) })
-                ] })
+                  /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "mono", children: formatCommitSHA(deploy.commit_sha) }),
+                  deploy.deployed_by && /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("span", { children: [
+                    "by ",
+                    deploy.deployed_by
+                  ] })
+                ] }),
+                deploy.commit_message && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "deployment-entry__commit-msg", children: deploy.commit_message })
               ] }),
               /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "deployment-entry__actions", children: [
                 (preview || configured) && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("a", { className: "ghost-button ghost-button--compact", href: preview || configured, target: "_blank", rel: "noreferrer", children: "Visit" }),
@@ -17425,7 +17538,196 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
       ] })
     ] });
   }
-  function ServerSettingsTab() {
+  function ServerVersionCard() {
+    const [info, setInfo] = (0, import_react9.useState)(null);
+    (0, import_react9.useEffect)(() => {
+      api("/api/version").then(setInfo).catch(() => {
+      });
+    }, []);
+    if (!info) return null;
+    return /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "panel section-card", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "section-card__header", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "section-card__header-group", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "section-icon section-icon--teal", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("circle", { cx: "12", cy: "12", r: "10" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("polyline", { points: "12 6 12 12 16 14" })
+        ] }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "eyebrow", children: "Server Info" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("h3", { children: [
+            "relayd ",
+            info.version
+          ] })
+        ] })
+      ] }) }),
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "stack-list", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card__title", children: "Version" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card__meta mono", children: info.version })
+        ] }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card__title", children: "Commit" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card__meta mono", children: info.commit })
+        ] }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card__title", children: "Build Date" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card__meta", children: info.build_date })
+        ] }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card__title", children: "OS / Arch" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "row-card__meta mono", children: [
+            info.os,
+            "/",
+            info.arch
+          ] })
+        ] }) })
+      ] })
+    ] });
+  }
+  function UsersPanel({ currentUser }) {
+    const [users, setUsers] = (0, import_react9.useState)(null);
+    const [form, setForm] = (0, import_react9.useState)({ username: "", password: "", role: "deployer" });
+    const [busy, setBusy] = (0, import_react9.useState)(false);
+    const [notice, setNotice] = (0, import_react9.useState)(null);
+    const isOwner = currentUser?.role === "owner";
+    const load = () => {
+      if (!isOwner) return;
+      api("/api/users").then(setUsers).catch(() => {
+      });
+    };
+    (0, import_react9.useEffect)(load, [isOwner]);
+    if (!isOwner) return null;
+    async function createUser(e) {
+      e.preventDefault();
+      setBusy(true);
+      setNotice(null);
+      try {
+        await api("/api/users", { method: "POST", body: JSON.stringify(form) });
+        setForm({ username: "", password: "", role: "deployer" });
+        setNotice({ tone: "ok", text: "User created." });
+        load();
+      } catch (err) {
+        setNotice({ tone: "danger", text: err.message || "Failed." });
+      } finally {
+        setBusy(false);
+      }
+    }
+    async function changeRole(id, role) {
+      await api(`/api/users/${id}`, { method: "PATCH", body: JSON.stringify({ role }) });
+      load();
+    }
+    async function deleteUser(id) {
+      if (!confirm("Delete this user?")) return;
+      await api(`/api/users/${id}`, { method: "DELETE" });
+      load();
+    }
+    return /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "panel section-card section-card--wide", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "section-card__header", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "section-card__header-group", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "section-icon section-icon--teal", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("path", { d: "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("circle", { cx: "9", cy: "7", r: "4" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("path", { d: "M23 21v-2a4 4 0 0 0-3-3.87" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("path", { d: "M16 3.13a4 4 0 0 1 0 7.75" })
+        ] }) }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "eyebrow", children: "Team" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("h3", { children: "User Management" })
+        ] })
+      ] }) }),
+      users && users.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "stack-list", style: { marginBottom: "1rem" }, children: users.map((u) => /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "row-card", style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card__title", children: u.username }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card__meta", children: u.role })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { style: { display: "flex", gap: "0.5rem", alignItems: "center" }, children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(
+            "select",
+            {
+              className: "text-input",
+              style: { padding: "0.25rem 0.5rem", fontSize: "0.75rem" },
+              value: u.role,
+              onChange: (e) => changeRole(u.id, e.target.value),
+              children: [
+                /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("option", { value: "owner", children: "owner" }),
+                /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("option", { value: "deployer", children: "deployer" }),
+                /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("option", { value: "viewer", children: "viewer" })
+              ]
+            }
+          ),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "ghost-button ghost-button--compact", onClick: () => deleteUser(u.id), children: "Remove" })
+        ] })
+      ] }, u.id)) }),
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("form", { onSubmit: createUser, style: { display: "flex", flexDirection: "column", gap: "0.75rem" }, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "eyebrow", style: { marginBottom: 0 }, children: "Add User" }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("label", { className: "field", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { children: "Username" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("input", { className: "text-input", value: form.username, onChange: (e) => setForm((f) => ({ ...f, username: e.target.value })), required: true })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("label", { className: "field", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { children: "Password" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("input", { className: "text-input", type: "password", value: form.password, onChange: (e) => setForm((f) => ({ ...f, password: e.target.value })), required: true, minLength: 8 })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("label", { className: "field", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { children: "Role" }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("select", { className: "text-input", value: form.role, onChange: (e) => setForm((f) => ({ ...f, role: e.target.value })), children: [
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("option", { value: "owner", children: "owner" }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("option", { value: "deployer", children: "deployer" }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("option", { value: "viewer", children: "viewer" })
+          ] })
+        ] }),
+        notice && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: cx2("settings-notice", notice.tone === "ok" && "settings-notice--ok", notice.tone === "danger" && "settings-notice--danger"), children: notice.text }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "button-row", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "submit", className: "primary-button", disabled: busy, children: busy ? "Creating\u2026" : "Create User" }) })
+      ] })
+    ] });
+  }
+  function AuditLogPanel() {
+    const [entries, setEntries] = (0, import_react9.useState)(null);
+    const [busy, setBusy] = (0, import_react9.useState)(false);
+    function load() {
+      setBusy(true);
+      api("/api/audit?limit=100").then(setEntries).catch(() => {
+      }).finally(() => setBusy(false));
+    }
+    (0, import_react9.useEffect)(load, []);
+    function fmtAuditTime(ts) {
+      if (!ts) return "";
+      return new Date(ts).toLocaleString();
+    }
+    return /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "panel section-card section-card--wide", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "section-card__header", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "section-card__header-group", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "section-icon section-icon--amber", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("path", { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("polyline", { points: "14 2 14 8 20 8" }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("line", { x1: "16", y1: "13", x2: "8", y2: "13" }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("line", { x1: "16", y1: "17", x2: "8", y2: "17" }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("polyline", { points: "10 9 9 9 8 9" })
+          ] }) }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { children: [
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "eyebrow", children: "Security" }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("h3", { children: "Activity Log" })
+          ] })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("button", { type: "button", className: "ghost-button ghost-button--compact", onClick: load, disabled: busy, children: "Refresh" })
+      ] }),
+      !entries && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "muted", children: "Loading\u2026" }),
+      entries && entries.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "muted", children: "No activity recorded yet." }),
+      entries && entries.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "stack-list", children: entries.map((e) => /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "row-card", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { style: { flex: 1 }, children: [
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "row-card__title", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { className: "mono", style: { marginRight: "0.5rem" }, children: e.action }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { children: e.target })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "row-card__meta", children: [
+          e.actor && /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("span", { style: { marginRight: "0.75rem" }, children: [
+            "by ",
+            e.actor
+          ] }),
+          e.detail && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { style: { marginRight: "0.75rem" }, children: e.detail }),
+          /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("span", { children: fmtAuditTime(e.ts) })
+        ] })
+      ] }) }, e.id)) })
+    ] });
+  }
+  function ServerSettingsTab({ currentUser }) {
     const [baseDomain, setBaseDomain] = (0, import_react9.useState)("");
     const [dashboardHost, setDashboardHost] = (0, import_react9.useState)("");
     const [draft, setDraft] = (0, import_react9.useState)({ baseDomain: "", dashboardHost: "" });
@@ -17466,6 +17768,7 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
     }
     const exampleHost = draft.baseDomain ? `myapp-main.${draft.baseDomain}` : "myapp-main.example.com";
     return /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("section", { className: "grid-two settings-page", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(ServerVersionCard, {}),
       /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "panel section-card section-card--wide", children: [
         /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "section-card__header", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "section-card__header-group", children: [
           /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "section-icon section-icon--teal", children: /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", children: [
@@ -17588,12 +17891,16 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
             ] })
           ] }) })
         ] })
-      ] })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(UsersPanel, { currentUser }),
+      /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(AuditLogPanel, {})
     ] });
   }
   function App() {
     const [authState, setAuthState] = (0, import_react9.useState)("checking");
     const [loginError, setLoginError] = (0, import_react9.useState)("");
+    const [legacyMode, setLegacyMode] = (0, import_react9.useState)(false);
+    const [currentUser, setCurrentUser] = (0, import_react9.useState)(null);
     const [activeTab, setActiveTab] = (0, import_react9.useState)("overview");
     const [selectedProjectName, setSelectedProjectName] = (0, import_react9.useState)("");
     const [selectedEnvKey, setSelectedEnvKey] = (0, import_react9.useState)("");
@@ -17603,7 +17910,18 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
       let cancelled = false;
       api("/api/auth/session").then((session) => {
         if (cancelled) return;
-        setAuthState(session?.authenticated ? "ready" : "login");
+        if (session?.setup_required) {
+          setAuthState("setup");
+          return;
+        }
+        if (session?.authenticated) {
+          setLegacyMode(!!session.legacy_mode);
+          if (session.username) setCurrentUser({ username: session.username, role: session.role });
+          setAuthState("ready");
+          return;
+        }
+        setLegacyMode(!!session?.legacy_mode);
+        setAuthState("login");
       }).catch(() => {
         if (!cancelled) setAuthState("login");
       });
@@ -17737,13 +18055,29 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
     const currentOperationValue = selectedEnv?.latestDeploy ? operationLabel(selectedEnv.latestDeploy.source).toUpperCase() : "IDLE";
     const currentOperationMeta = selectedEnv?.latestDeploy ? deployPhaseText(selectedEnv.latestDeploy) : "waiting for first deploy";
     const currentOperationTone = selectedEnv?.latestDeploy?.status === "failed" || selectedEnv?.latestDeploy?.status === "error" ? "danger" : dashboard.isLive ? "warn" : "teal";
-    async function handleLogin(token) {
+    async function handleLogin(creds) {
       setLoginError("");
       try {
-        await api("/api/auth/session", {
-          method: "POST",
-          body: JSON.stringify({ token })
-        });
+        if (legacyMode) {
+          await api("/api/auth/session", { method: "POST", body: JSON.stringify({ token: creds }) });
+        } else {
+          const resp = await api("/api/auth/login", { method: "POST", body: JSON.stringify(creds) });
+          if (resp?.setup_required) {
+            setAuthState("setup");
+            return;
+          }
+          if (resp?.username) setCurrentUser({ username: resp.username, role: resp.role });
+        }
+        setAuthState("ready");
+      } catch (err) {
+        setLoginError(err.message);
+      }
+    }
+    async function handleSetup(creds) {
+      setLoginError("");
+      try {
+        const resp = await api("/api/auth/setup", { method: "POST", body: JSON.stringify(creds) });
+        if (resp?.username) setCurrentUser({ username: resp.username, role: resp.role });
         setAuthState("ready");
       } catch (err) {
         setLoginError(err.message);
@@ -17751,14 +18085,18 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
     }
     async function handleLogout() {
       await api("/api/auth/session", { method: "DELETE" });
+      setCurrentUser(null);
       setAuthState("login");
       setSelectedDeploy(null);
     }
     if (authState === "checking") {
       return /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(SplashScreen, { label: "Checking dashboard session" });
     }
+    if (authState === "setup") {
+      return /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(SetupScreen, { onSetup: handleSetup, error: loginError });
+    }
     if (authState !== "ready") {
-      return /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(LoginScreen, { onLogin: handleLogin, error: loginError });
+      return /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(LoginScreen, { onLogin: handleLogin, error: loginError, legacyMode });
     }
     if (dashboard.loading) {
       return /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(SplashScreen, { label: "Loading projects, services, and deploy history" });
@@ -17821,7 +18159,11 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
           id
         )) }),
         /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "sidebar__footer", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "sidebar__footer-card", children: [
+          currentUser && /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "sidebar__footer-card", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "eyebrow", children: currentUser.role }),
+            /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "sidebar__footer-copy", children: currentUser.username })
+          ] }),
+          !currentUser && /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "sidebar__footer-card", children: [
             /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "eyebrow", children: "Operator Hint" }),
             /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "sidebar__footer-copy", children: "Overview for rollout state, Deployments for history, Logs for live monitoring, Settings for runtime changes." })
           ] }),
@@ -17909,7 +18251,7 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
           ] })
         ] }),
         dashboard.error && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)("div", { className: "error-banner", children: dashboard.error }),
-        !selectedProject ? activeTab === "server" ? /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(ServerSettingsTab, {}) : activeTab === "analytics" ? /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(AnalyticsTab, { selectedEnv: null }) : /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(EmptyState, {}) : /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(import_jsx_runtime27.Fragment, { children: [
+        !selectedProject ? activeTab === "server" ? /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(ServerSettingsTab, { currentUser }) : activeTab === "analytics" ? /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(AnalyticsTab, { selectedEnv: null }) : /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(EmptyState, {}) : /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)(import_jsx_runtime27.Fragment, { children: [
           /* @__PURE__ */ (0, import_jsx_runtime27.jsxs)("div", { className: "metric-row", children: [
             /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(MetricCard, { label: "Environments", value: String(selectedProject.envs.length), meta: "active project lanes", tone: "teal" }),
             /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(MetricCard, { label: "Services", value: String(selectedProject.services.length), meta: "companion containers", accent: true }),
@@ -17969,7 +18311,7 @@ For more information, see https://radix-ui.com/primitives/docs/components/${titl
               onUpdated: refreshDashboard
             }
           ),
-          activeTab === "server" && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(ServerSettingsTab, {}),
+          activeTab === "server" && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(ServerSettingsTab, { currentUser }),
           activeTab === "analytics" && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(AnalyticsTab, { selectedEnv })
         ] }),
         selectedDeploy && /* @__PURE__ */ (0, import_jsx_runtime27.jsx)(

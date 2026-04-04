@@ -810,7 +810,9 @@ function SplashScreen({ label }) {
   );
 }
 
-function LoginScreen({ onLogin, error }) {
+function LoginScreen({ onLogin, error, legacyMode }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [token, setToken] = useState("");
   const [pending, setPending] = useState(false);
 
@@ -822,35 +824,131 @@ function LoginScreen({ onLogin, error }) {
           event.preventDefault();
           setPending(true);
           try {
-            await onLogin(token);
+            await onLogin(legacyMode ? token : { username, password });
           } finally {
             setPending(false);
           }
         }}
       >
-        <input type="text" name="username" autoComplete="username" value="relay-admin" readOnly hidden />
         <RelayMark className="brand__glyph" title="Relay mark" />
         <div className="eyebrow">Secure Agent Access</div>
         <h1 className="login-card__title">Relay Control Room</h1>
+        {legacyMode ? (
+          <>
+            <p className="login-card__body">
+              Enter your relay token to access the dashboard.
+            </p>
+            <input
+              className="text-input"
+              type="password"
+              autoComplete="current-password"
+              placeholder="Paste relay token"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+            />
+          </>
+        ) : (
+          <>
+            <p className="login-card__body">
+              Sign in to manage your deployments.
+            </p>
+            <input
+              className="text-input"
+              type="text"
+              autoComplete="username"
+              placeholder="Username"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+            />
+            <input
+              className="text-input"
+              type="password"
+              autoComplete="current-password"
+              placeholder="Password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </>
+        )}
+        {error && <div className="error-banner">{error}</div>}
+        <button
+          type="submit"
+          className="primary-button"
+          disabled={(legacyMode ? !token : (!username || !password)) || pending}
+        >
+          {pending ? "Signing in…" : "Sign In"}
+        </button>
+        {legacyMode && (
+          <div className="helper-row">
+            Token source <span className="helper-pill">data/token.txt</span>
+          </div>
+        )}
+      </form>
+    </div>
+  );
+}
+
+function SetupScreen({ onSetup, error }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [pending, setPending] = useState(false);
+  const mismatch = confirm && password !== confirm;
+
+  return (
+    <div className="screen-center">
+      <form
+        className="panel login-card"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          if (mismatch) return;
+          setPending(true);
+          try {
+            await onSetup({ username, password });
+          } finally {
+            setPending(false);
+          }
+        }}
+      >
+        <RelayMark className="brand__glyph" title="Relay mark" />
+        <div className="eyebrow">First-time Setup</div>
+        <h1 className="login-card__title">Create Owner Account</h1>
         <p className="login-card__body">
-          Dashboard sessions are now stored in an HttpOnly cookie. The token never needs to live in browser storage.
+          No accounts exist yet. Create the first owner account to secure your dashboard.
         </p>
         <input
           className="text-input"
-          type="password"
-          autoComplete="current-password"
-          placeholder="Paste relay token"
-          value={token}
-          onChange={(event) => setToken(event.target.value)}
+          type="text"
+          autoComplete="username"
+          placeholder="Username"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
         />
+        <input
+          className="text-input"
+          type="password"
+          autoComplete="new-password"
+          placeholder="Password (min 8 chars)"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+        <input
+          className="text-input"
+          type="password"
+          autoComplete="new-password"
+          placeholder="Confirm password"
+          value={confirm}
+          onChange={(e) => setConfirm(e.target.value)}
+        />
+        {mismatch && <div className="error-banner">Passwords do not match</div>}
         {error && <div className="error-banner">{error}</div>}
-        <button type="submit" className="primary-button" disabled={!token || pending}>
-          {pending ? "Authorizing..." : "Enter Dashboard"}
+        <button
+          type="submit"
+          className="primary-button"
+          disabled={!username || password.length < 8 || mismatch || pending}
+        >
+          {pending ? "Creating account…" : "Create Account"}
         </button>
-        <div className="helper-row">
-          Token source
-          <span className="helper-pill">data/token.txt</span>
-        </div>
       </form>
     </div>
   );
@@ -1524,7 +1622,9 @@ function DeploymentsTab({ project, deploys, envMap, selectedEnv, onOpenDeploy })
       <div className="deployments-summary-grid">
         <div className="panel ops-stat-card">
           <div className="eyebrow">Latest Build</div>
-          <div className="ops-stat-card__value">{latestDeploy ? latestDeploy.id.slice(0, 8) : "No deploys"}</div>
+          <div className="ops-stat-card__value">
+            {latestDeploy ? (latestDeploy.build_number ? `#${latestDeploy.build_number}` : latestDeploy.id.slice(0, 8)) : "No deploys"}
+          </div>
           <div className="ops-stat-card__meta">
             {latestDeploy
               ? `${deployPhaseText(latestDeploy)} · ${deployDurationLabel(latestDeploy)} · ${formatDateTime(latestDeploy.created_at)}`
@@ -1570,7 +1670,7 @@ function DeploymentsTab({ project, deploys, envMap, selectedEnv, onOpenDeploy })
                 <div>
                   <div className="deployment-entry__headline">
                     <button type="button" className="deployment-entry__id" onClick={() => onOpenDeploy(deploy)}>
-                      {deploy.id.slice(0, 8)}
+                      {deploy.build_number ? `#${deploy.build_number}` : deploy.id.slice(0, 8)}
                     </button>
                     <span className={cx("status-chip", deployStatusClass(deploy.status))}>
                       <span className="status-dot" />
@@ -1583,7 +1683,11 @@ function DeploymentsTab({ project, deploys, envMap, selectedEnv, onOpenDeploy })
                     <span>{deploy.env} / {deploy.branch}</span>
                     <span>{formatDateTime(deploy.created_at)}</span>
                     <span className="mono">{formatCommitSHA(deploy.commit_sha)}</span>
+                    {deploy.deployed_by && <span>by {deploy.deployed_by}</span>}
                   </div>
+                  {deploy.commit_message && (
+                    <div className="deployment-entry__commit-msg">{deploy.commit_message}</div>
+                  )}
                 </div>
                 <div className="deployment-entry__actions">
                   {(preview || configured) && (
@@ -3312,7 +3416,218 @@ function AnalyticsTab({ selectedEnv }) {
   );
 }
 
-function ServerSettingsTab() {
+function ServerVersionCard() {
+  const [info, setInfo] = useState(null);
+
+  useEffect(() => {
+    api("/api/version").then(setInfo).catch(() => {});
+  }, []);
+
+  if (!info) return null;
+
+  return (
+    <div className="panel section-card">
+      <div className="section-card__header">
+        <div className="section-card__header-group">
+          <div className="section-icon section-icon--teal">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+            </svg>
+          </div>
+          <div>
+            <div className="eyebrow">Server Info</div>
+            <h3>relayd {info.version}</h3>
+          </div>
+        </div>
+      </div>
+      <div className="stack-list">
+        <div className="row-card"><div><div className="row-card__title">Version</div><div className="row-card__meta mono">{info.version}</div></div></div>
+        <div className="row-card"><div><div className="row-card__title">Commit</div><div className="row-card__meta mono">{info.commit}</div></div></div>
+        <div className="row-card"><div><div className="row-card__title">Build Date</div><div className="row-card__meta">{info.build_date}</div></div></div>
+        <div className="row-card"><div><div className="row-card__title">OS / Arch</div><div className="row-card__meta mono">{info.os}/{info.arch}</div></div></div>
+      </div>
+    </div>
+  );
+}
+
+function UsersPanel({ currentUser }) {
+  const [users, setUsers] = useState(null);
+  const [form, setForm] = useState({ username: "", password: "", role: "deployer" });
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState(null);
+
+  const isOwner = currentUser?.role === "owner";
+
+  const load = () => {
+    if (!isOwner) return;
+    api("/api/users").then(setUsers).catch(() => {});
+  };
+
+  useEffect(load, [isOwner]);
+
+  if (!isOwner) return null;
+
+  async function createUser(e) {
+    e.preventDefault();
+    setBusy(true);
+    setNotice(null);
+    try {
+      await api("/api/users", { method: "POST", body: JSON.stringify(form) });
+      setForm({ username: "", password: "", role: "deployer" });
+      setNotice({ tone: "ok", text: "User created." });
+      load();
+    } catch (err) {
+      setNotice({ tone: "danger", text: err.message || "Failed." });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function changeRole(id, role) {
+    await api(`/api/users/${id}`, { method: "PATCH", body: JSON.stringify({ role }) });
+    load();
+  }
+
+  async function deleteUser(id) {
+    if (!confirm("Delete this user?")) return;
+    await api(`/api/users/${id}`, { method: "DELETE" });
+    load();
+  }
+
+  return (
+    <div className="panel section-card section-card--wide">
+      <div className="section-card__header">
+        <div className="section-card__header-group">
+          <div className="section-icon section-icon--teal">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
+              <path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+            </svg>
+          </div>
+          <div>
+            <div className="eyebrow">Team</div>
+            <h3>User Management</h3>
+          </div>
+        </div>
+      </div>
+
+      {users && users.length > 0 && (
+        <div className="stack-list" style={{ marginBottom: "1rem" }}>
+          {users.map((u) => (
+            <div key={u.id} className="row-card" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div>
+                <div className="row-card__title">{u.username}</div>
+                <div className="row-card__meta">{u.role}</div>
+              </div>
+              <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+                <select
+                  className="text-input"
+                  style={{ padding: "0.25rem 0.5rem", fontSize: "0.75rem" }}
+                  value={u.role}
+                  onChange={(e) => changeRole(u.id, e.target.value)}
+                >
+                  <option value="owner">owner</option>
+                  <option value="deployer">deployer</option>
+                  <option value="viewer">viewer</option>
+                </select>
+                <button type="button" className="ghost-button ghost-button--compact" onClick={() => deleteUser(u.id)}>Remove</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <form onSubmit={createUser} style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+        <div className="eyebrow" style={{ marginBottom: 0 }}>Add User</div>
+        <label className="field">
+          <span>Username</span>
+          <input className="text-input" value={form.username} onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))} required />
+        </label>
+        <label className="field">
+          <span>Password</span>
+          <input className="text-input" type="password" value={form.password} onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))} required minLength={8} />
+        </label>
+        <label className="field">
+          <span>Role</span>
+          <select className="text-input" value={form.role} onChange={(e) => setForm((f) => ({ ...f, role: e.target.value }))}>
+            <option value="owner">owner</option>
+            <option value="deployer">deployer</option>
+            <option value="viewer">viewer</option>
+          </select>
+        </label>
+        {notice && (
+          <div className={cx("settings-notice", notice.tone === "ok" && "settings-notice--ok", notice.tone === "danger" && "settings-notice--danger")}>
+            {notice.text}
+          </div>
+        )}
+        <div className="button-row">
+          <button type="submit" className="primary-button" disabled={busy}>{busy ? "Creating…" : "Create User"}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function AuditLogPanel() {
+  const [entries, setEntries] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  function load() {
+    setBusy(true);
+    api("/api/audit?limit=100").then(setEntries).catch(() => {}).finally(() => setBusy(false));
+  }
+
+  useEffect(load, []);
+
+  function fmtAuditTime(ts) {
+    if (!ts) return "";
+    return new Date(ts).toLocaleString();
+  }
+
+  return (
+    <div className="panel section-card section-card--wide">
+      <div className="section-card__header">
+        <div className="section-card__header-group">
+          <div className="section-icon section-icon--amber">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>
+            </svg>
+          </div>
+          <div>
+            <div className="eyebrow">Security</div>
+            <h3>Activity Log</h3>
+          </div>
+        </div>
+        <button type="button" className="ghost-button ghost-button--compact" onClick={load} disabled={busy}>Refresh</button>
+      </div>
+
+      {!entries && <div className="muted">Loading…</div>}
+      {entries && entries.length === 0 && <div className="muted">No activity recorded yet.</div>}
+      {entries && entries.length > 0 && (
+        <div className="stack-list">
+          {entries.map((e) => (
+            <div key={e.id} className="row-card">
+              <div style={{ flex: 1 }}>
+                <div className="row-card__title">
+                  <span className="mono" style={{ marginRight: "0.5rem" }}>{e.action}</span>
+                  <span>{e.target}</span>
+                </div>
+                <div className="row-card__meta">
+                  {e.actor && <span style={{ marginRight: "0.75rem" }}>by {e.actor}</span>}
+                  {e.detail && <span style={{ marginRight: "0.75rem" }}>{e.detail}</span>}
+                  <span>{fmtAuditTime(e.ts)}</span>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ServerSettingsTab({ currentUser }) {
   const [baseDomain, setBaseDomain] = useState("");
   const [dashboardHost, setDashboardHost] = useState("");
   const [draft, setDraft] = useState({ baseDomain: "", dashboardHost: "" });
@@ -3360,6 +3675,7 @@ function ServerSettingsTab() {
 
   return (
     <section className="grid-two settings-page">
+      <ServerVersionCard />
       <div className="panel section-card section-card--wide">
         <div className="section-card__header">
           <div className="section-card__header-group">
@@ -3469,13 +3785,18 @@ function ServerSettingsTab() {
           </div>
         </div>
       </div>
+
+      <UsersPanel currentUser={currentUser} />
+      <AuditLogPanel />
     </section>
   );
 }
 
 function App() {
-  const [authState, setAuthState] = useState("checking");
+  const [authState, setAuthState] = useState("checking"); // checking | setup | login | ready
   const [loginError, setLoginError] = useState("");
+  const [legacyMode, setLegacyMode] = useState(false);
+  const [currentUser, setCurrentUser] = useState(null); // { username, role }
   const [activeTab, setActiveTab] = useState("overview");
   const [selectedProjectName, setSelectedProjectName] = useState("");
   const [selectedEnvKey, setSelectedEnvKey] = useState("");
@@ -3487,14 +3808,20 @@ function App() {
     api("/api/auth/session")
       .then((session) => {
         if (cancelled) return;
-        setAuthState(session?.authenticated ? "ready" : "login");
+        if (session?.setup_required) { setAuthState("setup"); return; }
+        if (session?.authenticated) {
+          setLegacyMode(!!session.legacy_mode);
+          if (session.username) setCurrentUser({ username: session.username, role: session.role });
+          setAuthState("ready");
+          return;
+        }
+        setLegacyMode(!!session?.legacy_mode);
+        setAuthState("login");
       })
       .catch(() => {
         if (!cancelled) setAuthState("login");
       });
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, []);
 
   const deploysByContext = useMemo(() => {
@@ -3649,13 +3976,28 @@ function App() {
         ? "warn"
         : "teal";
 
-  async function handleLogin(token) {
+  async function handleLogin(creds) {
     setLoginError("");
     try {
-      await api("/api/auth/session", {
-        method: "POST",
-        body: JSON.stringify({ token }),
-      });
+      if (legacyMode) {
+        // Legacy: POST token to old session endpoint
+        await api("/api/auth/session", { method: "POST", body: JSON.stringify({ token: creds }) });
+      } else {
+        const resp = await api("/api/auth/login", { method: "POST", body: JSON.stringify(creds) });
+        if (resp?.setup_required) { setAuthState("setup"); return; }
+        if (resp?.username) setCurrentUser({ username: resp.username, role: resp.role });
+      }
+      setAuthState("ready");
+    } catch (err) {
+      setLoginError(err.message);
+    }
+  }
+
+  async function handleSetup(creds) {
+    setLoginError("");
+    try {
+      const resp = await api("/api/auth/setup", { method: "POST", body: JSON.stringify(creds) });
+      if (resp?.username) setCurrentUser({ username: resp.username, role: resp.role });
       setAuthState("ready");
     } catch (err) {
       setLoginError(err.message);
@@ -3664,6 +4006,7 @@ function App() {
 
   async function handleLogout() {
     await api("/api/auth/session", { method: "DELETE" });
+    setCurrentUser(null);
     setAuthState("login");
     setSelectedDeploy(null);
   }
@@ -3672,8 +4015,12 @@ function App() {
     return <SplashScreen label="Checking dashboard session" />;
   }
 
+  if (authState === "setup") {
+    return <SetupScreen onSetup={handleSetup} error={loginError} />;
+  }
+
   if (authState !== "ready") {
-    return <LoginScreen onLogin={handleLogin} error={loginError} />;
+    return <LoginScreen onLogin={handleLogin} error={loginError} legacyMode={legacyMode} />;
   }
 
   if (dashboard.loading) {
@@ -3735,10 +4082,18 @@ function App() {
         </nav>
 
         <div className="sidebar__footer">
-          <div className="sidebar__footer-card">
-            <div className="eyebrow">Operator Hint</div>
-            <div className="sidebar__footer-copy">Overview for rollout state, Deployments for history, Logs for live monitoring, Settings for runtime changes.</div>
-          </div>
+          {currentUser && (
+            <div className="sidebar__footer-card">
+              <div className="eyebrow">{currentUser.role}</div>
+              <div className="sidebar__footer-copy">{currentUser.username}</div>
+            </div>
+          )}
+          {!currentUser && (
+            <div className="sidebar__footer-card">
+              <div className="eyebrow">Operator Hint</div>
+              <div className="sidebar__footer-copy">Overview for rollout state, Deployments for history, Logs for live monitoring, Settings for runtime changes.</div>
+            </div>
+          )}
           <button type="button" className="ghost-button" onClick={handleLogout}>
             Log out
           </button>
@@ -3854,7 +4209,7 @@ function App() {
 
         {!selectedProject ? (
           activeTab === "server" ? (
-            <ServerSettingsTab />
+            <ServerSettingsTab currentUser={currentUser} />
           ) : activeTab === "analytics" ? (
             <AnalyticsTab selectedEnv={null} />
           ) : (
@@ -3921,7 +4276,7 @@ function App() {
             )}
 
             {activeTab === "server" && (
-              <ServerSettingsTab />
+              <ServerSettingsTab currentUser={currentUser} />
             )}
 
             {activeTab === "analytics" && (

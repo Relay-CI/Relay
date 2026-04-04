@@ -2698,6 +2698,17 @@ a {
   font-size: 0.9rem;
 }
 
+.deployment-entry__commit-msg {
+  margin-top: 6px;
+  font-size: 0.85rem;
+  color: var(--muted);
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 480px;
+}
+
 .deployment-entry__actions {
   display: flex;
   flex-wrap: wrap;

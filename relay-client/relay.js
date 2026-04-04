@@ -44,6 +44,7 @@ const os = require("os");
 const crypto = require("crypto");
 const { execSync, spawnSync } = require("child_process");
 const { resolveDeployArgs, resolveServerArgs, resolveTransport } = require("./deploy");
+const { saveRelayConfig, getWorkspaceVersion, setWorkspaceVersion } = require("./config");
 
 const CLI_VERSION = (() => {
   try {
@@ -457,7 +458,10 @@ async function apiJSON(transport, method, apiPath, body = undefined) {
   let json;
   try { json = JSON.parse(text); } catch { json = { raw: text }; }
   if (status >= 400) {
-    throw new Error((json && json.error) ? json.error : `HTTP ${status}: ${text}`);
+    const e = new Error((json && json.error) ? json.error : `HTTP ${status}: ${text}`);
+    e.status = status;
+    e.json = json;
+    throw e;
   }
   return json;
 }
@@ -826,6 +830,104 @@ async function main() {
   }
 
   // â”€â”€ projects â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── login ─────────────────────────────────────────────────────────────────────
+  if (cmd === "login") {
+    const serverUrl = args.url || process.env.RELAY_URL || await prompt("Server URL", "http://127.0.0.1:8080");
+    // Find a free port for the local callback server.
+    const callbackPort = await new Promise((resolve) => {
+      const srv = http.createServer();
+      srv.listen(0, "127.0.0.1", () => { const p = srv.address().port; srv.close(() => resolve(p)); });
+    });
+    // Start local callback server — waits for browser to redirect back with code.
+    const authCode = await new Promise((resolve, reject) => {
+      const srv = http.createServer((req, res) => {
+        const u = new URL(req.url, `http://127.0.0.1:${callbackPort}`);
+        const code = u.searchParams.get("code");
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end("<html><body style='font-family:sans-serif;padding:2rem'><h2>Logged in — you can close this tab.</h2></body></html>");
+        srv.close();
+        if (code) resolve(code); else reject(new Error("no code in callback"));
+      });
+      srv.listen(callbackPort, "127.0.0.1");
+      setTimeout(() => { srv.close(); reject(new Error("login timed out")); }, 5 * 60 * 1000);
+    }).catch((e) => die(e.message));
+
+    const loginUrl = `${serverUrl}/dashboard/?cli=1&port=${callbackPort}`;
+    console.log(`\n  ${c.bold}Opening browser to log in…${c.reset}`);
+    console.log(`  ${c.dim}If it doesn't open, visit:${c.reset}  ${c.cyan}${loginUrl}${c.reset}\n`);
+    try {
+      const openCmd = process.platform === "win32" ? "start" : process.platform === "darwin" ? "open" : "xdg-open";
+      require("child_process").exec(`${openCmd} "${loginUrl}"`);
+    } catch (_) {}
+
+    // Exchange one-time code for a bearer token.
+    let tokenResp;
+    try {
+      tokenResp = await apiJSON({ kind: "http", baseUrl: serverUrl, token: "" }, "POST", "/api/auth/cli/exchange", { code: authCode });
+    } catch (e) { die(`Token exchange failed: ${e.message}`); }
+    if (!tokenResp || !tokenResp.token) die(`Login failed: ${tokenResp?.error || "no token returned"}`);
+
+    const savedPath = saveRelayConfig({ url: serverUrl, token: tokenResp.token });
+    ok(`Logged in as ${c.bold}${tokenResp.username}${c.reset} (${tokenResp.role})  →  saved to ${savedPath}`);
+    process.exit(0);
+  }
+
+  // ── logout ────────────────────────────────────────────────────────────────────
+  if (cmd === "logout") {
+    const { transport } = await resolveOrSetup(args);
+    try {
+      await apiJSON(transport, "DELETE", "/api/auth/session");
+      ok("Logged out");
+    } catch (e) { die(e.message); }
+    process.exit(0);
+  }
+
+  // ── pull ──────────────────────────────────────────────────────────────────────
+  if (cmd === "pull") {
+    const { transport, resolved } = await resolveOrSetup(args, { needDeploy: true });
+    const { app, env, branch, dir } = resolved;
+    const rootDir = path.resolve(dir || ".");
+    const baseUrl = transport.kind === "http" ? transport.baseUrl : "http://localhost";
+    const pullSpinner = createSpinner("pulling workspace from server");
+    pullSpinner.start();
+    try {
+      const pullPath = `/api/sync/pull/${encodeURIComponent(app)}/${encodeURIComponent(env)}/${encodeURIComponent(branch)}`;
+      const wsVersion = await new Promise((resolve, reject) => {
+        const parsed  = new URL(pullPath, baseUrl);
+        const mod     = parsed.protocol === "https:" ? require("https") : http;
+        const headers = transport.token ? { "X-Relay-Token": transport.token } : {};
+        mod.get({ hostname: parsed.hostname, port: parsed.port, path: parsed.pathname, headers }, (res) => {
+          const version = res.headers["x-workspace-version"] || "";
+          const chunks  = [];
+          res.on("data", (chunk) => chunks.push(chunk));
+          res.on("end", () => {
+            const buf = Buffer.concat(chunks);
+            let offset = 0, fileCount = 0;
+            const fsSync = require("fs");
+            while (offset + 512 <= buf.length) {
+              const nameRaw = buf.slice(offset, offset + 100).toString("utf8").replace(/\0/g, "");
+              if (!nameRaw) break;
+              const size = parseInt(buf.slice(offset + 124, offset + 136).toString("utf8").trim(), 8) || 0;
+              offset += 512;
+              if (size > 0) {
+                const absPath = path.join(rootDir, ...nameRaw.split("/"));
+                fsSync.mkdirSync(path.dirname(absPath), { recursive: true });
+                fsSync.writeFileSync(absPath, buf.slice(offset, offset + size));
+                fileCount++;
+              }
+              offset += Math.ceil(size / 512) * 512;
+            }
+            pullSpinner.stop(true, `${fileCount} file${fileCount === 1 ? "" : "s"} pulled`);
+            resolve(version);
+          });
+        }).on("error", (e) => { pullSpinner.stop(false); reject(e); });
+      });
+      if (wsVersion) setWorkspaceVersion(baseUrl, app, env, branch, wsVersion);
+      ok(`Workspace up to date  (version ${wsVersion || "unknown"})`);
+    } catch (e) { die(e.message); }
+    process.exit(0);
+  }
+
   if (cmd === "projects") {
     const { transport } = await resolveOrSetup(args);
     try {
@@ -1208,9 +1310,28 @@ async function main() {
 
   const totalStartedAt = nowMs();
 
+  // Read the locally-saved workspace version so the server can detect
+  // whether someone else deployed since our last sync.
+  const baseUrl = transport.kind === "http" ? transport.baseUrl : "";
+  const baseVersion = args.force ? "" : getWorkspaceVersion(baseUrl, app, env, branch);
+
   const syncStartSpinner = createSpinner(`sync start`);
   syncStartSpinner.start();
-  const startResp = await apiJSON(transport, "POST", "/api/sync/start", { app, branch, env });
+  let startResp;
+  try {
+    startResp = await apiJSON(transport, "POST", "/api/sync/start", { app, branch, env, base_version: baseVersion });
+  } catch (e) {
+    syncStartSpinner.stop(false);
+    // 409 = someone else deployed since our last pull
+    if (e.status === 409 || (e.message && e.message.includes("workspace behind"))) {
+      err(`Your workspace is behind the server.`);
+      err(`Someone else deployed after your last sync.`);
+      err(`Run:  ${c.bold}relay pull${c.reset}  to pull the latest files, then re-deploy.`);
+      err(`      (or use ${c.dim}--force${c.reset} to overwrite anyway)`);
+      process.exit(1);
+    }
+    die(e.message);
+  }
   syncStartSpinner.stop(true, `session=${startResp.session_id?.slice(0,8)}`);
 
   const sessionId = startResp.session_id;
@@ -1262,6 +1383,11 @@ async function main() {
   if (hasPublicHostOverride) deployPayload.public_host = publicHost;
   const deploy = await apiJSON(transport, "POST", `/api/sync/finish/${sessionId}`, deployPayload);
   finishSpinner.stop(true, `id=${deploy.id}`);
+
+  // Persist the new workspace version so the next deploy can detect staleness.
+  if (deploy.workspace_version) {
+    setWorkspaceVersion(baseUrl, app, env, branch, deploy.workspace_version);
+  }
 
   const noStream = args["no-stream"] === "true" || args["no-stream"] === true;
   if (!noStream) {
