@@ -291,6 +291,179 @@ function promptSecret(question) {
   });
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function renderCLILoginCallbackPage(user, role) {
+  const safeUser = escapeHtml(user || "Unknown user");
+  const safeRole = escapeHtml(role || "member");
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Relay CLI Login Complete</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #090b0e;
+        --panel: rgba(17, 21, 27, 0.94);
+        --line: rgba(207, 220, 234, 0.14);
+        --text: #eef3f8;
+        --muted: #95a3b3;
+        --accent: #f28a41;
+        --accent-soft: rgba(242, 138, 65, 0.16);
+        --teal: #7ed8d3;
+        --shadow: 0 30px 100px rgba(0, 0, 0, 0.45);
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        font-family: "Segoe UI", Inter, system-ui, sans-serif;
+        color: var(--text);
+        background:
+          radial-gradient(circle at 18% 14%, rgba(242, 138, 65, 0.16), transparent 26%),
+          radial-gradient(circle at 82% 12%, rgba(126, 216, 211, 0.14), transparent 22%),
+          linear-gradient(180deg, #090b0e 0%, #06080a 100%);
+      }
+      .card {
+        width: min(560px, 100%);
+        border-radius: 28px;
+        padding: 28px;
+        background:
+          linear-gradient(155deg, rgba(242, 138, 65, 0.12), rgba(126, 216, 211, 0.08) 55%, rgba(255, 255, 255, 0.02)),
+          var(--panel);
+        border: 1px solid var(--line);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(18px);
+      }
+      .eyebrow {
+        margin: 0 0 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.24em;
+        font-size: 0.72rem;
+        color: var(--muted);
+      }
+      h1 {
+        margin: 0;
+        font-size: clamp(1.8rem, 4vw, 2.4rem);
+        line-height: 1.05;
+        letter-spacing: -0.04em;
+      }
+      p {
+        margin: 14px 0 0;
+        color: var(--muted);
+        line-height: 1.65;
+      }
+      .status {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        margin-top: 18px;
+        padding: 10px 14px;
+        border-radius: 999px;
+        border: 1px solid rgba(126, 216, 211, 0.2);
+        background: rgba(126, 216, 211, 0.08);
+        color: var(--teal);
+        font-weight: 600;
+      }
+      .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        background: currentColor;
+        box-shadow: 0 0 14px currentColor;
+      }
+      .identity {
+        margin-top: 22px;
+        padding: 16px 18px;
+        border-radius: 18px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.03);
+      }
+      .identity-label {
+        text-transform: uppercase;
+        letter-spacing: 0.16em;
+        font-size: 0.72rem;
+        color: var(--accent);
+      }
+      .identity-name {
+        margin-top: 10px;
+        font-size: 1.15rem;
+        font-weight: 700;
+      }
+      .identity-role {
+        margin-top: 6px;
+        color: var(--muted);
+        text-transform: capitalize;
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 24px;
+      }
+      .button {
+        appearance: none;
+        border: 0;
+        border-radius: 14px;
+        padding: 12px 16px;
+        cursor: pointer;
+        font: inherit;
+      }
+      .button--primary {
+        background: linear-gradient(90deg, #c46a2d, #f28a41);
+        color: #fff7f2;
+        font-weight: 700;
+      }
+      .button--ghost {
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--text);
+        border: 1px solid var(--line);
+      }
+      .footer {
+        margin-top: 18px;
+        font-size: 0.88rem;
+        color: var(--muted);
+      }
+      @media (max-width: 640px) {
+        .card { padding: 22px; border-radius: 22px; }
+        .actions { flex-direction: column; }
+        .button { width: 100%; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <div class="eyebrow">Relay CLI</div>
+      <h1>Login complete.</h1>
+      <div class="status"><span class="dot"></span>Token handed off to your local Relay CLI session</div>
+      <p>The browser authentication step is finished. Relay CLI should continue in your terminal now.</p>
+      <section class="identity" aria-label="Signed in account">
+        <div class="identity-label">Signed in as</div>
+        <div class="identity-name">${safeUser}</div>
+        <div class="identity-role">${safeRole}</div>
+      </section>
+      <div class="actions">
+        <button class="button button--primary" type="button" onclick="window.close()">Close this tab</button>
+        <button class="button button--ghost" type="button" onclick="location.href='about:blank'">Clear page</button>
+      </div>
+      <div class="footer">If the terminal does not continue, return to the CLI window and check for a timeout or connection error.</div>
+    </main>
+  </body>
+</html>`;
+}
+
 async function runSetupWizard(args, cfgPath) {
   console.log(`\n${c.bold}Relay setup${c.reset}  ${c.dim}Answer a few questions to get connected.${c.reset}\n`);
   console.log(`  ${c.dim}.relay.json stores CLI connection defaults. relay.json is for companion services only.${c.reset}\n`);
@@ -844,8 +1017,10 @@ async function main() {
       const srv = http.createServer((req, res) => {
         const u = new URL(req.url, `http://127.0.0.1:${callbackPort}`);
         const code = u.searchParams.get("code");
+        const user = u.searchParams.get("user");
+        const role = u.searchParams.get("role");
         res.writeHead(200, { "Content-Type": "text/html" });
-        res.end("<html><body style='font-family:sans-serif;padding:2rem'><h2>Logged in — you can close this tab.</h2></body></html>");
+        res.end(renderCLILoginCallbackPage(user, role));
         srv.close();
         if (code) resolve(code); else reject(new Error("no code in callback"));
       });
