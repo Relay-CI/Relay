@@ -52,7 +52,6 @@ interface SettingsPageProps {
 const ENGINE_OPTIONS = [
   { value: "docker", title: "Docker", summary: "Resolves a Dockerfile and builds/runs the image locally." },
   { value: "station", title: "Station", summary: "Runs the app natively using Relay Station via a saved workspace snapshot." },
-  { value: "buildpacks", title: "Buildpacks", summary: "Resolves a build plan via Cloud Native Buildpacks and produces a runnable image." },
 ];
 
 const MODE_OPTIONS = [
@@ -442,7 +441,7 @@ function SegmentCard({ label, description, children }: { label: string; descript
   return (
     <div className="bg-white/[0.02] border border-white/[0.06] rounded-lg p-3.5">
       <div className="eyebrow mb-2">{label}</div>
-      <div className="flex gap-1 mb-2">{children}</div>
+      <div className="seg-control mb-2">{children}</div>
       <p className="text-[11px] text-white/35 leading-relaxed">{description}</p>
     </div>
   );
@@ -453,7 +452,7 @@ function SegButton({ active, onClick, children }: { active: boolean; onClick: ()
     <button
       type="button"
       onClick={onClick}
-      className={cn("text-xs px-3 py-1.5 rounded border transition-colors flex-1", active ? "bg-white text-black border-transparent font-semibold" : "border-white/[0.08] text-white/50 hover:text-white hover:border-white/20")}
+      className={cn("seg-btn flex-1", active && "seg-btn--active")}
     >
       {children}
     </button>

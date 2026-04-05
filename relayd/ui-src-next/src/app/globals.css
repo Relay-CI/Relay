@@ -109,22 +109,6 @@ body {
   background-color: var(--relay-bg);
   color: var(--relay-text);
   font-family: var(--font-space-grotesk, 'Space Grotesk', sans-serif);
-  background-image:
-    radial-gradient(circle at 8% 8%, rgba(180, 20, 20, 0.06), transparent 30%),
-    radial-gradient(circle at 90% 90%, rgba(30, 60, 180, 0.04), transparent 28%);
-}
-
-/* grid lines */
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 0;
-  background-image:
-    linear-gradient(var(--relay-line) 1px, transparent 1px),
-    linear-gradient(90deg, var(--relay-line) 1px, transparent 1px);
-  background-size: 48px 48px;
 }
 
 /* ── Typography helpers ──────────────────────────────────────────────────── */
@@ -203,22 +187,52 @@ body::before {
   font-weight: 600;
   padding: 8px 16px;
   border-radius: 4px;
-  border: none;
+  border: 1px solid transparent;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background 0.15s, box-shadow 0.15s;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.5);
 }
-.primary-btn:hover { background: rgba(255,255,255,0.9); }
-.primary-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.primary-btn:hover { background: rgba(255,255,255,0.88); }
+.primary-btn:disabled { opacity: 0.35; cursor: not-allowed; box-shadow: none; }
 
 .ghost-btn {
   font-size: 0.875rem;
   background: transparent;
-  color: rgba(255,255,255,0.6);
-  border: 1px solid rgba(255,255,255,0.10);
+  color: rgba(255,255,255,0.65);
+  border: 1px solid rgba(255,255,255,0.14);
   padding: 8px 16px;
   border-radius: 4px;
   cursor: pointer;
-  transition: color 0.15s, background 0.15s;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
 }
-.ghost-btn:hover { color: #fff; background: rgba(255,255,255,0.06); }
-.ghost-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.ghost-btn:hover { color: #fff; background: rgba(255,255,255,0.07); border-color: rgba(255,255,255,0.22); }
+.ghost-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* ── Segment controls (Docker/Station, HTTP/Static/Off, etc.) ───────────── */
+.seg-control {
+  display: flex;
+  gap: 2px;
+  background: rgba(0,0,0,0.55);
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 6px;
+  padding: 3px;
+}
+
+.seg-btn {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  padding: 5px 12px;
+  border-radius: 4px;
+  border: none;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+  background: transparent;
+  color: rgba(255,255,255,0.38);
+}
+.seg-btn:hover { color: rgba(255,255,255,0.70); }
+.seg-btn--active {
+  background: #ffffff;
+  color: #000000;
+  font-weight: 600;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+}

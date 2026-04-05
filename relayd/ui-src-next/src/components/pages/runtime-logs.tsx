@@ -126,10 +126,12 @@ export function RuntimeLogsPage({ selectedEnv }: RuntimeLogsPageProps) {
               <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
               {state === "connecting" ? "Connecting to log stream..." : "Waiting for log stream..."}
             </div>
+          ) : state === "offline" ? (
+            <div className="text-white/30">No running container. Start the app or trigger a deploy to see live output here.</div>
           ) : error ? (
             <div className="text-red-400">{error}</div>
           ) : !visible.length ? (
-            <div className="text-white/20">No log entries yet. The output will appear here as messages arrive.</div>
+            <div className="text-white/20">No log entries yet. Output will appear here as the container writes to stdout/stderr.</div>
           ) : (
             visible.map((entry, i) => (
               <div key={i} className={cn("log-line flex gap-3 leading-relaxed", logLevelClass(entry.level ?? ""))}>
