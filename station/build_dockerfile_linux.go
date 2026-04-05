@@ -17,6 +17,7 @@ package main
 // there are no image layers to hash, push, or pull after the first build.
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -31,7 +32,8 @@ import (
 // BuildDockerfile executes the Dockerfile at dockerfilePath with build context
 // contextDir. Writes the final rootfs to outDir and returns a BuildManifest
 // (CMD, ENV, EXPOSE). outDir is created if it does not exist.
-func BuildDockerfile(dockerfilePath, contextDir, outDir string, logf func(string, ...any), logw io.Writer) (*BuildManifest, error) {
+// ctx is used to cancel in-progress RUN commands when the caller disconnects.
+func BuildDockerfile(ctx context.Context, dockerfilePath, contextDir, outDir string, logf func(string, ...any), logw io.Writer) (*BuildManifest, error) {
 	df, err := ParseDockerfile(dockerfilePath)
 	if err != nil {
 		return nil, fmt.Errorf("parse Dockerfile: %w", err)
@@ -43,7 +45,8 @@ func BuildDockerfile(dockerfilePath, contextDir, outDir string, logf func(string
 	stageDirs := make(map[string]string)
 	var finalManifest *BuildManifest
 
-	ctx := stageCtx{
+	sctx := stageCtx{
+		ctx:         ctx,
 		outDir:      outDir,
 		stageDirs:   stageDirs,
 		stageHashes: make(map[string]string),
@@ -54,7 +57,7 @@ func BuildDockerfile(dockerfilePath, contextDir, outDir string, logf func(string
 
 	for i, stage := range df.Stages {
 		isFinal := i == len(df.Stages)-1
-		m, stageDir, owned, err := buildStage(i, stage, isFinal, ctx)
+		m, stageDir, owned, err := buildStage(i, stage, isFinal, sctx)
 		if err != nil {
 			return nil, fmt.Errorf("stage %d (%s): %w", i, stage.Image, err)
 		}
@@ -79,6 +82,7 @@ func BuildDockerfile(dockerfilePath, contextDir, outDir string, logf func(string
 
 // stageCtx carries the shared context passed to every stage execution.
 type stageCtx struct {
+	ctx              context.Context
 	outDir           string
 	stageDirs        map[string]string
 	stageHashes      map[string]string // stage name → cache key computed after build
@@ -154,7 +158,7 @@ func buildStage(idx int, stage DFStage, isFinal bool, ctx stageCtx) (*BuildManif
 
 	for _, ins := range stage.Instructions {
 		var execErr error
-		workdir, execErr = execInstruction(ins, rootfs, workdir, m, ctx.stageDirs, ctx.contextDir, ctx.logw)
+		workdir, execErr = execInstruction(ctx.ctx, ins, rootfs, workdir, m, ctx.stageDirs, ctx.contextDir, ctx.logw)
 		if execErr != nil {
 			return nil, stageDir, true, execErr
 		}
@@ -299,7 +303,7 @@ func manifestFromBase(base *BuildManifest) *BuildManifest {
 
 // execInstruction runs one Dockerfile instruction, mutating m and returning
 // the (possibly updated) workdir.
-func execInstruction(ins DFInstruction, stageDir, workdir string, m *BuildManifest, stageDirs map[string]string, contextDir string, logw io.Writer) (string, error) {
+func execInstruction(ctx context.Context, ins DFInstruction, stageDir, workdir string, m *BuildManifest, stageDirs map[string]string, contextDir string, logw io.Writer) (string, error) {
 	switch ins.Kind {
 	case DFWorkdir:
 		workdir = resolveContainerPath(workdir, ins.Path)
@@ -323,7 +327,7 @@ func execInstruction(ins DFInstruction, stageDir, workdir string, m *BuildManife
 			return workdir, fmt.Errorf("COPY %v → %s: %w", ins.Srcs, ins.Dest, err)
 		}
 	case DFRun:
-		if err := execRun(ins, stageDir, workdir, m, logw); err != nil {
+		if err := execRun(ctx, ins, stageDir, workdir, m, logw); err != nil {
 			return workdir, err
 		}
 	}
@@ -333,13 +337,13 @@ func execInstruction(ins DFInstruction, stageDir, workdir string, m *BuildManife
 // execRun handles a DFRun instruction with dep-prewarm cache support.
 // It checks the dep cache before running the install command and saves to the
 // cache afterwards, keeping execInstruction's complexity below the linter limit.
-func execRun(ins DFInstruction, stageDir, workdir string, m *BuildManifest, logw io.Writer) error {
+func execRun(ctx context.Context, ins DFInstruction, stageDir, workdir string, m *BuildManifest, logw io.Writer) error {
 	key, artifactDir, cached := depCacheKey(ins.Shell, stageDir, workdir)
 	if cached && depCacheRestore(key, artifactDir, stageDir, workdir) {
 		fmt.Fprintf(logw, "[dep-cache] restored %s (skipping install)\n", artifactDir)
 		return nil
 	}
-	if err := runInChroot(stageDir, workdir, m.Env, ins.Shell, ins.RunMounts, logw); err != nil {
+	if err := runInChroot(ctx, stageDir, workdir, m.Env, ins.Shell, ins.RunMounts, logw); err != nil {
 		return fmt.Errorf("RUN %s: %w", truncate(ins.Shell, 60), err)
 	}
 	if cached {
@@ -351,14 +355,15 @@ func execRun(ins DFInstruction, stageDir, workdir string, m *BuildManifest, logw
 // runInChroot executes a shell command inside the stage rootfs using a mount
 // namespace so /proc and /dev are isolated and the install commands work
 // correctly (npm, pip, apt-get, etc. all need /proc).
-func runInChroot(rootfs, workdir string, envMap map[string]string, shell string, mounts []DFRunMount, logw io.Writer) error {
+func runInChroot(ctx context.Context, rootfs, workdir string, envMap map[string]string, shell string, mounts []DFRunMount, logw io.Writer) error {
 	self, err := os.Executable()
 	if err != nil {
 		return err
 	}
 
 	// Re-exec ourselves with a magic subcommand that sets up chroot + exec.
-	cmd := exec.Command(self, "__station_run__", rootfs, workdir, shell)
+	// ctx cancellation (e.g. HTTP client disconnect) kills the build command.
+	cmd := exec.CommandContext(ctx, self, "__station_run__", rootfs, workdir, shell)
 	cmd.Stdin = strings.NewReader("") // prevent Go from opening /dev/null for stdin
 	cmd.Stdout = logw
 	cmd.Stderr = logw
@@ -691,6 +696,7 @@ func hashFilesForCache(h io.Writer, dir string, patterns []string) error {
 }
 
 // hashFSPath hashes a single file or directory tree into h.
+// Uses streaming reads to avoid loading large files into memory.
 func hashFSPath(h io.Writer, baseDir, path string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -702,23 +708,25 @@ func hashFSPath(h io.Writer, baseDir, path string) error {
 				return walkErr
 			}
 			rel, _ := filepath.Rel(baseDir, p)
-			data, readErr := os.ReadFile(p)
-			if readErr != nil {
-				return readErr
+			f, openErr := os.Open(p)
+			if openErr != nil {
+				return openErr
 			}
+			defer f.Close()
 			fmt.Fprintf(h, "f:%s:", rel)
-			_, _ = h.Write(data)
+			_, _ = io.Copy(h, f)
 			fmt.Fprint(h, "\n")
 			return nil
 		})
 	}
 	rel, _ := filepath.Rel(baseDir, path)
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
+	defer f.Close()
 	fmt.Fprintf(h, "f:%s:", rel)
-	_, _ = h.Write(data)
+	_, _ = io.Copy(h, f)
 	fmt.Fprint(h, "\n")
 	return nil
 }

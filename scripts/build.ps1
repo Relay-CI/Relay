@@ -47,7 +47,7 @@ $env:GOARCH = $GOARCH
 
 try {
     Write-Host "Building dashboard bundle..."
-    Push-Location (Join-Path $repoRoot "relayd/ui-src")
+    Push-Location (Join-Path $repoRoot "relayd/ui-src-next")
     try {
         & npm install --prefer-offline
         & npm run build

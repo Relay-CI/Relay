@@ -896,7 +896,7 @@ func (r *StationRuntime) runWithTimeout(timeout time.Duration, args ...string) (
 	cmd := exec.CommandContext(ctx, bin, args...)
 	setCmdHideWindow(cmd)
 	if base := strings.TrimSpace(r.volumeBaseDir); base != "" {
-		cmd.Env = append(os.Environ(), "station_VOLUME_BASE="+base)
+		cmd.Env = append(os.Environ(), "STATION_VOLUME_BASE="+base, "VESSEL_VOLUME_BASE="+base)
 	}
 	return runCommandCaptured(cmd)
 }
@@ -937,11 +937,34 @@ func runDetachedViaAgent(spec ContainerSpec) (bool, error) {
 		Restart:    spec.RestartPolicy,
 		Port:       port,
 	}
-	if _, runErr := agent.RunContainer(req); runErr == nil {
-		return true, nil
+	resp, runErr := agent.RunContainer(req)
+	if runErr != nil {
+		resetStationAgent()
+		return false, nil
 	}
-	resetStationAgent()
-	return false, nil
+	// Save a minimal Windows-side container record so IsRunning / PublishedPort /
+	// waitForRuntimeContainerReady can find the daemon-managed container.
+	// The daemon response carries the real Windows PID (WSL2 processes are visible
+	// as Windows processes), which lets pidAlive() check liveness normally.
+	if resp != nil {
+		rec := stationContainerRecord{
+			ID:      resp.ID,
+			App:     spec.Name,
+			PID:     resp.PID,
+			Port:    firstNonZero(resp.Port, port),
+			NetMode: netMode,
+			IP:      resp.IP,
+			Image:   spec.Image,
+			Started: time.Now(),
+		}
+		recPath := stationContainerConfigPath(rec.ID)
+		if mkErr := os.MkdirAll(filepath.Dir(recPath), 0755); mkErr == nil {
+			if data, marshalErr := json.Marshal(rec); marshalErr == nil {
+				_ = os.WriteFile(recPath, data, 0644)
+			}
+		}
+	}
+	return true, nil
 }
 
 func (r *StationRuntime) RunDetached(spec ContainerSpec) error {

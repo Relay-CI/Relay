@@ -2,6 +2,9 @@
 data/
 *.log
 
+# old admin panel (replaced by ui-src-next)
+ui-src/
+
 # common junk
 node_modules/
 dist/

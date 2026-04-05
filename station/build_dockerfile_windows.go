@@ -11,6 +11,7 @@ package main
 // fast in-VM snapshot save (hardlinks within ext4 — no cross-FS copy needed).
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -33,7 +34,10 @@ const wslBuildDirFile = ".wsl-build-dir"
 // and npm/go builds hit ext4 instead of the slow 9P filesystem.
 // Only the manifest JSON is copied back to the Windows outDir; the full
 // rootfs stays in WSL2 for a fast in-VM snapshot save.
-func BuildDockerfile(dockerfilePath, contextDir, outDir string, logf func(string, ...any), logw io.Writer) (*BuildManifest, error) {
+// ctx is accepted for API consistency with the Linux implementation but is
+// not used: the build is delegated to WSL2 via wsl.exe which lacks a
+// cancellation channel.
+func BuildDockerfile(_ context.Context, dockerfilePath, contextDir, outDir string, logf func(string, ...any), logw io.Writer) (*BuildManifest, error) {
 	distro := wslDefaultDistro()
 	if distro == "" {
 		return nil, fmt.Errorf("no WSL2 distro found — install WSL2 first")

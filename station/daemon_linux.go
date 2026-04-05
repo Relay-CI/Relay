@@ -199,7 +199,7 @@ func daemonBuild(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	manifest, err := BuildDockerfile(req.Dockerfile, contextDir, outDir, logf, logw)
+	manifest, err := BuildDockerfile(r.Context(), req.Dockerfile, contextDir, outDir, logf, logw)
 	if err != nil {
 		daemonErr(w, "build: "+err.Error())
 		return
@@ -344,7 +344,9 @@ func (d *daemonLineWriter) Write(p []byte) (int, error) {
 			continue
 		}
 		if _, err := fmt.Fprintf(d.w, "%s%s\n", d.prefix, trimmed); err != nil {
-			return 0, err
+			// HTTP client disconnected — discard remaining output so the build
+			// process doesn't block waiting for its stdout pipe to drain.
+			return len(p), nil
 		}
 	}
 	daemonFlush(d.w)

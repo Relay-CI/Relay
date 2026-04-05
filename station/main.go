@@ -11,6 +11,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -426,7 +427,7 @@ func main() {
 		}
 		df, ctxDir, outDir := os.Args[2], os.Args[3], os.Args[4]
 		logf := func(f string, a ...any) { fmt.Printf(f+"\n", a...) }
-		m, err := BuildDockerfile(df, ctxDir, outDir, logf, os.Stdout)
+		m, err := BuildDockerfile(context.Background(), df, ctxDir, outDir, logf, os.Stdout)
 		if err != nil {
 			die("build-dockerfile: %v", err)
 		}
