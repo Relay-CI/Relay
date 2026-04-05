@@ -282,10 +282,8 @@ export async function setSecret(target: AppTarget, key: string, value: string): 
 }
 
 export async function deleteSecret(target: AppTarget, key: string): Promise<void> {
-  await apiFetch("/api/apps/secrets", {
-    method: "DELETE",
-    body: JSON.stringify({ ...target, key }),
-  });
+  const params = new URLSearchParams({ ...target, key });
+  await apiFetch(`/api/apps/secrets?${params}`, { method: "DELETE" });
 }
 
 // ── Companions ────────────────────────────────────────────────────────────

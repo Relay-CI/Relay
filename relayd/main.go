@@ -255,25 +255,25 @@ type DeployJob struct {
 }
 
 type AppState struct {
-	App              string
-	Env              DeployEnv
-	Branch           string
-	RepoURL          string
-	Engine           string `json:"engine,omitempty"`
-	CurrentImage     string
-	PreviousImage    string
-	Mode             string
-	HostPort         int
-	HostPortExplicit bool `json:"host_port_explicit,omitempty"`
-	ServicePort      int
-	PublicHost       string
-	ActiveSlot       string
-	StandbySlot      string
-	DrainUntil       int64
-	TrafficMode      string
-	RepoHash         string
-	WebhookSecret    string
-	Stopped          bool `json:"stopped,omitempty"`
+	App              string    `json:"app"`
+	Env              DeployEnv `json:"env"`
+	Branch           string    `json:"branch"`
+	RepoURL          string    `json:"repo_url"`
+	Engine           string    `json:"engine,omitempty"`
+	CurrentImage     string    `json:"current_image,omitempty"`
+	PreviousImage    string    `json:"previous_image,omitempty"`
+	Mode             string    `json:"mode"`
+	HostPort         int       `json:"host_port"`
+	HostPortExplicit bool      `json:"host_port_explicit,omitempty"`
+	ServicePort      int       `json:"service_port"`
+	PublicHost       string    `json:"public_host"`
+	ActiveSlot       string    `json:"active_slot,omitempty"`
+	StandbySlot      string    `json:"standby_slot,omitempty"`
+	DrainUntil       int64     `json:"drain_until,omitempty"`
+	TrafficMode      string    `json:"traffic_mode"`
+	RepoHash         string    `json:"repo_hash,omitempty"`
+	WebhookSecret    string    `json:"webhook_secret,omitempty"`
+	Stopped          bool      `json:"stopped,omitempty"`
 }
 
 // ---------------------- Multi-service / Project config ----------------------
@@ -319,6 +319,7 @@ type ProjectService struct {
 	Port      int    `json:"port,omitempty"`
 	HostPort  int    `json:"host_port,omitempty"`
 	SpecHash  string `json:"spec_hash,omitempty"`
+	Running   bool   `json:"running"`
 }
 
 type ServiceHealth struct {
@@ -2760,6 +2761,9 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 				var ps ProjectService
 				_ = svcs.Scan(&ps.Project, &ps.Name, &ps.Type, &ps.Branch, &ps.Env,
 					&ps.Container, &ps.Network, &ps.Volume, &ps.EnvKey, &ps.EnvVal, &ps.Image, &ps.Port, &ps.HostPort, &ps.SpecHash)
+				if ps.Container != "" {
+					ps.Running = s.runtime.IsRunning(ps.Container)
+				}
 				proj.Services = append(proj.Services, ps)
 			}
 			svcs.Close()

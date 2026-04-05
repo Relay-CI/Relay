@@ -227,12 +227,38 @@ export function applyEngineConstraints<T extends { engine?: string }>(config: T)
   return { ...config, engine: normalizeEngineValue(config?.engine) };
 }
 
+// ── Mode translation: backend uses "port"/"traefik"/"", UI uses "http"/"static"/"off" ──
+
+export function apiModeToUi(apiMode: string | undefined): string {
+  if (apiMode === "traefik") return "static";
+  if (apiMode === "" || apiMode === "off") return "off";
+  return "http"; // "port" or default
+}
+
+export function uiModeToApi(uiMode: string | undefined): string {
+  if (uiMode === "static") return "traefik";
+  if (uiMode === "off") return "";
+  return "port"; // "http" or default
+}
+
+// ── Traffic mode translation: backend uses "edge"/"session", UI uses "bluegreen"/"rolling" ──
+
+export function apiTrafficModeToUi(apiMode: string | undefined): string {
+  if (apiMode === "session") return "rolling";
+  return "bluegreen"; // "edge" or default
+}
+
+export function uiTrafficModeToApi(uiMode: string | undefined): string {
+  if (uiMode === "rolling") return "session";
+  return "edge"; // "bluegreen" or default
+}
+
 export function buildSettingsConfig(selectedEnv?: EnvInfo | { repo_url?: string; engine?: string; mode?: string; traffic_mode?: string; host_port?: number; service_port?: number; public_host?: string; webhook_secret?: string } | null): Record<string, unknown> {
   return applyEngineConstraints({
     repo_url: selectedEnv?.repo_url ?? "",
     engine: normalizeEngineValue(selectedEnv?.engine),
-    mode: selectedEnv?.mode ?? "port",
-    traffic_mode: selectedEnv?.traffic_mode ?? "edge",
+    mode: apiModeToUi(selectedEnv?.mode ?? "port"),
+    traffic_mode: apiTrafficModeToUi(selectedEnv?.traffic_mode ?? "edge"),
     host_port: selectedEnv?.host_port ?? 0,
     service_port: selectedEnv?.service_port ?? 0,
     public_host: selectedEnv?.public_host ?? "",

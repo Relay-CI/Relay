@@ -4,14 +4,13 @@ import { useState, useEffect, useCallback } from "react";
 import { cn } from "@/lib/utils";
 import {
   buildSettingsConfig,
-  engineLabel,
   envToText,
   textToEnv,
-  applyEngineConstraints,
   normalizeEngineValue,
   prettyCompanionType,
   defaultCompanionDraft,
-  trafficModeLabel,
+  uiModeToApi,
+  uiTrafficModeToApi,
   type NormalizedProject,
 } from "@/lib/relay-utils";
 import {
@@ -63,12 +62,10 @@ const MODE_OPTIONS = [
 const POLICY_OPTIONS = [
   { value: "bluegreen", title: "Blue/Green", summary: "Swap traffic instantly between two stable containers." },
   { value: "rolling", title: "Rolling", summary: "Drain the current container gradually as the new one becomes healthy." },
-  { value: "instant", title: "Instant", summary: "Cut over immediately. Zero tolerance for in-flight requests." },
 ];
 
 export function SettingsPage({ selectedEnv, project, services, onUpdated }: SettingsPageProps) {
   const [config, setConfig] = useState<AppConfig>(buildSettingsConfig() as AppConfig);
-  const [saved, setSaved] = useState<AppConfig>(buildSettingsConfig() as AppConfig);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ tone: "ok" | "warn"; text: string } | null>(null);
 
@@ -88,16 +85,19 @@ export function SettingsPage({ selectedEnv, project, services, onUpdated }: Sett
 
   const load = useCallback(async () => {
     if (!selectedEnv) return;
-    const [cfg, secs, comps] = await Promise.all([
-      getAppConfig(selectedEnv),
-      getSecrets(selectedEnv),
-      getCompanions(selectedEnv),
-    ]);
-    const normalized = buildSettingsConfig(cfg) as AppConfig;
-    setConfig(normalized);
-    setSaved(normalized);
-    setSecrets(secs ?? []);
-    setCompanions(comps ?? []);
+    try {
+      const [cfg, secs, comps] = await Promise.all([
+        getAppConfig(selectedEnv),
+        getSecrets(selectedEnv),
+        getCompanions(selectedEnv),
+      ]);
+      const normalized = buildSettingsConfig(cfg) as AppConfig;
+      setConfig(normalized);
+      setSecrets(secs ?? []);
+      setCompanions(comps ?? []);
+    } catch (err) {
+      setNotice({ tone: "warn", text: `Failed to load settings: ${err instanceof Error ? err.message : "unknown error"}` });
+    }
   }, [selectedEnv?.app, selectedEnv?.env, selectedEnv?.branch]);
 
   useEffect(() => { load(); }, [load]);
@@ -106,16 +106,26 @@ export function SettingsPage({ selectedEnv, project, services, onUpdated }: Sett
     setConfig((c) => ({ ...c, ...patch }));
   }
 
+  function toApiPayload(cfg: AppConfig) {
+    return {
+      ...cfg,
+      mode: uiModeToApi(cfg.mode),
+      traffic_mode: uiTrafficModeToApi(cfg.traffic_mode),
+      host_port: Number(cfg.host_port) || 0,
+      service_port: Number(cfg.service_port) || 0,
+    };
+  }
+
   async function handleSave() {
     if (!selectedEnv) return;
     setBusy(true);
     try {
-      const saved = { ...config, host_port: Number(config.host_port) || 0, service_port: Number(config.service_port) || 0 };
-      await saveAppConfig(selectedEnv, saved);
-      const n = buildSettingsConfig(saved) as AppConfig;
-      setConfig(n); setSaved(n);
+      const payload = toApiPayload(config);
+      await saveAppConfig(selectedEnv, payload);
       setNotice({ tone: "warn", text: "Saved. The next deploy picks up this config automatically. Use Restart to apply it to the running container now." });
       await onUpdated();
+    } catch (err) {
+      setNotice({ tone: "warn", text: `Save failed: ${err instanceof Error ? err.message : "unknown error"}` });
     } finally { setBusy(false); }
   }
 
@@ -123,13 +133,13 @@ export function SettingsPage({ selectedEnv, project, services, onUpdated }: Sett
     if (!selectedEnv) return;
     setBusy(true);
     try {
-      const saved = { ...config, host_port: Number(config.host_port) || 0, service_port: Number(config.service_port) || 0 };
-      await saveAppConfig(selectedEnv, saved);
-      const n = buildSettingsConfig(saved) as AppConfig;
-      setConfig(n); setSaved(n);
+      const payload = toApiPayload(config);
+      await saveAppConfig(selectedEnv, payload);
       await restartApp(selectedEnv);
       setNotice({ tone: "ok", text: "Saved and restart sent. Relay is applying the updated route and traffic policy now." });
       await onUpdated();
+    } catch (err) {
+      setNotice({ tone: "warn", text: `Apply failed: ${err instanceof Error ? err.message : "unknown error"}` });
     } finally { setBusy(false); }
   }
 
