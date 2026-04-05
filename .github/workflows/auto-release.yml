@@ -71,7 +71,7 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: relayd/ui-src/package-lock.json
+          cache-dependency-path: relayd/ui-src-next/package-lock.json
 
       - uses: actions/setup-go@v6
         with:
@@ -81,7 +81,7 @@ jobs:
             station/go.sum
 
       - name: Build dashboard
-        working-directory: relayd/ui-src
+        working-directory: relayd/ui-src-next
         run: npm ci && npm run build
 
       - name: Build relayd
@@ -124,7 +124,7 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: relayd/ui-src/package-lock.json
+          cache-dependency-path: relayd/ui-src-next/package-lock.json
 
       - uses: actions/setup-go@v6
         with:
