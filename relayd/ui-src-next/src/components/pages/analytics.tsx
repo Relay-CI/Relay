@@ -42,9 +42,20 @@ export function AnalyticsPage({ selectedEnv }: AnalyticsPageProps) {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    const params = new URLSearchParams({ period });
-    if (selectedEnv?.app) params.set("app", selectedEnv.app);
+
     getAnalytics(selectedEnv?.app, period)
+      .then((result) => {
+        if (cancelled) return;
+        setData((result as AnalyticsData) ?? null);
+        setLoading(false);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setData(null);
+        setError(err instanceof Error ? err.message : "Failed to load analytics");
+        setLoading(false);
+      });
+
     return () => { cancelled = true; };
   }, [period, selectedEnv?.app]);
 

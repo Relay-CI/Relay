@@ -51,26 +51,63 @@ export interface SessionInfo {
   cli_token?: string;
 }
 
-export async function getSession(): Promise<SessionInfo> {
-  return apiFetch<SessionInfo>("/api/auth/session");
+interface RawSessionInfo {
+  authenticated?: boolean;
+  username?: string;
+  role?: string;
+  setup_required?: boolean;
+  legacy_mode?: boolean;
+  cli_mode?: boolean;
+  cli_token?: string;
 }
 
-export async function login(credentials: { username: string; password: string } | string): Promise<void> {
+export interface LoginRequest {
+  username: string;
+  password: string;
+  cliPort?: number;
+}
+
+export interface LoginResponse {
+  authenticated?: boolean;
+  username?: string;
+  role?: string;
+  setup_required?: boolean;
+  cli_code?: string;
+  cli_redirect?: string;
+}
+
+export async function getSession(): Promise<SessionInfo> {
+  const session = await apiFetch<RawSessionInfo>("/api/auth/session");
+  return {
+    authed: session.authenticated ?? false,
+    user: session.username && session.role ? { username: session.username, role: session.role } : undefined,
+    setup_available: session.setup_required ?? false,
+    legacy_mode: session.legacy_mode ?? false,
+    cli_mode: session.cli_mode ?? false,
+    cli_token: session.cli_token,
+  };
+}
+
+export async function login(credentials: LoginRequest | string): Promise<LoginResponse> {
   if (typeof credentials === "string") {
-    await apiFetch("/api/auth/login", {
+    return apiFetch<LoginResponse>("/api/auth/session", {
       method: "POST",
       body: JSON.stringify({ token: credentials }),
     });
-  } else {
-    await apiFetch("/api/auth/login", {
-      method: "POST",
-      body: JSON.stringify(credentials),
-    });
   }
+
+  return apiFetch<LoginResponse>("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify({
+      username: credentials.username,
+      password: credentials.password,
+      ...(credentials.cliPort ? { cli_port: credentials.cliPort } : {}),
+    }),
+  });
 }
 
 export async function logout(): Promise<void> {
-  await apiFetch("/api/auth/login", { method: "DELETE" });
+  await apiFetch("/api/auth/session", { method: "DELETE" });
 }
 
 export async function setup(credentials: { username: string; password: string }): Promise<void> {
@@ -81,7 +118,11 @@ export async function setup(credentials: { username: string; password: string })
 }
 
 export async function getMe(): Promise<{ username: string; role: string }> {
-  return apiFetch("/api/auth/me");
+  const me = await apiFetch<{ authenticated?: boolean; username?: string; role?: string }>("/api/auth/me");
+  return {
+    username: me.username ?? "",
+    role: me.role ?? "",
+  };
 }
 
 // ── Projects + Deploys ────────────────────────────────────────────────────
@@ -436,9 +477,9 @@ export async function deleteProject(name: string): Promise<void> {
 
 // ── CLI auth ──────────────────────────────────────────────────────────────
 
-export async function cliExchange(token: string): Promise<void> {
+export async function cliExchange(code: string): Promise<void> {
   await apiFetch("/api/auth/cli/exchange", {
     method: "POST",
-    body: JSON.stringify({ token }),
+    body: JSON.stringify({ code }),
   });
 }

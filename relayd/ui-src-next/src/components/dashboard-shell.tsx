@@ -37,6 +37,7 @@ export default function DashboardShell() {
   const [dashboard, refreshDashboard] = useDashboardData(auth.authed);
   const [refreshing, setRefreshing] = useState(false);
   const [activeTab, setActiveTab] = useState("overview");
+  const [authView, setAuthView] = useState<"login" | "setup">("login");
   const [selectedProjectName, setSelectedProjectName] = useState("");
   const [selectedEnvKey, setSelectedEnvKey] = useState("");
   const [selectedDeploy, setSelectedDeploy] = useState<Deploy | null>(null);
@@ -163,6 +164,11 @@ export default function DashboardShell() {
     setRefreshing(false);
   }
 
+  useEffect(() => {
+    if (auth.authed) return;
+    setAuthView(auth.setupAvailable && !auth.legacyMode ? "setup" : "login");
+  }, [auth.authed, auth.setupAvailable, auth.legacyMode]);
+
   /* ── Auth gating ──────────────────────────────────────────────────────── */
 
   if (auth.loading) {
@@ -177,12 +183,18 @@ export default function DashboardShell() {
     );
   }
 
-  if (auth.setupAvailable && !auth.authed) {
-    return <SetupPage />;
+  if (auth.setupAvailable && !auth.authed && authView === "setup") {
+    return <SetupPage onShowLogin={auth.legacyMode ? () => setAuthView("login") : undefined} />;
   }
 
   if (!auth.authed) {
-    return <LoginPage />;
+    return (
+      <LoginPage
+        legacyMode={auth.legacyMode}
+        showSetupOption={auth.setupAvailable}
+        onShowSetup={auth.setupAvailable ? () => setAuthView("setup") : undefined}
+      />
+    );
   }
 
   /* ── Main shell ───────────────────────────────────────────────────────── */
