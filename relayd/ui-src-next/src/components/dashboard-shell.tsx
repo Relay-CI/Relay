@@ -24,7 +24,7 @@ import {
   type NormalizedProject,
 } from "@/lib/relay-utils";
 import type { Deploy, EnvInfo } from "@/lib/api";
-import { cancelDeploy } from "@/lib/api";
+import { cancelDeploy, cliStart } from "@/lib/api";
 
 interface SelectedEnvMeta extends EnvInfo {
   app: string;
@@ -187,6 +187,21 @@ export default function DashboardShell() {
     if (auth.authed) return;
     setAuthView(auth.setupAvailable && !auth.legacyMode ? "setup" : "login");
   }, [auth.authed, auth.setupAvailable, auth.legacyMode]);
+
+  // If the user is already authenticated and the URL has CLI params, mint a
+  // code via the existing session and redirect back to the local CLI server.
+  useEffect(() => {
+    if (!auth.authed) return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("cli") !== "1") return;
+    const parsedPort = Number.parseInt(params.get("port") ?? "", 10);
+    if (!Number.isInteger(parsedPort) || parsedPort <= 0 || parsedPort > 65535) return;
+    cliStart(parsedPort)
+      .then((resp) => {
+        if (resp.cli_redirect) window.location.assign(resp.cli_redirect);
+      })
+      .catch(() => {/* ignore – fall through to normal dashboard */});
+  }, [auth.authed]);
 
   /* ── Auth gating ──────────────────────────────────────────────────────── */
 

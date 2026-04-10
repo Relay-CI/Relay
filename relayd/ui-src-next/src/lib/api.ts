@@ -111,6 +111,13 @@ export async function login(
   });
 }
 
+export async function cliStart(cliPort: number): Promise<{ cli_redirect?: string }> {
+  return apiFetch<{ cli_redirect?: string }>("/api/auth/cli/start", {
+    method: "POST",
+    body: JSON.stringify({ cli_port: cliPort }),
+  });
+}
+
 export async function logout(): Promise<void> {
   await apiFetch("/api/auth/session", { method: "DELETE" });
 }
