@@ -539,47 +539,71 @@ function renderCLILoginCallbackPage(user, role) {
 </html>`;
 }
 
-async function runSetupWizard(args, cfgPath) {
+// Show a config value that's already set — no prompt needed.
+function showConfigField(label, value) {
   console.log(
-    `\n${c.bold}Relay setup${c.reset}  ${c.dim}Answer a few questions to get connected.${c.reset}\n`,
+    `  ${label}  ${c.dim}${value}${c.reset}  ${c.dim}(from existing config)${c.reset}`,
   );
+}
+
+async function runSetupWizard(args, cfgPath, missingFields = []) {
+  // Determine which fields are genuinely missing (passed in from resolveOrSetup).
+  const missing = new Set(missingFields);
+  const needAll = missing.size === 0; // legacy: wizard called without context
+
+  if (needAll) {
+    console.log(
+      `\n${c.bold}Relay setup${c.reset}  ${c.dim}Answer a few questions to get connected.${c.reset}\n`,
+    );
+  } else {
+    console.log(
+      `\n${c.bold}Relay setup${c.reset}  ${c.dim}Fill in the missing fields below.${c.reset}\n`,
+    );
+  }
   console.log(
     `  ${c.dim}.relay.json stores CLI connection defaults. relay.json is for companion services only.${c.reset}\n`,
   );
 
-  // ── 1. Connection type ──
   const existingCfg = loadRelayConfig(path.dirname(cfgPath)).data || {};
 
-  const connRaw = await prompt(
-    `Connection type  ${c.dim}[socket = local Unix socket,  http = remote / token]${c.reset}`,
-    "http",
-  );
-  const useSocket = connRaw.toLowerCase().startsWith("s");
+  // ── 1. Connection type ──
+  const needConn = needAll || missing.has("url") || missing.has("token") || missing.has("socket");
+  let socket = existingCfg.socket || args.socket || process.env.RELAY_SOCKET || null;
+  let url = existingCfg.url || args.url || process.env.RELAY_URL || null;
+  let token = args.token || process.env.RELAY_TOKEN || existingCfg.token || null;
 
-  let socket = null,
-    url = null,
-    token = null;
+  let useSocket = Boolean(socket && !url);
+  if (needConn) {
+    const connRaw = await prompt(
+      `Connection type  ${c.dim}[socket = local Unix socket,  http = remote / token]${c.reset}`,
+      useSocket ? "socket" : "http",
+    );
+    useSocket = connRaw.toLowerCase().startsWith("s");
 
-  if (useSocket) {
-    socket = await prompt(
-      "Socket path",
-      args.socket ||
-        process.env.RELAY_SOCKET ||
-        path.join(".", "data", "relay.sock"),
-    );
-  } else {
-    url = await prompt(
-      "Server URL",
-      args.url || process.env.RELAY_URL || existingCfg.url || "http://127.0.0.1:8080",
-    );
-    const existingToken = args.token || process.env.RELAY_TOKEN || existingCfg.token || "";
-    // If an auth token already exists (e.g. from `relay login`), skip the
-    // prompt — just reuse it. Only ask when there's genuinely nothing.
-    if (existingToken) {
-      token = existingToken;
-      console.log(`  ${c.dim}Auth token: (using saved token)${c.reset}`);
+    if (useSocket) {
+      socket = await prompt(
+        "Socket path",
+        socket || path.join(".", "data", "relay.sock"),
+      );
+      url = null;
     } else {
-      token = await promptSecret("Auth token (hidden)");
+      if (needAll || missing.has("url") || !url) {
+        url = await prompt("Server URL", url || "http://127.0.0.1:8080");
+      } else {
+        showConfigField("Server URL", url);
+      }
+      if (!token) {
+        token = await promptSecret("Auth token (hidden)");
+      } else {
+        console.log(`  ${c.dim}Auth token: (using saved token)${c.reset}`);
+      }
+    }
+  } else {
+    // All connection fields already set — just echo them.
+    if (socket) showConfigField("Socket   ", socket);
+    else {
+      showConfigField("Server URL", url || "http://127.0.0.1:8080");
+      console.log(`  ${c.dim}Auth token: (using saved token)${c.reset}`);
     }
   }
 
@@ -589,26 +613,47 @@ async function runSetupWizard(args, cfgPath) {
     .basename(process.cwd())
     .replace(/[^a-z0-9-]/gi, "-")
     .toLowerCase();
-  const app = await prompt(
-    "App name",
-    args.app || process.env.RELAY_APP || existingCfg.app || defaultApp,
-  );
-  const env = await prompt(
-    "Env     ",
-    args.env || process.env.RELAY_ENV || existingCfg.env || "preview",
-  );
-  const branch = await prompt(
-    "Branch  ",
-    args.branch || process.env.RELAY_BRANCH || existingCfg.branch || "main",
-  );
+
+  let app, env, branch;
+
+  const existingApp = args.app || process.env.RELAY_APP || existingCfg.app;
+  if (needAll || missing.has("app") || !existingApp) {
+    app = await prompt("App name", existingApp || defaultApp);
+  } else {
+    app = existingApp;
+    showConfigField("App name ", app);
+  }
+
+  const existingEnv = args.env || process.env.RELAY_ENV || existingCfg.env;
+  if (needAll || missing.has("env") || !existingEnv) {
+    env = await prompt("Env     ", existingEnv || "preview");
+  } else {
+    env = existingEnv;
+    showConfigField("Env      ", env);
+  }
+
+  const existingBranch = args.branch || process.env.RELAY_BRANCH || existingCfg.branch;
+  if (needAll || missing.has("branch") || !existingBranch) {
+    branch = await prompt("Branch  ", existingBranch || "main");
+  } else {
+    branch = existingBranch;
+    showConfigField("Branch   ", branch);
+  }
 
   // ── 3. Engine ──
   console.log("");
-  const engineRaw = await prompt(
-    `Engine   ${c.dim}[docker = recommended,  station = experimental runtime]${c.reset}`,
-    args.engine || process.env.RELAY_ENGINE || existingCfg.engine || "docker",
-  );
-  const engine = engineRaw.toLowerCase().startsWith("d") ? "docker" : "station";
+  const existingEngine = args.engine || process.env.RELAY_ENGINE || existingCfg.engine;
+  let engine;
+  if (needAll || missing.has("engine") || !existingEngine) {
+    const engineRaw = await prompt(
+      `Engine   ${c.dim}[docker = recommended,  station = experimental runtime]${c.reset}`,
+      existingEngine || "docker",
+    );
+    engine = engineRaw.toLowerCase().startsWith("d") ? "docker" : "station";
+  } else {
+    engine = existingEngine;
+    showConfigField("Engine   ", engine);
+  }
 
   // ── 4. Confirm save ──
   console.log("");
@@ -637,48 +682,87 @@ async function runSetupWizard(args, cfgPath) {
  * When resolution fails and stdin is a TTY, launch the interactive setup
  * wizard rather than crashing with a raw error message.
  */
+// Extract which fields are missing from a resolveDeployArgs/resolveTransport error message.
+function parseMissingFields(msg) {
+  const missing = [];
+  if (!msg) return missing;
+  if (msg.includes("token") || msg.includes("socket")) missing.push("token");
+  if (msg.includes("app")) missing.push("app");
+  if (msg.includes("env")) missing.push("env");
+  if (msg.includes("branch")) missing.push("branch");
+  return missing;
+}
+
 async function resolveOrSetup(args, { needDeploy = false } = {}) {
   const cfgPath = path.join(process.cwd(), ".relay.json");
+
+  // Fast path — everything resolves from current flags/env/config.
   try {
     const transport = resolveTransport(args);
     const resolved = needDeploy ? resolveDeployArgs(args) : null;
     return { transport, resolved };
-  } catch {
-    if (!process.stdin.isTTY) {
-      // Non-interactive (CI/scripts): surface the error directly.
+  } catch {}
+
+  // If --dir is specified (e.g. relay deploy --dir ./site), also try loading
+  // config from that directory before giving up and running the wizard.
+  if (args.dir) {
+    const dirCfg = loadRelayConfig(path.resolve(args.dir));
+    if (dirCfg.path) {
+      if (!args.url && !args.socket && dirCfg.data.url) args.url = dirCfg.data.url;
+      if (!args.socket && dirCfg.data.socket) args.socket = dirCfg.data.socket;
+      if (!args.token && dirCfg.data.token) args.token = dirCfg.data.token;
+      if (!args.app && dirCfg.data.app) args.app = dirCfg.data.app;
+      if (!args.env && dirCfg.data.env) args.env = dirCfg.data.env;
+      if (!args.branch && dirCfg.data.branch) args.branch = dirCfg.data.branch;
+      if (!args.engine && dirCfg.data.engine) args.engine = dirCfg.data.engine;
       try {
-        resolveTransport(args);
-      } catch (e) {
-        die(e.message);
-      }
-      try {
-        if (needDeploy) resolveDeployArgs(args);
-      } catch (e) {
-        die(e.message);
-      }
+        const transport = resolveTransport(args);
+        const resolved = needDeploy ? resolveDeployArgs(args) : null;
+        return { transport, resolved };
+      } catch {}
     }
-    const repoRelayPath = path.join(process.cwd(), "relay.json");
-    if (fs.existsSync(repoRelayPath) && !fs.existsSync(cfgPath)) {
-      console.log(
-        `\n${c.dim}Found relay.json in this folder. That file defines companion services; CLI auth/defaults belong in .relay.json.${c.reset}`,
-      );
-    }
-    const wiz = await runSetupWizard(args, cfgPath);
-    // Patch args so the re-resolution picks up wizard answers as CLI overrides.
-    if (wiz.socket) args.socket = wiz.socket;
-    if (wiz.url) args.url = wiz.url;
-    if (wiz.token) args.token = wiz.token;
-    if (wiz.app) args.app = wiz.app;
-    if (wiz.env) args.env = wiz.env;
-    if (wiz.branch) args.branch = wiz.branch;
-    if (wiz.engine) args.engine = wiz.engine;
-    try {
-      const transport = resolveTransport(args);
-      const resolved = needDeploy ? resolveDeployArgs(args) : null;
-      return { transport, resolved };
-    } catch (e2) {
-      die(e2.message);
-    }
+  }
+
+  // Collect the actual error(s) so we can tell the user what's missing.
+  let resolveError = "";
+  try { resolveTransport(args); } catch (e) { resolveError = e.message; }
+  if (!resolveError && needDeploy) {
+    try { resolveDeployArgs(args); } catch (e) { resolveError = e.message; }
+  }
+
+  if (!process.stdin.isTTY) {
+    // Non-interactive (CI/scripts): surface the error directly.
+    die(resolveError || "Configuration incomplete.");
+  }
+
+  // Surface reason before wizard so the user understands why it fired.
+  if (resolveError) {
+    console.log(`\n${c.yellow}!${c.reset} ${c.dim}${resolveError.replace(/\n/g, "  ")}${c.reset}`);
+  }
+
+  const repoRelayPath = path.join(process.cwd(), "relay.json");
+  if (fs.existsSync(repoRelayPath) && !fs.existsSync(cfgPath)) {
+    console.log(
+      `\n${c.dim}Found relay.json in this folder. That file defines companion services; CLI auth/defaults belong in .relay.json.${c.reset}`,
+    );
+  }
+
+  const missingFields = parseMissingFields(resolveError);
+  const wiz = await runSetupWizard(args, cfgPath, missingFields);
+  // Patch args so the re-resolution picks up wizard answers as CLI overrides.
+  if (wiz.socket) args.socket = wiz.socket;
+  if (wiz.url) args.url = wiz.url;
+  if (wiz.token) args.token = wiz.token;
+  if (wiz.app) args.app = wiz.app;
+  if (wiz.env) args.env = wiz.env;
+  if (wiz.branch) args.branch = wiz.branch;
+  if (wiz.engine) args.engine = wiz.engine;
+  try {
+    const transport = resolveTransport(args);
+    const resolved = needDeploy ? resolveDeployArgs(args) : null;
+    return { transport, resolved };
+  } catch (e2) {
+    die(e2.message);
   }
 }
 
@@ -2160,7 +2244,15 @@ async function main() {
   if (!noStream) {
     info("streaming logs");
     const streamStartedAt = nowMs();
-    const streamedStatus = await streamLogsTransport(transport, deploy.id);
+    let streamedStatus = null;
+    try {
+      streamedStatus = await streamLogsTransport(transport, deploy.id);
+    } catch (streamErr) {
+      const cause = streamErr.cause?.message || streamErr.cause || "";
+      warn(
+        `log stream failed: ${streamErr.message}${cause ? `  (${cause})` : ""}  — falling back to polling`,
+      );
+    }
     let finalDeploy = await apiJSON(
       transport,
       "GET",
@@ -2216,4 +2308,7 @@ async function main() {
   }
 }
 
-main().catch((e) => die(e.message));
+main().catch((e) => {
+  const cause = e.cause?.message || e.cause;
+  die(e.message + (cause ? `  (${cause})` : ""));
+});
