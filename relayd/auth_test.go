@@ -51,8 +51,8 @@ func TestHandleDashboardSessionReturnsSetupAndLegacyModeWithoutUsers(t *testing.
 	if body["setup_required"] != true {
 		t.Fatalf("expected setup_required=true, got %#v", body)
 	}
-	if body["legacy_mode"] != true {
-		t.Fatalf("expected legacy_mode=true, got %#v", body)
+	if body["legacy_mode"] != false {
+		t.Fatalf("expected legacy_mode=false (setup forced), got %#v", body)
 	}
 }
 
