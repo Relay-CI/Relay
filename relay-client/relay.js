@@ -1226,11 +1226,12 @@ async function main() {
   // ── login ─────────────────────────────────────────────────────────────────────
   if (cmd === "login") {
     const existingCfg = loadRelayConfig(process.cwd()).data || {};
-    const serverUrl =
+    const serverUrl = (
       args.url ||
       process.env.RELAY_URL ||
       existingCfg.url ||
-      (await prompt("Server URL", "http://127.0.0.1:8080"));
+      (await prompt("Server URL", "http://127.0.0.1:8080"))
+    ).replace(/\/+$/, "");
     // Find a free port for the local callback server.
     const callbackPort = await new Promise((resolve) => {
       const srv = http.createServer();
@@ -1253,6 +1254,10 @@ async function main() {
         else reject(new Error("no code in callback"));
       });
       srv.listen(callbackPort, "127.0.0.1");
+      srv.on("error", (err) => {
+        srv.close();
+        reject(new Error(`callback server error: ${err.message}`));
+      });
       setTimeout(
         () => {
           srv.close();
