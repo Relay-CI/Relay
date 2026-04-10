@@ -3454,8 +3454,6 @@ func main() {
 	go s.startACMEListener()
 	// Tail Caddy access logs and aggregate per-request analytics.
 	go s.startLogTailer()
-	// Tail Caddy access logs and aggregate analytics.
-	go s.startLogTailer()
 	httpServer := &http.Server{
 		Addr:    addr,
 		Handler: s.withCORS(mux),
@@ -8851,6 +8849,7 @@ func migrateDB(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN port INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN host_port INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN spec_hash TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN repo_hash TEXT DEFAULT ''`)
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS server_config (key TEXT PRIMARY KEY, value TEXT)`)
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS users (
 		id TEXT PRIMARY KEY,
@@ -9421,7 +9420,7 @@ func (s *Server) saveAppState(st *AppState) error {
 }
 
 func (s *Server) getAppState(app string, env DeployEnv, branch string) (*AppState, error) {
-	row := s.db.QueryRow(`SELECT app, env, branch, repo_url, COALESCE(engine,''), current_image, previous_image, mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), repo_hash, COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(stopped,0)
+	row := s.db.QueryRow(`SELECT app, env, branch, repo_url, COALESCE(engine,''), current_image, previous_image, mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(repo_hash,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(stopped,0)
 		FROM app_state WHERE app=? AND env=? AND branch=?`, app, string(env), branch)
 
 	var st AppState
