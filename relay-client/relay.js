@@ -542,6 +542,8 @@ async function runSetupWizard(args, cfgPath) {
   );
 
   // ── 1. Connection type ──
+  const existingCfg = loadRelayConfig(path.dirname(cfgPath)).data || {};
+
   const connRaw = await prompt(
     `Connection type  ${c.dim}[socket = local Unix socket,  http = remote / token]${c.reset}`,
     "http",
@@ -562,10 +564,17 @@ async function runSetupWizard(args, cfgPath) {
   } else {
     url = await prompt(
       "Server URL",
-      args.url || process.env.RELAY_URL || "http://127.0.0.1:8080",
+      args.url || process.env.RELAY_URL || existingCfg.url || "http://127.0.0.1:8080",
     );
-    token = await promptSecret("Auth token (hidden)");
-    if (!token) token = args.token || process.env.RELAY_TOKEN || "";
+    const existingToken = args.token || process.env.RELAY_TOKEN || existingCfg.token || "";
+    // If an auth token already exists (e.g. from `relay login`), skip the
+    // prompt — just reuse it. Only ask when there's genuinely nothing.
+    if (existingToken) {
+      token = existingToken;
+      console.log(`  ${c.dim}Auth token: (using saved token)${c.reset}`);
+    } else {
+      token = await promptSecret("Auth token (hidden)");
+    }
   }
 
   // ── 2. App details ──
@@ -576,22 +585,22 @@ async function runSetupWizard(args, cfgPath) {
     .toLowerCase();
   const app = await prompt(
     "App name",
-    args.app || process.env.RELAY_APP || defaultApp,
+    args.app || process.env.RELAY_APP || existingCfg.app || defaultApp,
   );
   const env = await prompt(
     "Env     ",
-    args.env || process.env.RELAY_ENV || "preview",
+    args.env || process.env.RELAY_ENV || existingCfg.env || "preview",
   );
   const branch = await prompt(
     "Branch  ",
-    args.branch || process.env.RELAY_BRANCH || "main",
+    args.branch || process.env.RELAY_BRANCH || existingCfg.branch || "main",
   );
 
   // ── 3. Engine ──
   console.log("");
   const engineRaw = await prompt(
     `Engine   ${c.dim}[docker = recommended,  station = experimental runtime]${c.reset}`,
-    args.engine || process.env.RELAY_ENGINE || "docker",
+    args.engine || process.env.RELAY_ENGINE || existingCfg.engine || "docker",
   );
   const engine = engineRaw.toLowerCase().startsWith("d") ? "docker" : "station";
 
@@ -607,7 +616,9 @@ async function runSetupWizard(args, cfgPath) {
     if (env) cfg.env = env;
     if (branch) cfg.branch = branch;
     cfg.engine = engine;
-    await fsp.writeFile(cfgPath, JSON.stringify(cfg, null, 2), "utf8");
+    // Merge with existing config so fields like `token` set by `relay login`
+    // are never lost when the wizard is triggered for missing deploy fields.
+    saveRelayConfig(cfg, path.dirname(cfgPath));
     ok(`Saved ${cfgPath}`);
   }
   console.log("");
