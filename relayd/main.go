@@ -674,6 +674,10 @@ type Server struct {
 
 	runtime        ContainerRuntime
 	stationRuntime ContainerRuntime
+
+	acmeMu       sync.Mutex
+	acmeServer   *http.Server
+	acmeListener net.Listener
 }
 
 // ---------------------- Config ----------------------
@@ -2451,13 +2455,13 @@ func (s *Server) autoPreviewHostFull(env DeployEnv, app, branch, existingHost st
 	return s.managedLaneHost(env, app, branch, existingHost)
 }
 
-// globalProxyDisabled returns true when the operator has disabled the Caddy
-// global proxy via the admin settings UI or RELAY_DISABLE_GLOBAL_PROXY=true.
-func (s *Server) globalProxyDisabled() bool {
-	if v := strings.TrimSpace(os.Getenv("RELAY_DISABLE_GLOBAL_PROXY")); v == "true" || v == "1" {
+// acmeDisabled returns true when the operator has disabled the lightweight
+// ACME HTTP-01 listener via admin settings or RELAY_DISABLE_ACME=true.
+func (s *Server) acmeDisabled() bool {
+	if v := strings.TrimSpace(os.Getenv("RELAY_DISABLE_ACME")); v == "true" || v == "1" {
 		return true
 	}
-	return s.serverConfigGet("global_proxy_disabled") == "true"
+	return s.serverConfigGet("acme_disabled") == "true"
 }
 
 // handleServerConfig handles GET/POST /api/server/config.
@@ -2465,15 +2469,15 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		writeJSON(w, 200, map[string]string{
-			"base_domain":           s.serverBaseDomain(),
-			"dashboard_host":        s.serverDashboardHost(),
-			"global_proxy_disabled": s.serverConfigGet("global_proxy_disabled"),
+			"base_domain":    s.serverBaseDomain(),
+			"dashboard_host": s.serverDashboardHost(),
+			"acme_disabled":  s.serverConfigGet("acme_disabled"),
 		})
 	case http.MethodPost:
 		var body struct {
-			BaseDomain          string `json:"base_domain"`
-			DashboardHost       string `json:"dashboard_host"`
-			GlobalProxyDisabled string `json:"global_proxy_disabled"`
+			BaseDomain    string `json:"base_domain"`
+			DashboardHost string `json:"dashboard_host"`
+			ACMEDisabled  string `json:"acme_disabled"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httpError(w, 400, "invalid JSON")
@@ -2481,9 +2485,9 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		baseDomain := strings.TrimSpace(body.BaseDomain)
 		dashboardHost := strings.TrimSpace(body.DashboardHost)
-		globalProxyDisabled := ""
-		if body.GlobalProxyDisabled == "true" {
-			globalProxyDisabled = "true"
+		acmeDisabled := ""
+		if body.ACMEDisabled == "true" {
+			acmeDisabled = "true"
 		}
 		if err := validateProxyHostname(baseDomain, "base_domain"); err != nil {
 			httpError(w, 400, err.Error())
@@ -2494,9 +2498,9 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		previous := map[string]string{
-			"base_domain":           s.serverConfigGet("base_domain"),
-			"dashboard_host":        s.serverConfigGet("dashboard_host"),
-			"global_proxy_disabled": s.serverConfigGet("global_proxy_disabled"),
+			"base_domain":    s.serverConfigGet("base_domain"),
+			"dashboard_host": s.serverConfigGet("dashboard_host"),
+			"acme_disabled":  s.serverConfigGet("acme_disabled"),
 		}
 		tx, err := s.db.Begin()
 		if err != nil {
@@ -2504,9 +2508,9 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for key, value := range map[string]string{
-			"base_domain":           baseDomain,
-			"dashboard_host":        dashboardHost,
-			"global_proxy_disabled": globalProxyDisabled,
+			"base_domain":    baseDomain,
+			"dashboard_host": dashboardHost,
+			"acme_disabled":  acmeDisabled,
 		} {
 			if _, err := tx.Exec(
 				`INSERT INTO server_config (key, value) VALUES (?, ?)
@@ -2522,20 +2526,16 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 500, "db write failed: "+err.Error())
 			return
 		}
-		// If the proxy was just disabled, tear it down; otherwise (re-)start it.
-		if globalProxyDisabled == "true" {
-			s.runtime.Remove("relay-global-proxy")
-		} else {
-			if err := s.ensureGlobalProxy(); err != nil {
-				_ = s.writeServerConfig(previous)
-				httpError(w, 500, "failed to refresh global proxy: "+err.Error())
-				return
-			}
+		s.startACMEListener()
+		if err := s.ensureGlobalProxy(); err != nil {
+			_ = s.writeServerConfig(previous)
+			httpError(w, 500, "failed to refresh global proxy: "+err.Error())
+			return
 		}
 		writeJSON(w, 200, map[string]string{
-			"base_domain":           baseDomain,
-			"dashboard_host":        dashboardHost,
-			"global_proxy_disabled": globalProxyDisabled,
+			"base_domain":    baseDomain,
+			"dashboard_host": dashboardHost,
+			"acme_disabled":  acmeDisabled,
 		})
 	default:
 		httpError(w, 405, "method not allowed")
@@ -7726,6 +7726,23 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) startACMEListener() {
+	s.acmeMu.Lock()
+	defer s.acmeMu.Unlock()
+
+	if s.acmeServer != nil {
+		_ = s.acmeServer.Close()
+		s.acmeServer = nil
+	}
+	if s.acmeListener != nil {
+		_ = s.acmeListener.Close()
+		s.acmeListener = nil
+	}
+
+	if s.acmeDisabled() {
+		fmt.Println("ACME HTTP listener disabled")
+		return
+	}
+
 	acmeAddr := getenv("RELAY_ACME_ADDR", ":80")
 	ln, err := net.Listen("tcp", acmeAddr)
 	if err != nil {
@@ -7764,18 +7781,25 @@ func (s *Server) startACMEListener() {
 		ReadTimeout:       10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+	s.acmeListener = ln
+	s.acmeServer = srv
 	fmt.Println("ACME HTTP listener on", acmeAddr)
 	go func() {
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			fmt.Fprintf(os.Stderr, "ACME listener error: %v\n", err)
 		}
+		s.acmeMu.Lock()
+		if s.acmeServer == srv {
+			s.acmeServer = nil
+		}
+		if s.acmeListener == ln {
+			s.acmeListener = nil
+		}
+		s.acmeMu.Unlock()
 	}()
 }
 
 func (s *Server) ensureGlobalProxy() error {
-	if s.globalProxyDisabled() {
-		return nil
-	}
 	rows, err := s.db.Query(`SELECT public_host, COALESCE(host_port, 0) FROM app_state WHERE public_host != '' AND COALESCE(stopped,0)=0`)
 	if err != nil {
 		return err

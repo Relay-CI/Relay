@@ -17,8 +17,8 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
   const [baseDomain, setBaseDomain] = useState("");
   const [dashboardHost, setDashboardHost] = useState("");
-  const [globalProxyDisabled, setGlobalProxyDisabled] = useState(false);
-  const [draft, setDraft] = useState({ baseDomain: "", dashboardHost: "", globalProxyDisabled: false });
+  const [acmeDisabled, setAcmeDisabled] = useState(false);
+  const [draft, setDraft] = useState({ baseDomain: "", dashboardHost: "", acmeDisabled: false });
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ tone: "ok" | "danger"; text: string } | null>(null);
 
@@ -28,9 +28,9 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
       getServerConfig().then((data) => {
         const bd = data?.base_domain ?? "";
         const dh = data?.dashboard_host ?? "";
-        const gpd = data?.global_proxy_disabled === "true";
-        setBaseDomain(bd); setDashboardHost(dh); setGlobalProxyDisabled(gpd);
-        setDraft({ baseDomain: bd, dashboardHost: dh, globalProxyDisabled: gpd });
+        const ad = data?.acme_disabled === "true";
+        setBaseDomain(bd); setDashboardHost(dh); setAcmeDisabled(ad);
+        setDraft({ baseDomain: bd, dashboardHost: dh, acmeDisabled: ad });
       }).catch(() => {});
     }
   }, [isOwner]);
@@ -39,7 +39,7 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
     return <div className="flex items-center justify-center h-full text-white/30 text-sm">Owner access required</div>;
   }
 
-  const dirty = draft.baseDomain !== baseDomain || draft.dashboardHost !== dashboardHost || draft.globalProxyDisabled !== globalProxyDisabled;
+  const dirty = draft.baseDomain !== baseDomain || draft.dashboardHost !== dashboardHost || draft.acmeDisabled !== acmeDisabled;
   const exampleHost = draft.baseDomain ? `myapp-main.${draft.baseDomain}` : "myapp-main.example.com";
 
   async function save() {
@@ -48,13 +48,13 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
       const saved = await saveServerConfig({
         base_domain: draft.baseDomain,
         dashboard_host: draft.dashboardHost,
-        global_proxy_disabled: draft.globalProxyDisabled ? "true" : "",
+        acme_disabled: draft.acmeDisabled ? "true" : "",
       });
       const bd = saved?.base_domain ?? "";
       const dh = saved?.dashboard_host ?? "";
-      const gpd = saved?.global_proxy_disabled === "true";
-      setBaseDomain(bd); setDashboardHost(dh); setGlobalProxyDisabled(gpd);
-      setDraft({ baseDomain: bd, dashboardHost: dh, globalProxyDisabled: gpd });
+      const ad = saved?.acme_disabled === "true";
+      setBaseDomain(bd); setDashboardHost(dh); setAcmeDisabled(ad);
+      setDraft({ baseDomain: bd, dashboardHost: dh, acmeDisabled: ad });
       setNotice({ tone: "ok", text: "Saved. Caddy will route the dashboard host back to Relay, and new deploys without an explicit public host will auto-assign a subdomain." });
     } catch (err) {
       setNotice({ tone: "danger", text: err instanceof Error ? err.message : "Save failed" });
@@ -108,21 +108,21 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
           </Field>
         </div>
 
-        {/* Global proxy toggle */}
+        {/* ACME listener toggle */}
         <label className="flex items-center gap-3 cursor-pointer select-none">
           <div className="relative">
             <input
               type="checkbox"
               className="sr-only peer"
-              checked={draft.globalProxyDisabled}
-              onChange={(e) => setDraft((d) => ({ ...d, globalProxyDisabled: e.target.checked }))}
+              checked={draft.acmeDisabled}
+              onChange={(e) => setDraft((d) => ({ ...d, acmeDisabled: e.target.checked }))}
             />
             <div className="w-9 h-5 rounded-full border border-white/20 bg-white/[0.06] peer-checked:bg-red-500/80 peer-checked:border-red-500/60 transition-colors" />
             <div className="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white/50 peer-checked:translate-x-4 transition-transform" />
           </div>
           <div>
-            <div className="text-sm text-white font-medium">Disable global proxy</div>
-            <div className="text-xs text-white/40">Don&apos;t start the <code className="font-mono text-white/50">relay-global-proxy</code> Caddy container. Use this when port 80/443 is already in use by another process (e.g. an ACME server).</div>
+            <div className="text-sm text-white font-medium">Disable ACME listener</div>
+            <div className="text-xs text-white/40">Don&apos;t bind Relay&apos;s local ACME HTTP-01 listener on port 80. Use this when another ACME process already owns port 80.</div>
           </div>
         </label>
 
@@ -153,7 +153,8 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
             { title: "Auto subdomains", detail: `Set Base Domain here. New deploys auto-get {app}-{branch}.{domain}.` },
             { title: "Dashboard host", detail: "Set Dashboard Host to route the Relay admin through Caddy, e.g. admin.yourdomain.com." },
             { title: "Custom domain per app", detail: "Set Public Host in the app's Settings tab to override the auto-assigned subdomain." },
-            { title: "Caddy TLS", detail: "Relay runs a caddy:alpine container (relay-global-proxy) that terminates TLS and proxies to each app. Disable via the toggle above if port 80/443 is already bound." },
+            { title: "ACME listener", detail: "Relay can run a lightweight HTTP listener on :80 for ACME HTTP-01 challenge files and optional HTTP->HTTPS redirects." },
+            { title: "Caddy TLS", detail: "Relay runs a caddy:alpine container (relay-global-proxy) that terminates TLS and proxies to each app." },
             { title: "DNS requirement", detail: "Point your domain or wildcard (*.yourdomain.com) A record at this server's public IP." },
           ].map((row) => (
             <div key={row.title} className="border border-white/[0.06] rounded-lg px-4 py-3">

@@ -487,7 +487,7 @@ export async function getVersion(): Promise<VersionInfo> {
 export interface ServerConfig {
   base_domain?: string;
   dashboard_host?: string;
-  global_proxy_disabled?: string;
+  acme_disabled?: string;
   [key: string]: unknown;
 }
 
