@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getSession, logout, type SessionInfo } from "@/lib/api";
 
 interface AuthState {
@@ -13,7 +13,7 @@ interface AuthState {
 }
 
 const INITIAL: AuthState = {
-  loading: true,
+  loading: false,
   authed: false,
   user: null,
   setupAvailable: false,
@@ -23,17 +23,21 @@ const INITIAL: AuthState = {
 
 export function useAuth() {
   const [state, setState] = useState<AuthState>(INITIAL);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const refresh = () => {
-    setState((prev) => ({ ...prev, loading: true }));
-    // Use a 10-second timeout so the spinner never hangs indefinitely on a
-    // slow or temporarily unresponsive server.
-    const timeoutId = setTimeout(() => {
+  // Fetch session without showing the loading spinner (silent background check).
+  // Call withLoading=true only on the very first mount check.
+  const fetchSession = (withLoading: boolean) => {
+    if (withLoading) {
+      setState((prev) => ({ ...prev, loading: true }));
+    }
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    timeoutRef.current = setTimeout(() => {
       setState({ loading: false, authed: false, user: null, setupAvailable: false, legacyMode: false, cliMode: false });
-    }, 10_000);
+    }, 5_000);
     getSession()
       .then((session) => {
-        clearTimeout(timeoutId);
+        if (timeoutRef.current) clearTimeout(timeoutRef.current);
         setState({
           loading: false,
           authed: session.authed,
@@ -44,12 +48,18 @@ export function useAuth() {
         });
       })
       .catch(() => {
-        clearTimeout(timeoutId);
+        if (timeoutRef.current) clearTimeout(timeoutRef.current);
         setState({ loading: false, authed: false, user: null, setupAvailable: false, legacyMode: false, cliMode: false });
       });
   };
 
-  useEffect(() => { refresh(); }, []);
+  // After login/setup success, refresh silently — no spinner.
+  const refresh = () => fetchSession(false);
+
+  useEffect(() => {
+    fetchSession(true);
+    return () => { if (timeoutRef.current) clearTimeout(timeoutRef.current); };
+  }, []);
 
   const signOut = async () => {
     try {
