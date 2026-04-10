@@ -2,11 +2,11 @@
 
 Self-hosted deployment platform — sync changed files, auto-detect buildpacks, roll out containers. No GitHub Actions, no cloud platform required.
 
-| Component | What it does |
-|---|---|
-| **`relay`** | Node.js CLI — deploy from any machine |
-| **`relayd`** | Go agent — runs on your server, builds images, manages containers |
-| **`station`** | Go runtime — snapshot-based fast deployment for local/WSL2 targets |
+| Component     | What it does                                                                 |
+| ------------- | ---------------------------------------------------------------------------- |
+| **`relay`**   | Node.js CLI — deploy from any machine                                        |
+| **`relayd`**  | Go agent — runs on your server, builds images, manages containers            |
+| **`station`** | Experimental Go runtime — keep this secondary until the stable release lands |
 
 ---
 
@@ -24,7 +24,7 @@ npm install -g @relay-org/relay
 relay agent install
 ```
 
-Auto-detects your platform (Linux amd64/arm64, Windows) and downloads `relayd` + `station` from the latest GitHub Release into `~/.relay/bin/`. No Go required.
+Auto-detects your platform (Linux amd64/arm64, Windows) and downloads `relayd` plus the optional `station` runtime from the latest GitHub Release into `~/.relay/bin/`. No Go required.
 
 Add `~/.relay/bin` to your PATH — the command prints the exact line for your shell.
 
@@ -100,23 +100,25 @@ Add more without rebuilding `relayd` — see [Server-Side Buildpack Plugins](#se
 
 ## Config
 
-| File | Purpose |
-|---|---|
-| `.relay.json` | CLI connection defaults — url, token, app, env, branch |
+| File                | Purpose                                                     |
+| ------------------- | ----------------------------------------------------------- |
+| `.relay.json`       | CLI connection defaults — url, token, app, env, branch      |
 | `relay.config.json` | Build command overrides — install_cmd, build_cmd, start_cmd |
 
 Common flags (all commands): `--url` `--token` `--app` `--env` `--branch` `--dir` `--host-port` `--mode port|traefik` `--public-host`
+
+Supported lanes: `preview`, `dev`, `staging`, `prod`
 
 ---
 
 ## Runtime Engines
 
-| Engine | Best for |
-|---|---|
-| **Docker** | Production — full feature set on any host |
-| **Station** | Fast local / WSL2 — snapshot-based, instant rollout |
+| Engine      | Best for                                                            |
+| ----------- | ------------------------------------------------------------------- |
+| **Docker**  | Default and recommended — full feature set on any host              |
+| **Station** | Experimental local / WSL2 path — not the default production runtime |
 
-> **⚠️ Use Docker.** Station is under active development and is currently unstable — deploys can be slow or fail unexpectedly. When `relay init` asks which engine to use, pick **docker**. Do not switch to Station in the dashboard until a stable release is announced.
+> **⚠️ Use Docker.** Docker is Relay's default engine and the supported path for production, staging, dev, and preview lanes. Station is still experimental; keep it for local or WSL2 testing until a stable release is announced.
 
 Switch per app in the dashboard under **Settings → Runtime / Routing**.
 
@@ -130,11 +132,11 @@ Relay supports two auth modes:
 
 On first run with an empty `users` table, the dashboard prompts for setup. Create the first **owner** account, then add additional users from **Server → User Management**.
 
-| Role | Can deploy | Can manage secrets | Can manage users |
-|---|---|---|---|
-| `owner` | ✓ | ✓ | ✓ |
-| `deployer` | ✓ | ✓ | — |
-| `viewer` | — | — | — |
+| Role       | Can deploy | Can manage secrets | Can manage users |
+| ---------- | ---------- | ------------------ | ---------------- |
+| `owner`    | ✓          | ✓                  | ✓                |
+| `deployer` | ✓          | ✓                  | —                |
+| `viewer`   | —          | —                  | —                |
 
 Use `relay login` for browser-based CLI auth — opens a browser tab, you log in once, and the token is saved to `~/.relay-state.json`.
 
@@ -179,13 +181,13 @@ The key is hashed to 32 bytes (SHA-256) before use. Secrets written before this 
 
 Every significant action is recorded in `relay.db` and exposed at `GET /api/audit`:
 
-| Action | Trigger |
-|---|---|
+| Action           | Trigger                           |
+| ---------------- | --------------------------------- |
 | `deploy.trigger` | CLI deploy or GitHub webhook push |
-| `secret.set` | Secret created or updated |
-| `user.create` | New user account created |
-| `user.delete` | User account removed |
-| `user.role` | User role changed |
+| `secret.set`     | Secret created or updated         |
+| `user.create`    | New user account created          |
+| `user.delete`    | User account removed              |
+| `user.role`      | User role changed                 |
 
 The **Server → Activity Log** panel in the dashboard shows the last 100 entries with actor, target, and timestamp.
 
@@ -228,7 +230,7 @@ Sample: [`plugins/astro-static.json`](plugins/astro-static.json)
 ```
 relay-client/   Node.js CLI (relay)
 relayd/         Go agent (relayd) — HTTP API, dashboard, builds, orchestration
-station/        Go runtime (station) — snapshot engine, WSL2 sidecar, desktop UI
+station/        Experimental Go runtime (station) — snapshot engine for local / WSL2 workflows
 plugins/        Sample buildpack plugins
 smoke-apps/     Framework smoke test fixtures
 docs/           Roadmap and release notes

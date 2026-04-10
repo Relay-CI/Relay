@@ -1,5 +1,3 @@
-
-
 # relay — Relay CLI
 
 [![npm](https://img.shields.io/npm/v/@relay-org/relay)](https://www.npmjs.com/package/@relay-org/relay)
@@ -10,7 +8,7 @@ Zero-dependency Node 18+ CLI for the [Relay](https://github.com/Relay-CI/Relay) 
 - Syncs only changed files (sha256 diff)
 - Auto-detects buildpacks (Node, Go, Python, Rust, .NET, Java, C/C++, WASM, static)
 - Streams build + deploy logs in real time
-- Downloads `relayd` + `station` agent binaries automatically
+- Downloads `relayd` plus the optional `station` runtime automatically
 
 ## Requirements
 
@@ -40,7 +38,7 @@ relay init
 relay deploy --stream
 ```
 
-> **⚠️ Engine selection:** when `relay init` asks which engine to use, choose **docker**. The Station engine is under active development and is currently unstable — deploys may be slow or fail. Do not switch to Station in the dashboard until a stable release is announced.
+> **⚠️ Engine selection:** when `relay init` asks which engine to use, choose **docker**. Docker is Relay's default engine and the supported path for production lanes. Station is still experimental — keep it as a secondary local/WSL workflow until a stable release is announced.
 
 ## Commands
 
@@ -56,7 +54,7 @@ relay start / stop / restart       Control a running container
 relay secrets list/add/rm          Manage app secrets
 relay plugin list/install/remove   Manage server-side buildpack plugins
 relay version                      Show relay/relayd/station versions
-relay agent install [--version v]  Download relayd + station binaries
+relay agent install [--version v]  Download relayd and the optional station runtime
 relay agent update                 Update relayd + station to latest release
 relay agent status                 Show installed/latest versions and outdated status
 ```
@@ -90,10 +88,10 @@ relay deploy \
 
 These override defaults from config files / agent buildpacks:
 
-* `--install-cmd "npm ci"`
-* `--build-cmd "npm run build"`
-* `--start-cmd "npm start"`
-* `--service-port 3000`
+- `--install-cmd "npm ci"`
+- `--build-cmd "npm run build"`
+- `--start-cmd "npm start"`
+- `--service-port 3000`
 
 ### `init`
 
@@ -121,7 +119,7 @@ relay plugin remove astro-static
 
 ### `agent install`
 
-Downloads the correct `relayd` + `station` binaries for your platform from GitHub Releases:
+Downloads the correct `relayd` bundle for your platform from GitHub Releases, including the experimental `station` runtime when available:
 
 ```bash
 relay agent install           # latest
@@ -149,19 +147,19 @@ Shows component versions in one place:
 
 ## Flags
 
-| Flag             | Required | Example                 | Notes                                                   |
-| ---------------- | -------: | ----------------------- | ------------------------------------------------------- |
-| `--url`          |  usually | `http://127.0.0.1:8080` | Relay Agent base URL                                    |
-| `--token`        |      yes | `abcd...`               | X-Relay-Token / Bearer auth                             |
-| `--app`          |      yes | `moneypasar`            | Workspace key                                           |
-| `--env`          |      yes | `preview` or `prod`     | Determines default host port behavior on agent          |
-| `--branch`       |      yes | `main`                  | Included in workspace key                               |
-| `--dir`          |      yes | `.`                     | Local folder to deploy                                  |
-| `--mode`         |       no | `port`                  | Agent supports `port` (and can later support `traefik`) |
-| `--host-port`    |       no | `3001`                  | Host port mapping (mode=port)                           |
-| `--service-port` |       no | `3000`                  | Container port (if your app doesn’t use defaults)       |
-| `--public-host`  |       no | `demo.local`            | Stored as metadata (useful with a reverse proxy)        |
-| `--stream`       |       no | `true`                  | Stream logs via SSE                                     |
+| Flag             | Required | Example                                | Notes                                                   |
+| ---------------- | -------: | -------------------------------------- | ------------------------------------------------------- |
+| `--url`          |  usually | `http://127.0.0.1:8080`                | Relay Agent base URL                                    |
+| `--token`        |      yes | `abcd...`                              | X-Relay-Token / Bearer auth                             |
+| `--app`          |      yes | `moneypasar`                           | Workspace key                                           |
+| `--env`          |      yes | `preview`, `dev`, `staging`, or `prod` | Determines the lane policy used by the agent            |
+| `--branch`       |      yes | `main`                                 | Included in workspace key                               |
+| `--dir`          |      yes | `.`                                    | Local folder to deploy                                  |
+| `--mode`         |       no | `port`                                 | Agent supports `port` (and can later support `traefik`) |
+| `--host-port`    |       no | `3001`                                 | Host port mapping (mode=port)                           |
+| `--service-port` |       no | `3000`                                 | Container port (if your app doesn’t use defaults)       |
+| `--public-host`  |       no | `demo.local`                           | Stored as metadata (useful with a reverse proxy)        |
+| `--stream`       |       no | `true`                                 | Stream logs via SSE                                     |
 
 ## Config resolution order
 
@@ -179,14 +177,14 @@ The CLI merges settings in this order (highest priority first):
 
 The CLI walks files under `--dir` and ignores common heavy/build output folders (must match the agent’s ignore list):
 
-* `node_modules`, `.git`, `.next`, `dist`, `.turbo`, `coverage`, `.relay`, `cache`, `bin`, `obj`, `target`
+- `node_modules`, `.git`, `.next`, `dist`, `.turbo`, `coverage`, `.relay`, `cache`, `bin`, `obj`, `target`
 
 It sends a manifest containing `{path, size, mtime, sha256}` and uploads only the files the agent requests.
 
 ## Security notes
 
-* Treat the Relay token like a password. Don’t commit it.
-* By default, the agent may be configured with permissive CORS and broad local access—keep the agent bound to `127.0.0.1` unless you’ve hardened it behind a proxy.
+- Treat the Relay token like a password. Don’t commit it.
+- By default, the agent may be configured with permissive CORS and broad local access—keep the agent bound to `127.0.0.1` unless you’ve hardened it behind a proxy.
 
 ## Troubleshooting
 
@@ -201,7 +199,9 @@ node relay-deploy.js init --url http://127.0.0.1:8080 --token YOURTOKEN --app my
 ### Upload is slow on big repos
 
 Right now the manifest computes sha256 for every file. Later on will improve.
+
 ## License
+
 Copyright 2026 babymonie
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:

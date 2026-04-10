@@ -161,3 +161,55 @@ func TestHandleAuthCLIStartUsesExistingSession(t *testing.T) {
 		t.Fatalf("expected cli redirect for callback port, got %#v", body)
 	}
 }
+
+func TestHandleEdgeAuthzDefaultsDevLaneToRelayLogin(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	if err := s.saveAppState(&AppState{App: "demo", Env: EnvDev, Branch: "main"}); err != nil {
+		t.Fatalf("save app state: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/edge/authz?app=demo&env=dev&branch=main", nil)
+	rec := httptest.NewRecorder()
+	s.handleEdgeAuthz(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthenticated dev lane to require relay login, got %d", rec.Code)
+	}
+
+	token := createUserSessionForTest(t, s, "owner-user", "owner")
+	authedReq := httptest.NewRequest(http.MethodGet, "/api/edge/authz?app=demo&env=dev&branch=main", nil)
+	authedReq.AddCookie(&http.Cookie{Name: dashboardSessionCookie, Value: token})
+	authedRec := httptest.NewRecorder()
+	s.handleEdgeAuthz(authedRec, authedReq)
+	if authedRec.Code != http.StatusNoContent {
+		t.Fatalf("expected authenticated dev lane request to pass, got %d", authedRec.Code)
+	}
+}
+
+func TestHandleEdgeAuthzAllowsIPAllowlist(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	if err := s.saveAppState(&AppState{
+		App:          "demo",
+		Env:          EnvStaging,
+		Branch:       "main",
+		AccessPolicy: AccessPolicyIPAllowlist,
+		IPAllowlist:  "203.0.113.0/24",
+	}); err != nil {
+		t.Fatalf("save app state: %v", err)
+	}
+
+	allowedReq := httptest.NewRequest(http.MethodGet, "/api/edge/authz?app=demo&env=staging&branch=main", nil)
+	allowedReq.Header.Set("X-Forwarded-For", "203.0.113.25")
+	allowedRec := httptest.NewRecorder()
+	s.handleEdgeAuthz(allowedRec, allowedReq)
+	if allowedRec.Code != http.StatusNoContent {
+		t.Fatalf("expected allowlisted IP to pass, got %d", allowedRec.Code)
+	}
+
+	blockedReq := httptest.NewRequest(http.MethodGet, "/api/edge/authz?app=demo&env=staging&branch=main", nil)
+	blockedReq.Header.Set("X-Forwarded-For", "198.51.100.10")
+	blockedRec := httptest.NewRecorder()
+	s.handleEdgeAuthz(blockedRec, blockedReq)
+	if blockedRec.Code != http.StatusForbidden {
+		t.Fatalf("expected non-allowlisted IP to be blocked, got %d", blockedRec.Code)
+	}
+}

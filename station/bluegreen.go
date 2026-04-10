@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -30,6 +31,7 @@ type SlotRecord struct {
 	TrafficMode     string `json:"traffic_mode,omitempty"`
 	CookieName      string `json:"cookie_name,omitempty"`
 	PublicHost      string `json:"public_host,omitempty"`
+	AuthURL         string `json:"auth_url,omitempty"`
 
 	Upstream string `json:"upstream,omitempty"`
 	Blue     string `json:"blue,omitempty"`
@@ -47,6 +49,7 @@ type proxyArgs struct {
 	TrafficMode     string
 	CookieName      string
 	PublicHost      string
+	AuthURL         string
 	ClearStandby    bool
 	ClearPublicHost bool
 }
@@ -119,6 +122,7 @@ func normalizeSlotRecord(rec *SlotRecord) *SlotRecord {
 		rec.CookieName = "station_slot"
 	}
 	rec.PublicHost = strings.TrimSpace(rec.PublicHost)
+	rec.AuthURL = strings.TrimSpace(rec.AuthURL)
 	if rec.StandbySlot == rec.ActiveSlot {
 		rec.StandbySlot = ""
 		rec.StandbyUpstream = ""
@@ -218,6 +222,10 @@ func parseProxyArgs(args []string) proxyArgs {
 			cfg.PublicHost = next()
 		case strings.HasPrefix(arg, "--public-host="):
 			cfg.PublicHost = strings.TrimPrefix(arg, "--public-host=")
+		case arg == "--auth-url":
+			cfg.AuthURL = next()
+		case strings.HasPrefix(arg, "--auth-url="):
+			cfg.AuthURL = strings.TrimPrefix(arg, "--auth-url=")
 		case arg == "--clear-standby":
 			cfg.ClearStandby = true
 		case arg == "--clear-public-host":
@@ -245,6 +253,41 @@ func stripProxyHostPort(host string) string {
 		return strings.ToLower(parsed.Hostname())
 	}
 	return host
+}
+
+func proxyAuthorizeRequest(authURL string, r *http.Request) (int, string) {
+	authURL = strings.TrimSpace(authURL)
+	if authURL == "" {
+		return http.StatusNoContent, ""
+	}
+	req, err := http.NewRequest(http.MethodGet, authURL, nil)
+	if err != nil {
+		return http.StatusBadGateway, "invalid relay auth url"
+	}
+	req.Header.Set("Cookie", r.Header.Get("Cookie"))
+	req.Header.Set("Authorization", r.Header.Get("Authorization"))
+	req.Header.Set("X-Relay-Token", r.Header.Get("X-Relay-Token"))
+	if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
+		req.Header.Set("X-Forwarded-For", xff)
+	} else {
+		req.Header.Set("X-Forwarded-For", r.RemoteAddr)
+	}
+	req.Header.Set("X-Forwarded-Host", r.Host)
+	req.Header.Set("X-Original-Uri", r.URL.RequestURI())
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		return http.StatusBadGateway, "relay auth unavailable"
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return http.StatusNoContent, ""
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	msg := strings.TrimSpace(string(body))
+	if msg == "" {
+		msg = "request blocked"
+	}
+	return resp.StatusCode, msg
 }
 
 func proxyTargetForRequest(rec *SlotRecord, r *http.Request) proxyTargetMeta {
@@ -365,6 +408,10 @@ func runProxyDaemon() {
 			http.NotFound(w, r)
 			return
 		}
+		if status, msg := proxyAuthorizeRequest(cfg.AuthURL, r); status != http.StatusNoContent {
+			http.Error(w, msg, status)
+			return
+		}
 		proxy.ServeHTTP(w, r)
 	})
 
@@ -408,6 +455,7 @@ func cmdProxyStart(cfg proxyArgs) {
 		TrafficMode:     firstProxyValue(normalizeProxyTrafficMode(cfg.TrafficMode), "edge"),
 		CookieName:      firstProxyValue(strings.TrimSpace(cfg.CookieName), "station_slot"),
 		PublicHost:      strings.TrimSpace(cfg.PublicHost),
+		AuthURL:         strings.TrimSpace(cfg.AuthURL),
 	})
 	if err := saveSlotRecord(rec); err != nil {
 		die("save proxy config: %v", err)
@@ -460,6 +508,9 @@ func cmdProxySwap(cfg proxyArgs) {
 	} else if cfg.PublicHost != "" {
 		rec.PublicHost = strings.TrimSpace(cfg.PublicHost)
 	}
+	if cfg.AuthURL != "" {
+		rec.AuthURL = strings.TrimSpace(cfg.AuthURL)
+	}
 	if err := saveSlotRecord(rec); err != nil {
 		die("save proxy config: %v", err)
 	}
@@ -508,4 +559,3 @@ func cmdProxyList() {
 		fmt.Printf("%-24s %-6d %-22s %-22s %-8s %-7s\n", rec.App, rec.ProxyPort, rec.ActiveUpstream, rec.StandbyUpstream, rec.TrafficMode, status)
 	}
 }
-

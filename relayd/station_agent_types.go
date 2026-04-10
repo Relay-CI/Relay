@@ -36,8 +36,7 @@ type agentProxyReq struct {
 	TrafficMode     string `json:"traffic_mode,omitempty"`
 	CookieName      string `json:"cookie_name,omitempty"`
 	PublicHost      string `json:"public_host,omitempty"`
+	AuthURL         string `json:"auth_url,omitempty"`
 	ClearStandby    bool   `json:"clear_standby,omitempty"`
 	ClearPublicHost bool   `json:"clear_public_host,omitempty"`
 }
-
-

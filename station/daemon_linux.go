@@ -93,6 +93,7 @@ type daemonProxyReq struct {
 	TrafficMode     string `json:"traffic_mode,omitempty"`
 	CookieName      string `json:"cookie_name,omitempty"`
 	PublicHost      string `json:"public_host,omitempty"`
+	AuthURL         string `json:"auth_url,omitempty"`
 	ClearStandby    bool   `json:"clear_standby,omitempty"`
 	ClearPublicHost bool   `json:"clear_public_host,omitempty"`
 }
@@ -244,9 +245,10 @@ func daemonSnapshotSave(w http.ResponseWriter, r *http.Request) {
 }
 
 // daemonSnapshotByName handles:
-//   GET    /snapshot/<name>            — 200 if exists, 404 if not
-//   GET    /snapshot/<name>/manifest   — return manifest JSON
-//   DELETE /snapshot/<name>            — remove snapshot
+//
+//	GET    /snapshot/<name>            — 200 if exists, 404 if not
+//	GET    /snapshot/<name>/manifest   — return manifest JSON
+//	DELETE /snapshot/<name>            — remove snapshot
 func daemonSnapshotByName(w http.ResponseWriter, r *http.Request) {
 	tail := strings.TrimPrefix(r.URL.Path, "/snapshot/")
 
@@ -483,7 +485,9 @@ func buildContainerRecord(id string, req daemonRunContainerReq) (*ContainerRecor
 		return nil, fmt.Errorf("image rootfs: %w", err)
 	}
 
-	cleanupRootfs := func() { releaseImageRootfs(&ContainerRecord{WorkDir: imageWorkPath(id, isOverlay), OverlayActive: isOverlay}) }
+	cleanupRootfs := func() {
+		releaseImageRootfs(&ContainerRecord{WorkDir: imageWorkPath(id, isOverlay), OverlayActive: isOverlay})
+	}
 
 	port := req.Port
 	if port == 0 {
@@ -660,6 +664,7 @@ func daemonProxyStart(w http.ResponseWriter, r *http.Request) {
 		TrafficMode:     firstProxyValue(normalizeProxyTrafficMode(req.TrafficMode), "edge"),
 		CookieName:      firstProxyValue(strings.TrimSpace(req.CookieName), "station_slot"),
 		PublicHost:      strings.TrimSpace(req.PublicHost),
+		AuthURL:         strings.TrimSpace(req.AuthURL),
 	})
 	if err := saveSlotRecord(rec); err != nil {
 		http.Error(w, "save proxy config: "+err.Error(), http.StatusInternalServerError)
@@ -728,6 +733,9 @@ func applyProxySwap(rec *SlotRecord, req daemonProxyReq) {
 	if cookie := strings.TrimSpace(req.CookieName); cookie != "" {
 		rec.CookieName = cookie
 	}
+	if authURL := strings.TrimSpace(req.AuthURL); authURL != "" {
+		rec.AuthURL = authURL
+	}
 	applyProxyPublicHost(rec, req)
 }
 
@@ -773,5 +781,3 @@ func daemonProxyStop(w http.ResponseWriter, r *http.Request) {
 	_ = os.RemoveAll(proxyDir(req.App))
 	w.WriteHeader(http.StatusOK)
 }
-
-

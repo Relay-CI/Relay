@@ -14,7 +14,7 @@ const (
 func normalizeEngine(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "":
-		return EngineStation
+		return EngineDocker
 	case EngineDocker:
 		return EngineDocker
 	case EngineStation, "vessel":
@@ -37,10 +37,10 @@ func firstNonEmptyEngine(values ...string) string {
 
 // detectDefaultEngine returns the default engine when none is configured.
 //
-// Relay defaults to the Station runtime across platforms. Docker remains
-// available when explicitly selected in app configuration.
+// Relay defaults to Docker until the Station runtime is stable enough to be the
+// recommended production path.
 func detectDefaultEngine() string {
-	return EngineStation
+	return EngineDocker
 }
 
 // ─── capability queries ───────────────────────────────────────────────────────
