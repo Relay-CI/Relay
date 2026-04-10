@@ -3208,8 +3208,13 @@ func main() {
 		panic(err)
 	}
 	_, _ = db.Exec("PRAGMA journal_mode=WAL;")
-	_, _ = db.Exec("PRAGMA busy_timeout=5000;")
-	db.SetMaxOpenConns(1)
+	_, _ = db.Exec("PRAGMA busy_timeout=10000;")
+	// WAL mode supports multiple concurrent readers alongside a single writer.
+	// Keeping MaxOpenConns=1 would serialize every DB call through a single Go
+	// connection, so any slow query (e.g. analytics UPDATE) blocks login/session
+	// checks indefinitely. Allow multiple connections; SQLite serialises writes.
+	db.SetMaxOpenConns(0) // unlimited — WAL handles concurrency
+	db.SetMaxIdleConns(5)
 	if err := migrateDB(db); err != nil {
 		panic(err)
 	}
@@ -7467,13 +7472,32 @@ func (s *Server) resolveAnalyticsCountries() {
 		return
 	}
 
-	// Filter out already-cached IPs.
+	// Filter out already-cached IPs in a single IN query.
 	uncached := ips[:0]
-	for _, ip := range ips {
-		var code string
-		_ = s.db.QueryRow(`SELECT country_code FROM ip_country_cache WHERE ip=?`, ip).Scan(&code)
-		if code == "" {
-			uncached = append(uncached, ip)
+	if len(ips) > 0 {
+		placeholders := make([]string, len(ips))
+		args := make([]any, len(ips))
+		for i, ip := range ips {
+			placeholders[i] = "?"
+			args[i] = ip
+		}
+		cachedRows, err2 := s.db.Query(
+			`SELECT ip FROM ip_country_cache WHERE ip IN (`+strings.Join(placeholders, ",")+`) AND country_code != ''`,
+			args...)
+		cached := map[string]bool{}
+		if err2 == nil {
+			for cachedRows.Next() {
+				var ip string
+				if cachedRows.Scan(&ip) == nil {
+					cached[ip] = true
+				}
+			}
+			cachedRows.Close()
+		}
+		for _, ip := range ips {
+			if !cached[ip] {
+				uncached = append(uncached, ip)
+			}
 		}
 	}
 
@@ -8900,6 +8924,8 @@ func migrateDB(db *sql.DB) error {
 		country_name TEXT NOT NULL DEFAULT ''
 	)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_analytics_ts ON analytics_events(ts)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_analytics_ip ON analytics_events(remote_ip)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_analytics_cc ON analytics_events(country_code, remote_ip)`)
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS ip_country_cache (
 		ip TEXT PRIMARY KEY,
 		country_code TEXT NOT NULL DEFAULT '',
