@@ -194,10 +194,16 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith("--")) {
-      const k = a.slice(2);
-      const v =
-        argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[++i] : "true";
-      out[k] = v;
+      const raw = a.slice(2);
+      // Support both --key value and --key=value styles
+      const eqIdx = raw.indexOf("=");
+      if (eqIdx !== -1) {
+        out[raw.slice(0, eqIdx)] = raw.slice(eqIdx + 1);
+      } else {
+        const v =
+          argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[++i] : "true";
+        out[raw] = v;
+      }
     } else {
       out._.push(a);
     }
@@ -1079,7 +1085,7 @@ ${c.bold}COMMANDS${c.reset}
     --app  --env  --branch
 
   ${c.cyan}logs${c.reset} <deploy-id>             Print or stream logs for a deploy
-    --stream                 Stream live (SSE)
+    --no-stream              Print logs without streaming (fetch & exit)
 
   ${c.cyan}list${c.reset}                         List recent deploys
     --app                    Filter by app name
@@ -1234,7 +1240,7 @@ async function main() {
       if (args.engine || process.env.RELAY_ENGINE)
         cfgOut.engine = args.engine || process.env.RELAY_ENGINE;
       if (args.dir) cfgOut.dir = args.dir;
-      await fsp.writeFile(cfgPath, JSON.stringify(cfgOut, null, 2), "utf8");
+      saveRelayConfig(cfgOut, process.cwd());
       ok(`Wrote ${cfgPath}`);
     } else {
       // Interactive wizard.
@@ -1257,40 +1263,40 @@ async function main() {
       existingCfg.url ||
       (await prompt("Server URL", "http://127.0.0.1:8080"))
     ).replace(/\/+$/, "");
-    // Find a free port for the local callback server.
-    const callbackPort = await new Promise((resolve) => {
-      const srv = http.createServer();
-      srv.listen(0, "127.0.0.1", () => {
-        const p = srv.address().port;
-        srv.close(() => resolve(p));
-      });
+    // Start the local callback server on a random port (port 0 lets the OS
+    // pick a free one).  Using a single server avoids the TOCTOU race of the
+    // old probe-close-rebind pattern.
+    let authCodeResolve, authCodeReject;
+    const authCodePromise = new Promise((res, rej) => {
+      authCodeResolve = res;
+      authCodeReject = rej;
     });
-    // Start local callback server — waits for browser to redirect back with code.
-    const authCodePromise = new Promise((resolve, reject) => {
-      const srv = http.createServer((req, res) => {
-        const u = new URL(req.url, `http://127.0.0.1:${callbackPort}`);
-        const code = u.searchParams.get("code");
-        const user = u.searchParams.get("user");
-        const role = u.searchParams.get("role");
-        res.writeHead(200, { "Content-Type": "text/html" });
-        res.end(renderCLILoginCallbackPage(user, role));
-        srv.close();
-        if (code) resolve(code);
-        else reject(new Error("no code in callback"));
-      });
-      srv.listen(callbackPort, "127.0.0.1");
-      srv.on("error", (err) => {
-        srv.close();
-        reject(new Error(`callback server error: ${err.message}`));
-      });
-      setTimeout(
-        () => {
-          srv.close();
-          reject(new Error("login timed out"));
-        },
-        5 * 60 * 1000,
-      );
+    const callbackSrv = http.createServer((req, cbRes) => {
+      const u = new URL(req.url, `http://127.0.0.1`);
+      const code = u.searchParams.get("code");
+      const user = u.searchParams.get("user");
+      const role = u.searchParams.get("role");
+      cbRes.writeHead(200, { "Content-Type": "text/html" });
+      cbRes.end(renderCLILoginCallbackPage(user, role));
+      callbackSrv.close();
+      if (code) authCodeResolve(code);
+      else authCodeReject(new Error("no code in callback"));
     });
+    callbackSrv.on("error", (srvErr) => {
+      callbackSrv.close();
+      authCodeReject(new Error(`callback server error: ${srvErr.message}`));
+    });
+    await new Promise((res, rej) =>
+      callbackSrv.listen(0, "127.0.0.1", res).on("error", rej),
+    );
+    const callbackPort = callbackSrv.address().port;
+    setTimeout(
+      () => {
+        callbackSrv.close();
+        authCodeReject(new Error("login timed out"));
+      },
+      5 * 60 * 1000,
+    );
 
     const loginUrl = `${serverUrl}/dashboard/?cli=1&port=${callbackPort}`;
     console.log(`\n  ${c.bold}Opening browser to log in…${c.reset}`);

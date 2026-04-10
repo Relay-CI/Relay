@@ -8462,7 +8462,7 @@ func (s *Server) createCLIAuthResponse(userID string, username string, role stri
 	}
 	return map[string]any{
 		"cli_code": code,
-		"cli_redirect": fmt.Sprintf("http://localhost:%d/callback?code=%s&user=%s&role=%s",
+		"cli_redirect": fmt.Sprintf("http://127.0.0.1:%d/callback?code=%s&user=%s&role=%s",
 			cliPort, code, url.QueryEscape(username), url.QueryEscape(role)),
 	}, nil
 }
