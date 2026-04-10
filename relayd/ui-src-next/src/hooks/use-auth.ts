@@ -26,8 +26,14 @@ export function useAuth() {
 
   const refresh = () => {
     setState((prev) => ({ ...prev, loading: true }));
+    // Use a 10-second timeout so the spinner never hangs indefinitely on a
+    // slow or temporarily unresponsive server.
+    const timeoutId = setTimeout(() => {
+      setState({ loading: false, authed: false, user: null, setupAvailable: false, legacyMode: false, cliMode: false });
+    }, 10_000);
     getSession()
       .then((session) => {
+        clearTimeout(timeoutId);
         setState({
           loading: false,
           authed: session.authed,
@@ -38,6 +44,7 @@ export function useAuth() {
         });
       })
       .catch(() => {
+        clearTimeout(timeoutId);
         setState({ loading: false, authed: false, user: null, setupAvailable: false, legacyMode: false, cliMode: false });
       });
   };

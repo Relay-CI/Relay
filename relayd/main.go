@@ -8648,7 +8648,7 @@ func (s *Server) withCORS(next http.Handler) http.HandlerFunc {
 				w.Header().Add("Vary", "Origin")
 				w.Header().Set("Access-Control-Allow-Credentials", "true")
 			}
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Relay-Token")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Relay-Token, X-Requested-With")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		}
 		if r.Method == http.MethodOptions {
