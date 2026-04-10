@@ -157,7 +157,7 @@ func TestHandleAuthCLIStartUsesExistingSession(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 	redirect, _ := body["cli_redirect"].(string)
-	if !strings.Contains(redirect, "http://localhost:52702/callback?code=") {
+	if !strings.Contains(redirect, "http://127.0.0.1:52702/callback?code=") {
 		t.Fatalf("expected cli redirect for callback port, got %#v", body)
 	}
 }
