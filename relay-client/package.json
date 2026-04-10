@@ -1,6 +1,6 @@
 {
   "name": "@relay-org/relay",
-  "version": "0.1.45",
+  "version": "0.1.46",
   "description": "Relay deploy CLI — sync and deploy apps to a self-hosted Relay agent",
   "type": "commonjs",
   "bin": {
