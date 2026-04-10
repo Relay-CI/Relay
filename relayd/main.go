@@ -7693,10 +7693,22 @@ func (s *Server) startACMEListener() {
 	acmeMux.Handle("/.well-known/acme-challenge/",
 		http.StripPrefix("/.well-known/acme-challenge/",
 			http.FileServer(http.Dir(s.acmeWebroot))))
-	// Redirect all other plain-HTTP traffic to HTTPS.
+	// Redirect plain-HTTP traffic to HTTPS only when HTTPS is actually
+	// configured.  Without this guard, local/dev installs with no domain
+	// configured get stuck in an infinite redirect loop.
+	// Enable by setting RELAY_HTTPS_REDIRECT=1 or by configuring a base
+	// domain or dashboard host (which implies TLS is in use via Caddy).
 	acmeMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		target := "https://" + r.Host + r.URL.RequestURI()
-		http.Redirect(w, r, target, http.StatusMovedPermanently)
+		httpsRedirect := getenv("RELAY_HTTPS_REDIRECT", "") != "" ||
+			s.serverBaseDomain() != "" ||
+			s.serverDashboardHost() != ""
+		if httpsRedirect {
+			target := "https://" + r.Host + r.URL.RequestURI()
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+			return
+		}
+		// No HTTPS configured: pass non-challenge traffic through without redirect.
+		http.NotFound(w, r)
 	})
 
 	srv := &http.Server{
@@ -8152,9 +8164,12 @@ func (s *Server) handleDashboardSession(w http.ResponseWriter, r *http.Request) 
 				writeJSON(w, 200, map[string]any{"authenticated": true, "legacy_mode": true})
 				return
 			}
+			// No users in DB: always send the user through account setup regardless
+			// of whether token.txt exists. Token auth still works for API/CLI
+			// bearer-token calls; it just doesn't appear as a login option here.
 			writeJSON(w, 200, map[string]any{
 				"setup_required": true,
-				"legacy_mode":    strings.TrimSpace(s.apiToken) != "",
+				"legacy_mode":    false,
 			})
 			return
 		}
