@@ -1118,6 +1118,20 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   let cmd = args._[0];
 
+  // Allow positional env/branch shorthands for deploy-family commands:
+  //   relay deploy dev           → --env dev
+  //   relay deploy dev main      → --env dev --branch main
+  //   relay status prod          → --env prod
+  //   relay rollback prod main   → --env prod --branch main
+  //   etc.
+  const ENV_POSITIONAL_CMDS = new Set([
+    "deploy", "status", "rollback", "start", "stop", "restart", "list", "pull",
+  ]);
+  if (ENV_POSITIONAL_CMDS.has(cmd)) {
+    if (args._[1] && !args.env) args.env = args._[1];
+    if (args._[2] && !args.branch) args.branch = args._[2];
+  }
+
   if (!cmd && args.version === "true") {
     cmd = "version";
   }
@@ -1462,6 +1476,8 @@ async function main() {
       const limit = Number(args.limit) || 20;
       let rows = Array.isArray(deploys) ? deploys : [];
       if (args.app) rows = rows.filter((d) => d.app === args.app);
+      if (args.env) rows = rows.filter((d) => d.env === args.env);
+      if (args.branch) rows = rows.filter((d) => d.branch === args.branch);
       rows = rows.slice(0, limit);
       if (!rows.length) {
         info("No deploys found");
