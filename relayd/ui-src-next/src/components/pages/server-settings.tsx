@@ -17,7 +17,8 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
   const [baseDomain, setBaseDomain] = useState("");
   const [dashboardHost, setDashboardHost] = useState("");
-  const [draft, setDraft] = useState({ baseDomain: "", dashboardHost: "" });
+  const [globalProxyDisabled, setGlobalProxyDisabled] = useState(false);
+  const [draft, setDraft] = useState({ baseDomain: "", dashboardHost: "", globalProxyDisabled: false });
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ tone: "ok" | "danger"; text: string } | null>(null);
 
@@ -27,8 +28,9 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
       getServerConfig().then((data) => {
         const bd = data?.base_domain ?? "";
         const dh = data?.dashboard_host ?? "";
-        setBaseDomain(bd); setDashboardHost(dh);
-        setDraft({ baseDomain: bd, dashboardHost: dh });
+        const gpd = data?.global_proxy_disabled === "true";
+        setBaseDomain(bd); setDashboardHost(dh); setGlobalProxyDisabled(gpd);
+        setDraft({ baseDomain: bd, dashboardHost: dh, globalProxyDisabled: gpd });
       }).catch(() => {});
     }
   }, [isOwner]);
@@ -37,17 +39,22 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
     return <div className="flex items-center justify-center h-full text-white/30 text-sm">Owner access required</div>;
   }
 
-  const dirty = draft.baseDomain !== baseDomain || draft.dashboardHost !== dashboardHost;
+  const dirty = draft.baseDomain !== baseDomain || draft.dashboardHost !== dashboardHost || draft.globalProxyDisabled !== globalProxyDisabled;
   const exampleHost = draft.baseDomain ? `myapp-main.${draft.baseDomain}` : "myapp-main.example.com";
 
   async function save() {
     setBusy(true); setNotice(null);
     try {
-      const saved = await saveServerConfig({ base_domain: draft.baseDomain, dashboard_host: draft.dashboardHost });
+      const saved = await saveServerConfig({
+        base_domain: draft.baseDomain,
+        dashboard_host: draft.dashboardHost,
+        global_proxy_disabled: draft.globalProxyDisabled ? "true" : "",
+      });
       const bd = saved?.base_domain ?? "";
       const dh = saved?.dashboard_host ?? "";
-      setBaseDomain(bd); setDashboardHost(dh);
-      setDraft({ baseDomain: bd, dashboardHost: dh });
+      const gpd = saved?.global_proxy_disabled === "true";
+      setBaseDomain(bd); setDashboardHost(dh); setGlobalProxyDisabled(gpd);
+      setDraft({ baseDomain: bd, dashboardHost: dh, globalProxyDisabled: gpd });
       setNotice({ tone: "ok", text: "Saved. Caddy will route the dashboard host back to Relay, and new deploys without an explicit public host will auto-assign a subdomain." });
     } catch (err) {
       setNotice({ tone: "danger", text: err instanceof Error ? err.message : "Save failed" });
@@ -101,6 +108,24 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
           </Field>
         </div>
 
+        {/* Global proxy toggle */}
+        <label className="flex items-center gap-3 cursor-pointer select-none">
+          <div className="relative">
+            <input
+              type="checkbox"
+              className="sr-only peer"
+              checked={draft.globalProxyDisabled}
+              onChange={(e) => setDraft((d) => ({ ...d, globalProxyDisabled: e.target.checked }))}
+            />
+            <div className="w-9 h-5 rounded-full border border-white/20 bg-white/[0.06] peer-checked:bg-red-500/80 peer-checked:border-red-500/60 transition-colors" />
+            <div className="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white/50 peer-checked:translate-x-4 transition-transform" />
+          </div>
+          <div>
+            <div className="text-sm text-white font-medium">Disable global proxy</div>
+            <div className="text-xs text-white/40">Don&apos;t start the <code className="font-mono text-white/50">relay-global-proxy</code> Caddy container. Use this when port 80/443 is already in use by another process (e.g. an ACME server).</div>
+          </div>
+        </label>
+
         <p className="text-xs text-white/40 leading-relaxed">
           Apps deployed without an explicit <code className="font-mono text-white/50">public_host</code> get an auto-generated subdomain:{" "}
           <code className="font-mono text-white/50">{exampleHost}</code>. Relay starts a Caddy reverse proxy that handles TLS automatically.
@@ -128,7 +153,7 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
             { title: "Auto subdomains", detail: `Set Base Domain here. New deploys auto-get {app}-{branch}.{domain}.` },
             { title: "Dashboard host", detail: "Set Dashboard Host to route the Relay admin through Caddy, e.g. admin.yourdomain.com." },
             { title: "Custom domain per app", detail: "Set Public Host in the app's Settings tab to override the auto-assigned subdomain." },
-            { title: "Caddy TLS", detail: "Relay runs a caddy:alpine container (relay-global-proxy) that terminates TLS and proxies to each app." },
+            { title: "Caddy TLS", detail: "Relay runs a caddy:alpine container (relay-global-proxy) that terminates TLS and proxies to each app. Disable via the toggle above if port 80/443 is already bound." },
             { title: "DNS requirement", detail: "Point your domain or wildcard (*.yourdomain.com) A record at this server's public IP." },
           ].map((row) => (
             <div key={row.title} className="border border-white/[0.06] rounded-lg px-4 py-3">
