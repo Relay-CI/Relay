@@ -49,9 +49,10 @@ interface LoginPageProps {
   legacyMode?: boolean;
   showSetupOption?: boolean;
   onShowSetup?: () => void;
+  onSuccess?: () => void;
 }
 
-export function LoginPage({ legacyMode = false, showSetupOption = false, onShowSetup }: LoginPageProps) {
+export function LoginPage({ legacyMode = false, showSetupOption = false, onShowSetup, onSuccess }: LoginPageProps) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [token, setToken] = useState("");
@@ -86,7 +87,11 @@ export function LoginPage({ legacyMode = false, showSetupOption = false, onShowS
         return;
       }
 
-      window.location.reload();
+      if (onSuccess) {
+        onSuccess();
+      } else {
+        window.location.reload();
+      }
     } catch (err) {
       setError((err as Error).message || "Sign in failed.");
     } finally {
@@ -181,9 +186,10 @@ export function LoginPage({ legacyMode = false, showSetupOption = false, onShowS
 
 interface SetupPageProps {
   onShowLogin?: () => void;
+  onSuccess?: () => void;
 }
 
-export function SetupPage({ onShowLogin }: SetupPageProps) {
+export function SetupPage({ onShowLogin, onSuccess }: SetupPageProps) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -198,7 +204,11 @@ export function SetupPage({ onShowLogin }: SetupPageProps) {
     setError("");
     try {
       await setup({ username, password });
-      window.location.reload();
+      if (onSuccess) {
+        onSuccess();
+      } else {
+        window.location.reload();
+      }
     } catch (err) {
       setError((err as Error).message || "Setup failed.");
     } finally {

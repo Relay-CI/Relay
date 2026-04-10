@@ -45,7 +45,11 @@ export function useAuth() {
   useEffect(() => { refresh(); }, []);
 
   const signOut = async () => {
-    await logout();
+    try {
+      await logout();
+    } catch {
+      // clear local state regardless of whether the server call succeeded
+    }
     setState({ loading: false, authed: false, user: null, setupAvailable: false, legacyMode: false, cliMode: false });
   };
 

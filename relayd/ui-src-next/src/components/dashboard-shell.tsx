@@ -206,6 +206,7 @@ export default function DashboardShell() {
     return (
       <SetupPage
         onShowLogin={auth.legacyMode ? () => setAuthView("login") : undefined}
+        onSuccess={auth.refresh}
       />
     );
   }
@@ -218,6 +219,7 @@ export default function DashboardShell() {
         onShowSetup={
           auth.setupAvailable ? () => setAuthView("setup") : undefined
         }
+        onSuccess={auth.refresh}
       />
     );
   }
