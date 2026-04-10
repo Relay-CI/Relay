@@ -313,20 +313,20 @@ type mockRuntime struct {
 	published map[string]int
 }
 
-func (m *mockRuntime) RunDetached(ContainerSpec) error               { return nil }
-func (m *mockRuntime) Remove(string)                                 {}
-func (m *mockRuntime) IsRunning(name string) bool                    { return m.running[name] }
-func (m *mockRuntime) ContainerIP(string) string                     { return "" }
-func (m *mockRuntime) PublishedPort(name string, _ int) int          { return m.published[name] }
-func (m *mockRuntime) Exec(string, []string) ([]byte, error)         { return nil, nil }
-func (m *mockRuntime) NetworkConnect(string, string) error           { return nil }
-func (m *mockRuntime) EnsureNetwork(string) error                    { return nil }
-func (m *mockRuntime) RemoveNetwork(string)                          {}
-func (m *mockRuntime) RemoveVolume(string)                           {}
-func (m *mockRuntime) Pull(string) error                             { return nil }
-func (m *mockRuntime) Build(string, string, string, io.Writer) error { return nil }
-func (m *mockRuntime) RemoveImage(string)                            {}
-func (m *mockRuntime) ListImages(string) ([]string, error)           { return nil, nil }
+func (m *mockRuntime) RunDetached(ContainerSpec) error                                { return nil }
+func (m *mockRuntime) Remove(string)                                                  {}
+func (m *mockRuntime) IsRunning(name string) bool                                     { return m.running[name] }
+func (m *mockRuntime) ContainerIP(string) string                                      { return "" }
+func (m *mockRuntime) PublishedPort(name string, _ int) int                           { return m.published[name] }
+func (m *mockRuntime) Exec(string, []string) ([]byte, error)                          { return nil, nil }
+func (m *mockRuntime) NetworkConnect(string, string) error                            { return nil }
+func (m *mockRuntime) EnsureNetwork(string) error                                     { return nil }
+func (m *mockRuntime) RemoveNetwork(string)                                           {}
+func (m *mockRuntime) RemoveVolume(string)                                            {}
+func (m *mockRuntime) Pull(string) error                                              { return nil }
+func (m *mockRuntime) Build(context.Context, string, string, string, io.Writer) error { return nil }
+func (m *mockRuntime) RemoveImage(string)                                             {}
+func (m *mockRuntime) ListImages(string) ([]string, error)                            { return nil, nil }
 func (m *mockRuntime) LogStream(context.Context, string, int, string) (io.ReadCloser, error) {
 	return nil, nil
 }
