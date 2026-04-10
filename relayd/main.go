@@ -8850,6 +8850,7 @@ func migrateDB(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN host_port INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN spec_hash TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN repo_hash TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE users ADD COLUMN created_at INTEGER`)
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS server_config (key TEXT PRIMARY KEY, value TEXT)`)
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS users (
 		id TEXT PRIMARY KEY,
@@ -9063,7 +9064,7 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		rows, err := s.db.Query(
-			`SELECT id, username, role, created_at FROM users ORDER BY created_at ASC`,
+			`SELECT id, username, role, COALESCE(created_at,0) FROM users ORDER BY created_at ASC`,
 		)
 		if err != nil {
 			httpError(w, 500, err.Error())
