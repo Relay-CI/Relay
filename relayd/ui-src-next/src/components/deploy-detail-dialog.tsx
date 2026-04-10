@@ -30,9 +30,10 @@ interface DeployDetailDialogProps {
   envInfo: EnvInfo | null;
   services: Service[];
   onClose: () => void;
+  onCancel?: (deployId: string) => Promise<void>;
 }
 
-export function DeployDetailDialog({ deploy, envInfo, services, onClose }: DeployDetailDialogProps) {
+export function DeployDetailDialog({ deploy, envInfo, services, onClose, onCancel }: DeployDetailDialogProps) {
   const [lines, setLines] = useState<string[]>([]);
   const [status, setStatus] = useState("connecting");
   const logRef = useRef<HTMLDivElement>(null);
@@ -146,6 +147,15 @@ export function DeployDetailDialog({ deploy, envInfo, services, onClose }: Deplo
             })}>
               {isActive ? "streaming" : status}
             </span>
+            {isActive && onCancel && (
+              <button
+                type="button"
+                onClick={() => onCancel(deploy.id)}
+                className="text-xs px-2.5 py-1 rounded-full border border-red-500/30 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
+              >
+                Cancel build
+              </button>
+            )}
             <button
               type="button"
               onClick={onClose}

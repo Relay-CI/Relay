@@ -81,6 +81,10 @@ func stationBuildStepTimeout() time.Duration {
 }
 
 func runLoggedCommandWithTimeout(dir string, logw io.Writer, timeout time.Duration, label, bin string, args ...string) error {
+	return runLoggedCommandWithContext(context.Background(), dir, logw, timeout, label, bin, args...)
+}
+
+func runLoggedCommandWithContext(ctx context.Context, dir string, logw io.Writer, timeout time.Duration, label, bin string, args ...string) error {
 	// cancelTail signals the tail goroutine to drain and stop.
 	tailCtx, cancelTail := context.WithCancel(context.Background())
 	defer cancelTail()
@@ -163,6 +167,10 @@ func runLoggedCommandWithTimeout(dir string, logw io.Writer, timeout time.Durati
 		// build containers and their children don't linger.
 		killLongRunCmd(cmd)
 		runErr = <-waitDone
+	case <-ctx.Done():
+		fmt.Fprintf(logw, "[build] %s cancelled\n", label)
+		killLongRunCmd(cmd)
+		runErr = <-waitDone
 	}
 
 	cancelTail() // signal the tail goroutine to drain and stop
@@ -170,6 +178,9 @@ func runLoggedCommandWithTimeout(dir string, logw io.Writer, timeout time.Durati
 
 	if timedOut {
 		return fmt.Errorf("%s timed out after %s", label, timeout)
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 	return runErr
 }
@@ -877,6 +888,15 @@ func (r *StationRuntime) command(bin string, args ...string) *exec.Cmd {
 	return cmd
 }
 
+func (r *StationRuntime) commandCtx(ctx context.Context, bin string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, bin, args...)
+	setCmdHideWindow(cmd)
+	if base := strings.TrimSpace(r.volumeBaseDir); base != "" {
+		cmd.Env = append(os.Environ(), "STATION_VOLUME_BASE="+base, "VESSEL_VOLUME_BASE="+base)
+	}
+	return cmd
+}
+
 func (r *StationRuntime) run(args ...string) ([]byte, error) {
 	bin, err := r.binary()
 	if err != nil {
@@ -1105,7 +1125,7 @@ func (r *StationRuntime) RemoveVolume(name string) {
 	_ = os.RemoveAll(r.volumePath(name))
 }
 
-func (r *StationRuntime) Build(tag, contextDir, dockerfilePath string, logw io.Writer) error {
+func (r *StationRuntime) Build(ctx context.Context, tag, contextDir, dockerfilePath string, logw io.Writer) error {
 	bin, err := r.binary()
 	if err != nil {
 		return err
@@ -1120,14 +1140,14 @@ func (r *StationRuntime) Build(tag, contextDir, dockerfilePath string, logw io.W
 		return err
 	}
 	defer os.RemoveAll(buildDir)
-	buildCmd := r.command(bin, "build-dockerfile", df, contextDir, buildDir)
+	buildCmd := r.commandCtx(ctx, bin, "build-dockerfile", df, contextDir, buildDir)
 	buildCmd.Dir = contextDir
 	buildCmd.Stdout = logw
 	buildCmd.Stderr = logw
 	if err := buildCmd.Run(); err != nil {
 		return err
 	}
-	saveCmd := r.command(bin, "snapshot", "save", tag, buildDir)
+	saveCmd := r.commandCtx(ctx, bin, "snapshot", "save", tag, buildDir)
 	saveCmd.Dir = contextDir
 	saveCmd.Stdout = logw
 	saveCmd.Stderr = logw
@@ -1266,7 +1286,7 @@ func (r *StationRuntime) LogStream(ctx context.Context, name string, tail int, s
 	}
 }
 
-func (s *Server) buildStationSnapshot(repoDir, dockerfilePath, snapshotName string, logw io.Writer) (*stationManifest, error) {
+func (s *Server) buildStationSnapshot(ctx context.Context, repoDir, dockerfilePath, snapshotName string, logw io.Writer) (*stationManifest, error) {
 	// ── Fast path: delegate entirely to the long-lived WSL2 daemon ───────────
 	// The daemon builds and saves the snapshot in WSL2-native ext4 storage in
 	// one round-trip, returning the manifest over HTTP.  No Windows-side rootfs
@@ -1304,7 +1324,8 @@ func (s *Server) buildStationSnapshot(repoDir, dockerfilePath, snapshotName stri
 	defer os.RemoveAll(buildDir)
 
 	fmt.Fprintf(logw, "[build] running station build-dockerfile\n")
-	if err := runLoggedCommandWithTimeout(
+	if err := runLoggedCommandWithContext(
+		ctx,
 		repoDir,
 		logw,
 		stationBuildStepTimeout(),
@@ -1339,7 +1360,8 @@ func (s *Server) buildStationSnapshot(repoDir, dockerfilePath, snapshotName stri
 	// Standard path: save snapshot on Windows, then sync to WSL2.
 	_ = os.RemoveAll(stationSnapshotDir(snapshotName))
 	fmt.Fprintf(logw, "[build] running station snapshot save\n")
-	if err := runLoggedCommandWithTimeout(
+	if err := runLoggedCommandWithContext(
+		ctx,
 		repoDir,
 		logw,
 		stationBuildStepTimeout(),
@@ -1386,6 +1408,7 @@ type stationProxyParams struct {
 	mode        string
 	trafficMode string
 	publicHost  string
+	authURL     string
 	recreate    bool
 }
 
@@ -1426,6 +1449,7 @@ func agentProxyStart(agent *stationAgent, vrt ContainerRuntime, proxyName, activ
 		ActiveSlot:     p.activeSlot,
 		TrafficMode:    firstNonEmpty(normalizeTrafficMode(p.trafficMode), "edge"),
 		CookieName:     edgeCookieName(p.app, p.env, p.branch),
+		AuthURL:        strings.TrimSpace(p.authURL),
 	}
 	if p.standbySlot != "" {
 		req.StandbyUpstream = stationSlotUpstream(vrt, appSlotContainerName(p.app, p.env, p.branch, p.standbySlot), p.servicePort)
@@ -1445,6 +1469,7 @@ func agentProxySwap(agent *stationAgent, vrt ContainerRuntime, proxyName, active
 		ActiveSlot:     p.activeSlot,
 		TrafficMode:    firstNonEmpty(normalizeTrafficMode(p.trafficMode), "edge"),
 		CookieName:     edgeCookieName(p.app, p.env, p.branch),
+		AuthURL:        strings.TrimSpace(p.authURL),
 	}
 	if p.standbySlot != "" {
 		req.StandbyUpstream = stationSlotUpstream(vrt, appSlotContainerName(p.app, p.env, p.branch, p.standbySlot), p.servicePort)
@@ -1480,6 +1505,7 @@ func (s *Server) ensurestationEdgeProxy(log func(string, ...any), app string, en
 		activeSlot: activeSlot, standbySlot: standbySlot,
 		servicePort: servicePort, hostPort: hostPort,
 		mode: mode, trafficMode: trafficMode, publicHost: publicHost,
+		authURL:  edgeAuthProxyURL(listenAddrPort(s.httpAddr), app, env, branch, "127.0.0.1"),
 		recreate: recreate,
 	}); done {
 		return err
@@ -1504,6 +1530,7 @@ func (s *Server) ensurestationEdgeProxy(log func(string, ...any), app string, en
 		"--active-slot", activeSlot,
 		"--traffic-mode", firstNonEmpty(normalizeTrafficMode(trafficMode), "edge"),
 		"--cookie-name", edgeCookieName(app, env, branch),
+		"--auth-url", edgeAuthProxyURL(listenAddrPort(s.httpAddr), app, env, branch, "127.0.0.1"),
 	)
 	if standbySlot != "" {
 		args = append(args,

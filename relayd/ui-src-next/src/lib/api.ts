@@ -80,7 +80,10 @@ export async function getSession(): Promise<SessionInfo> {
   const session = await apiFetch<RawSessionInfo>("/api/auth/session");
   return {
     authed: session.authenticated ?? false,
-    user: session.username && session.role ? { username: session.username, role: session.role } : undefined,
+    user:
+      session.username && session.role
+        ? { username: session.username, role: session.role }
+        : undefined,
     setup_available: session.setup_required ?? false,
     legacy_mode: session.legacy_mode ?? false,
     cli_mode: session.cli_mode ?? false,
@@ -88,7 +91,9 @@ export async function getSession(): Promise<SessionInfo> {
   };
 }
 
-export async function login(credentials: LoginRequest | string): Promise<LoginResponse> {
+export async function login(
+  credentials: LoginRequest | string,
+): Promise<LoginResponse> {
   if (typeof credentials === "string") {
     return apiFetch<LoginResponse>("/api/auth/session", {
       method: "POST",
@@ -110,7 +115,10 @@ export async function logout(): Promise<void> {
   await apiFetch("/api/auth/session", { method: "DELETE" });
 }
 
-export async function setup(credentials: { username: string; password: string }): Promise<void> {
+export async function setup(credentials: {
+  username: string;
+  password: string;
+}): Promise<void> {
   await apiFetch("/api/auth/setup", {
     method: "POST",
     body: JSON.stringify(credentials),
@@ -118,7 +126,11 @@ export async function setup(credentials: { username: string; password: string })
 }
 
 export async function getMe(): Promise<{ username: string; role: string }> {
-  const me = await apiFetch<{ authenticated?: boolean; username?: string; role?: string }>("/api/auth/me");
+  const me = await apiFetch<{
+    authenticated?: boolean;
+    username?: string;
+    role?: string;
+  }>("/api/auth/me");
   return {
     username: me.username ?? "",
     role: me.role ?? "",
@@ -134,6 +146,9 @@ export interface EnvInfo {
   engine?: string;
   mode?: string;
   traffic_mode?: string;
+  access_policy?: string;
+  ip_allowlist?: string;
+  expires_at?: number;
   host_port?: number;
   service_port?: number;
   public_host?: string;
@@ -238,6 +253,10 @@ export async function rollback(deployId: string): Promise<void> {
   });
 }
 
+export async function cancelDeploy(deployId: string): Promise<void> {
+  await apiFetch(`/api/deploys/cancel/${deployId}`, { method: "POST" });
+}
+
 // ── App config ────────────────────────────────────────────────────────────
 
 export interface AppConfig {
@@ -245,6 +264,9 @@ export interface AppConfig {
   engine?: string;
   mode?: string;
   traffic_mode?: string;
+  access_policy?: string;
+  ip_allowlist?: string;
+  expires_at?: number;
   host_port?: number;
   service_port?: number;
   public_host?: string;
@@ -252,14 +274,89 @@ export interface AppConfig {
 }
 
 export async function getAppConfig(target: AppTarget): Promise<AppConfig> {
-  const params = new URLSearchParams(target as unknown as Record<string, string>);
+  const params = new URLSearchParams(
+    target as unknown as Record<string, string>,
+  );
   return apiFetch<AppConfig>(`/api/apps/config?${params}`);
 }
 
-export async function saveAppConfig(target: AppTarget, config: AppConfig): Promise<void> {
+export async function saveAppConfig(
+  target: AppTarget,
+  config: AppConfig,
+): Promise<void> {
   await apiFetch("/api/apps/config", {
     method: "POST",
     body: JSON.stringify({ ...target, ...config }),
+  });
+}
+
+export interface SignedLinkResponse {
+  url: string;
+  base_url: string;
+  access_policy: string;
+  expires_at: number;
+}
+
+export async function generateSignedLink(
+  target: AppTarget,
+  expiresInMinutes = 24 * 60,
+): Promise<SignedLinkResponse> {
+  const params = new URLSearchParams({
+    ...target,
+    expires_in_minutes: String(expiresInMinutes),
+  });
+  return apiFetch<SignedLinkResponse>(`/api/apps/signed-link?${params}`);
+}
+
+export interface PromotionRecord {
+  id: string;
+  app: string;
+  source_env: string;
+  source_branch: string;
+  source_deploy_id?: string;
+  source_image?: string;
+  target_env: string;
+  target_branch: string;
+  status: string;
+  approval_required: boolean;
+  requested_by?: string;
+  requested_at: number;
+  approved_by?: string;
+  approved_at?: number;
+  target_deploy_id?: string;
+  rollback_deploy_id?: string;
+  health_status?: string;
+  health_detail?: string;
+}
+
+export async function getPromotions(
+  app: string,
+  sourceEnv?: string,
+  branch?: string,
+): Promise<PromotionRecord[]> {
+  const params = new URLSearchParams({ app });
+  if (sourceEnv) params.set("source_env", sourceEnv);
+  if (branch) params.set("branch", branch);
+  return apiFetch<PromotionRecord[]>(`/api/promotions?${params}`);
+}
+
+export async function requestPromotion(payload: {
+  app: string;
+  source_env: string;
+  source_branch: string;
+  target_env?: string;
+  target_branch?: string;
+}): Promise<PromotionRecord> {
+  return apiFetch<PromotionRecord>("/api/promotions", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function approvePromotion(id: string): Promise<PromotionRecord> {
+  return apiFetch<PromotionRecord>("/api/promotions/approve", {
+    method: "POST",
+    body: JSON.stringify({ id }),
   });
 }
 
@@ -270,18 +367,27 @@ export interface Secret {
 }
 
 export async function getSecrets(target: AppTarget): Promise<Secret[]> {
-  const params = new URLSearchParams(target as unknown as Record<string, string>);
+  const params = new URLSearchParams(
+    target as unknown as Record<string, string>,
+  );
   return apiFetch<Secret[]>(`/api/apps/secrets?${params}`);
 }
 
-export async function setSecret(target: AppTarget, key: string, value: string): Promise<void> {
+export async function setSecret(
+  target: AppTarget,
+  key: string,
+  value: string,
+): Promise<void> {
   await apiFetch("/api/apps/secrets", {
     method: "POST",
     body: JSON.stringify({ ...target, key, value }),
   });
 }
 
-export async function deleteSecret(target: AppTarget, key: string): Promise<void> {
+export async function deleteSecret(
+  target: AppTarget,
+  key: string,
+): Promise<void> {
   const params = new URLSearchParams({ ...target, key });
   await apiFetch(`/api/apps/secrets?${params}`, { method: "DELETE" });
 }
@@ -321,23 +427,34 @@ export interface Companion {
 export type { CompanionConfig as ServiceConfig };
 
 export async function getCompanions(target: AppTarget): Promise<Companion[]> {
-  const params = new URLSearchParams(target as unknown as Record<string, string>);
+  const params = new URLSearchParams(
+    target as unknown as Record<string, string>,
+  );
   return apiFetch<Companion[]>(`/api/apps/companions?${params}`);
 }
 
-export async function saveCompanion(target: AppTarget, config: CompanionConfig): Promise<void> {
+export async function saveCompanion(
+  target: AppTarget,
+  config: CompanionConfig,
+): Promise<void> {
   await apiFetch("/api/apps/companions", {
     method: "POST",
     body: JSON.stringify({ ...target, config }),
   });
 }
 
-export async function deleteCompanion(target: AppTarget, name: string): Promise<void> {
+export async function deleteCompanion(
+  target: AppTarget,
+  name: string,
+): Promise<void> {
   const params = new URLSearchParams({ ...target, name });
   await apiFetch(`/api/apps/companions?${params}`, { method: "DELETE" });
 }
 
-export async function restartCompanion(target: AppTarget, name: string): Promise<void> {
+export async function restartCompanion(
+  target: AppTarget,
+  name: string,
+): Promise<void> {
   await apiFetch("/api/apps/companions/restart", {
     method: "POST",
     body: JSON.stringify({ ...target, name }),
@@ -370,8 +487,13 @@ export async function getServerConfig(): Promise<ServerConfig> {
   return apiFetch("/api/server/config");
 }
 
-export async function saveServerConfig(config: ServerConfig): Promise<ServerConfig> {
-  return apiFetch("/api/server/config", { method: "POST", body: JSON.stringify(config) });
+export async function saveServerConfig(
+  config: ServerConfig,
+): Promise<ServerConfig> {
+  return apiFetch("/api/server/config", {
+    method: "POST",
+    body: JSON.stringify(config),
+  });
 }
 
 // ── Build logs ────────────────────────────────────────────────────────────
@@ -401,7 +523,11 @@ export interface RuntimeTargetsResponse {
   };
 }
 
-export async function getRuntimeTargets(app: string, env: string, branch: string): Promise<RuntimeTargetsResponse> {
+export async function getRuntimeTargets(
+  app: string,
+  env: string,
+  branch: string,
+): Promise<RuntimeTargetsResponse> {
   return apiFetch<RuntimeTargetsResponse>(
     `/api/runtime/logs/targets?app=${encodeURIComponent(app)}&env=${encodeURIComponent(env)}&branch=${encodeURIComponent(branch)}`,
   );
@@ -409,7 +535,10 @@ export async function getRuntimeTargets(app: string, env: string, branch: string
 
 // ── Analytics ─────────────────────────────────────────────────────────────
 
-export async function getAnalytics(app?: string, period?: string): Promise<unknown> {
+export async function getAnalytics(
+  app?: string,
+  period?: string,
+): Promise<unknown> {
   const params = new URLSearchParams();
   if (app) params.set("app", app);
   if (period) params.set("period", period);
@@ -429,12 +558,22 @@ export async function getUsers(): Promise<User[]> {
   return apiFetch<User[]>("/api/users");
 }
 
-export async function createUser(data: { username: string; password: string; role: string }): Promise<void> {
+export async function createUser(data: {
+  username: string;
+  password: string;
+  role: string;
+}): Promise<void> {
   await apiFetch("/api/users", { method: "POST", body: JSON.stringify(data) });
 }
 
-export async function updateUser(id: string, patch: { role: string }): Promise<void> {
-  await apiFetch(`/api/users/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
+export async function updateUser(
+  id: string,
+  patch: { role: string },
+): Promise<void> {
+  await apiFetch(`/api/users/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
 }
 
 export async function deleteUser(id: string): Promise<void> {

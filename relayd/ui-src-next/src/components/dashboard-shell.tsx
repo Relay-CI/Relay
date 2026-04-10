@@ -24,6 +24,7 @@ import {
   type NormalizedProject,
 } from "@/lib/relay-utils";
 import type { Deploy, EnvInfo } from "@/lib/api";
+import { cancelDeploy } from "@/lib/api";
 
 interface SelectedEnvMeta extends EnvInfo {
   app: string;
@@ -79,7 +80,10 @@ export default function DashboardShell() {
 
   // Auto-select first project
   useEffect(() => {
-    if (!projectOptions.length) { setSelectedProjectName(""); return; }
+    if (!projectOptions.length) {
+      setSelectedProjectName("");
+      return;
+    }
     if (!projectOptions.find((p) => p.name === selectedProjectName)) {
       setSelectedProjectName(projectOptions[0].name);
     }
@@ -101,7 +105,11 @@ export default function DashboardShell() {
         return a.env.localeCompare(b.env);
       })
       .map((envInfo) => {
-        const key = deployKey(selectedProject.name, envInfo.env, envInfo.branch);
+        const key = deployKey(
+          selectedProject.name,
+          envInfo.env,
+          envInfo.branch,
+        );
         const latestDeploy = deploysByContext.get(key)?.[0] ?? undefined;
         return {
           ...envInfo,
@@ -116,9 +124,18 @@ export default function DashboardShell() {
 
   // Auto-select first env when project changes
   useEffect(() => {
-    if (!envOptions.length) { setSelectedEnvKey(""); return; }
-    if (!envOptions.find((e) => deployKey(e.app, e.env, e.branch) === selectedEnvKey)) {
-      setSelectedEnvKey(deployKey(envOptions[0].app, envOptions[0].env, envOptions[0].branch));
+    if (!envOptions.length) {
+      setSelectedEnvKey("");
+      return;
+    }
+    if (
+      !envOptions.find(
+        (e) => deployKey(e.app, e.env, e.branch) === selectedEnvKey,
+      )
+    ) {
+      setSelectedEnvKey(
+        deployKey(envOptions[0].app, envOptions[0].env, envOptions[0].branch),
+      );
     }
   }, [envOptions, selectedEnvKey]);
 
@@ -136,8 +153,10 @@ export default function DashboardShell() {
     if (!selectedProject) return [];
     return (selectedProject.services ?? []).filter((s) => {
       if (!selectedEnv) return true;
-      return (s as { env?: string }).env === selectedEnv?.env &&
-        (s as { branch?: string }).branch === selectedEnv?.branch;
+      return (
+        (s as { env?: string }).env === selectedEnv?.env &&
+        (s as { branch?: string }).branch === selectedEnv?.branch
+      );
     });
   }, [selectedProject, selectedEnv]);
 
@@ -184,7 +203,11 @@ export default function DashboardShell() {
   }
 
   if (auth.setupAvailable && !auth.authed && authView === "setup") {
-    return <SetupPage onShowLogin={auth.legacyMode ? () => setAuthView("login") : undefined} />;
+    return (
+      <SetupPage
+        onShowLogin={auth.legacyMode ? () => setAuthView("login") : undefined}
+      />
+    );
   }
 
   if (!auth.authed) {
@@ -192,7 +215,9 @@ export default function DashboardShell() {
       <LoginPage
         legacyMode={auth.legacyMode}
         showSetupOption={auth.setupAvailable}
-        onShowSetup={auth.setupAvailable ? () => setAuthView("setup") : undefined}
+        onShowSetup={
+          auth.setupAvailable ? () => setAuthView("setup") : undefined
+        }
       />
     );
   }
@@ -223,6 +248,7 @@ export default function DashboardShell() {
             envMap={envMap}
             selectedEnv={selectedEnv}
             onOpenDeploy={setSelectedDeploy}
+            onCancelDeploy={cancelDeploy}
           />
         );
       case "logs":
@@ -240,6 +266,7 @@ export default function DashboardShell() {
             selectedEnv={selectedEnv}
             project={selectedProject}
             services={services}
+            currentUser={auth.user}
             onUpdated={refreshDashboard}
           />
         );
@@ -257,7 +284,13 @@ export default function DashboardShell() {
   }
 
   const selectedDeployEnvInfo = selectedDeploy
-    ? envMap.get(deployKey(selectedDeploy.app, selectedDeploy.env, selectedDeploy.branch)) ?? null
+    ? (envMap.get(
+        deployKey(
+          selectedDeploy.app,
+          selectedDeploy.env,
+          selectedDeploy.branch,
+        ),
+      ) ?? null)
     : null;
 
   return (
@@ -293,9 +326,12 @@ export default function DashboardShell() {
           {!selectedProject && !dashboard.loading ? (
             <div className="flex flex-col items-center justify-center h-full text-center gap-3">
               <div className="eyebrow">No Projects Yet</div>
-              <h2 className="text-xl font-semibold text-white/70">Deploy an app to populate the admin.</h2>
+              <h2 className="text-xl font-semibold text-white/70">
+                Deploy an app to populate the admin.
+              </h2>
               <p className="text-sm text-white/40 max-w-sm">
-                Projects appear as soon as Relay has app state. Trigger a deploy from the CLI to get started.
+                Projects appear as soon as Relay has app state. Trigger a deploy
+                from the CLI to get started.
               </p>
             </div>
           ) : (
@@ -310,6 +346,7 @@ export default function DashboardShell() {
           envInfo={selectedDeployEnvInfo}
           services={services}
           onClose={() => setSelectedDeploy(null)}
+          onCancel={cancelDeploy}
         />
       )}
     </div>

@@ -178,6 +178,8 @@ type DeployEnv string
 const (
 	EnvPreview DeployEnv = "preview"
 	EnvProd    DeployEnv = "prod"
+	EnvStaging DeployEnv = "staging"
+	EnvDev     DeployEnv = "dev"
 )
 
 type DeployStatus string
@@ -252,6 +254,7 @@ type DeployJob struct {
 	Req           DeployRequest
 	Rollback      bool
 	RollbackImage string
+	PromoteImage  string
 }
 
 type AppState struct {
@@ -271,6 +274,9 @@ type AppState struct {
 	StandbySlot      string    `json:"standby_slot,omitempty"`
 	DrainUntil       int64     `json:"drain_until,omitempty"`
 	TrafficMode      string    `json:"traffic_mode"`
+	AccessPolicy     string    `json:"access_policy,omitempty"`
+	IPAllowlist      string    `json:"ip_allowlist,omitempty"`
+	ExpiresAt        int64     `json:"expires_at,omitempty"`
 	RepoHash         string    `json:"repo_hash,omitempty"`
 	WebhookSecret    string    `json:"webhook_secret,omitempty"`
 	Stopped          bool      `json:"stopped,omitempty"`
@@ -447,7 +453,7 @@ type ContainerRuntime interface {
 	Pull(image string) error
 	// Build builds an image from contextDir tagged as tag.
 	// dockerfilePath may be "" to use the default Dockerfile in contextDir.
-	Build(tag, contextDir, dockerfilePath string, logw io.Writer) error
+	Build(ctx context.Context, tag, contextDir, dockerfilePath string, logw io.Writer) error
 	// RemoveImage removes an image by reference (ignores errors).
 	RemoveImage(ref string)
 	// ListImages returns all image refs matching the given repository name.
@@ -572,13 +578,13 @@ func (r *DockerRuntime) Pull(image string) error {
 	return exec.Command("docker", "pull", image).Run()
 }
 
-func (r *DockerRuntime) Build(tag, contextDir, dockerfilePath string, logw io.Writer) error {
+func (r *DockerRuntime) Build(ctx context.Context, tag, contextDir, dockerfilePath string, logw io.Writer) error {
 	args := []string{"build", "-t", tag}
 	if dockerfilePath != "" {
 		args = append(args, "-f", dockerfilePath)
 	}
 	args = append(args, ".")
-	return runCmdLoggedEnv(contextDir, logw, []string{"DOCKER_BUILDKIT=1"}, "docker", args...)
+	return runCmdLoggedEnvCtx(ctx, contextDir, logw, []string{"DOCKER_BUILDKIT=1"}, "docker", args...)
 }
 
 func (r *DockerRuntime) RemoveImage(ref string) {
@@ -656,6 +662,12 @@ type Server struct {
 
 	buildLock sync.Mutex
 	building  map[string]bool // app__env__branch
+
+	buildCancelsMu sync.Mutex
+	buildCancels   map[string]context.CancelFunc // deployID → active cancel func
+
+	webhookRateMu sync.Mutex
+	webhookHits   map[string][]time.Time // repoURL → recent trigger timestamps
 
 	eventsMu    sync.RWMutex
 	eventsChans map[chan []byte]struct{}
@@ -2384,11 +2396,11 @@ func (s *Server) reconcileProjectServices(log func(string, ...any), app string, 
 
 // ---------------------- Preview URL helper ----------------------
 
-// autoPreviewHost generates a hostname from RELAY_BASE_DOMAIN env var when set.
-// Returns "" if the env var is not configured (falls back to port mode).
+// autoPreviewHost reports whether the active lane policy would auto-assign
+// a managed hostname when RELAY_BASE_DOMAIN is configured.
 func autoPreviewHost(app, branch string) string {
 	base := strings.TrimSpace(os.Getenv("RELAY_BASE_DOMAIN"))
-	if base == "" {
+	if !laneNeedsManagedHost(defaultLanePolicy(EnvPreview), base) {
 		return ""
 	}
 	return fmt.Sprintf("%s-%s.%s", safe(app), safe(branch), base)
@@ -2434,13 +2446,9 @@ func listenAddrPort(addr string) int {
 	return 0
 }
 
-// autoPreviewHostFull generates a hostname using the effective base domain (DB or env var).
-func (s *Server) autoPreviewHostFull(app, branch string) string {
-	base := s.serverBaseDomain()
-	if base == "" {
-		return ""
-	}
-	return fmt.Sprintf("%s-%s.%s", safe(app), safe(branch), base)
+// autoPreviewHostFull resolves the effective managed hostname for the given lane.
+func (s *Server) autoPreviewHostFull(env DeployEnv, app, branch, existingHost string) string {
+	return s.managedLaneHost(env, app, branch, existingHost)
 }
 
 // handleServerConfig handles GET/POST /api/server/config.
@@ -2702,7 +2710,7 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT app, env, branch, COALESCE(engine,''), mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(webhook_secret,''), repo_url, COALESCE(stopped,0)
+		`SELECT app, env, branch, COALESCE(engine,''), mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), repo_url, COALESCE(stopped,0)
 		FROM app_state ORDER BY app, env, branch`,
 	)
 	if err != nil {
@@ -2725,6 +2733,9 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 		StandbySlot      string `json:"standby_slot,omitempty"`
 		DrainUntil       int64  `json:"drain_until,omitempty"`
 		TrafficMode      string `json:"traffic_mode,omitempty"`
+		AccessPolicy     string `json:"access_policy,omitempty"`
+		IPAllowlist      string `json:"ip_allowlist,omitempty"`
+		ExpiresAt        int64  `json:"expires_at,omitempty"`
 		WebhookSecret    string `json:"webhook_secret,omitempty"`
 		RepoURL          string `json:"repo_url"`
 		Stopped          bool   `json:"stopped,omitempty"`
@@ -2740,10 +2751,12 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var pe ProjectEnv
 		if err := rows.Scan(&pe.App, &pe.Env, &pe.Branch, &pe.Engine, &pe.Mode,
-			&pe.HostPort, &pe.HostPortExplicit, &pe.ServicePort, &pe.PublicHost, &pe.ActiveSlot, &pe.StandbySlot, &pe.DrainUntil, &pe.TrafficMode, &pe.WebhookSecret, &pe.RepoURL, &pe.Stopped); err != nil {
+			&pe.HostPort, &pe.HostPortExplicit, &pe.ServicePort, &pe.PublicHost, &pe.ActiveSlot, &pe.StandbySlot, &pe.DrainUntil, &pe.TrafficMode, &pe.AccessPolicy, &pe.IPAllowlist, &pe.ExpiresAt, &pe.WebhookSecret, &pe.RepoURL, &pe.Stopped); err != nil {
 			continue
 		}
 		pe.Engine = firstNonEmptyEngine(pe.Engine)
+		pe.TrafficMode = firstNonEmpty(normalizeTrafficMode(pe.TrafficMode), s.lanePolicy(DeployEnv(pe.Env)).DefaultTrafficMode)
+		pe.AccessPolicy = firstNonEmpty(normalizeAccessPolicy(pe.AccessPolicy), s.lanePolicy(DeployEnv(pe.Env)).DefaultAccessPolicy)
 		if _, ok := byApp[pe.App]; !ok {
 			byApp[pe.App] = &ProjectInfo{Name: pe.App, Envs: []ProjectEnv{}, Services: []ProjectService{}}
 		}
@@ -3227,6 +3240,8 @@ func main() {
 		secretKey:             secretKey,
 		buildpacks:            defaultBuildpacks(),
 		building:              make(map[string]bool),
+		buildCancels:          make(map[string]context.CancelFunc),
+		webhookHits:           make(map[string][]time.Time),
 		eventsChans:           make(map[chan []byte]struct{}),
 		runtime:               &DockerRuntime{},
 		stationRuntime:        newStationRuntime(dataDir),
@@ -3249,6 +3264,7 @@ func main() {
 
 	// Restore global domain proxy state from DB
 	go func() { _ = s.ensureGlobalProxy() }()
+	go s.runLaneExpiryWorker()
 
 	// Start worker pool: use half of available CPUs (at least 1)
 	n := runtime.NumCPU() / 2
@@ -3290,12 +3306,14 @@ func main() {
 	mux.HandleFunc("/api/auth/cli/start", s.handleAuthCLIStart)
 	mux.HandleFunc("/api/auth/cli/exchange", s.handleAuthCLIExchange)
 	mux.HandleFunc("/api/deploys", authReadDeployerWrite(s.handleDeploys))
+	mux.HandleFunc("/api/deploys/cancel/", authDeployer(s.handleDeployCancel))
 	mux.HandleFunc("/api/deploys/", authAny(s.handleDeployByID))
 	mux.HandleFunc("/api/deploys/rollback", authDeployer(s.handleRollback))
 	mux.HandleFunc("/api/apps/start", authDeployer(s.handleAppStart))
 	mux.HandleFunc("/api/apps/stop", authDeployer(s.handleAppStop))
 	mux.HandleFunc("/api/apps/restart", authDeployer(s.handleAppRestart))
 	mux.HandleFunc("/api/apps/config", authReadDeployerWrite(s.handleAppConfig))
+	mux.HandleFunc("/api/apps/signed-link", authDeployer(s.handleSignedLink))
 	mux.HandleFunc("/api/server/config", authOwner(s.handleServerConfig))
 	mux.HandleFunc("/api/apps/companions", authReadDeployerWrite(s.handleAppCompanions))
 	mux.HandleFunc("/api/apps/companions/restart", authDeployer(s.handleCompanionRestart))
@@ -3321,9 +3339,12 @@ func main() {
 	// Projects (multi-service view)
 	mux.HandleFunc("/api/projects", authReadOnly(s.handleProjects))
 	mux.HandleFunc("/api/projects/delete", authOwner(s.handleProjectDelete))
+	mux.HandleFunc("/api/promotions", authReadDeployerWrite(s.handlePromotions))
+	mux.HandleFunc("/api/promotions/approve", authOwner(s.handlePromotionApprove))
 
 	// Webhooks (unauthenticated, use provider-specific secrets if configured)
 	mux.HandleFunc("/api/webhooks/github", s.handleGithubWebhook)
+	mux.HandleFunc("/api/edge/authz", s.handleEdgeAuthz)
 	mux.HandleFunc("/api/analytics", authAny(s.handleAnalytics))
 
 	// User management (owner only, enforced inside handlers)
@@ -3366,12 +3387,14 @@ func main() {
 			sockMux.HandleFunc("/api/auth/cli/start", s.handleAuthCLIStart)
 			sockMux.HandleFunc("/api/auth/cli/exchange", s.handleAuthCLIExchange)
 			sockMux.HandleFunc("/api/deploys", authReadDeployerWrite(s.handleDeploys))
+			sockMux.HandleFunc("/api/deploys/cancel/", authDeployer(s.handleDeployCancel))
 			sockMux.HandleFunc("/api/deploys/", authAny(s.handleDeployByID))
 			sockMux.HandleFunc("/api/deploys/rollback", authDeployer(s.handleRollback))
 			sockMux.HandleFunc("/api/apps/start", authDeployer(s.handleAppStart))
 			sockMux.HandleFunc("/api/apps/stop", authDeployer(s.handleAppStop))
 			sockMux.HandleFunc("/api/apps/restart", authDeployer(s.handleAppRestart))
 			sockMux.HandleFunc("/api/apps/config", authReadDeployerWrite(s.handleAppConfig))
+			sockMux.HandleFunc("/api/apps/signed-link", authDeployer(s.handleSignedLink))
 			sockMux.HandleFunc("/api/server/config", authOwner(s.handleServerConfig))
 			sockMux.HandleFunc("/api/apps/companions", authReadDeployerWrite(s.handleAppCompanions))
 			sockMux.HandleFunc("/api/apps/companions/restart", authDeployer(s.handleCompanionRestart))
@@ -3392,7 +3415,10 @@ func main() {
 			sockMux.HandleFunc("/api/sync/pull/", authDeployer(s.handleSyncPull))
 			sockMux.HandleFunc("/api/projects", authReadOnly(s.handleProjects))
 			sockMux.HandleFunc("/api/projects/delete", authOwner(s.handleProjectDelete))
+			sockMux.HandleFunc("/api/promotions", authReadDeployerWrite(s.handlePromotions))
+			sockMux.HandleFunc("/api/promotions/approve", authOwner(s.handlePromotionApprove))
 			sockMux.HandleFunc("/api/webhooks/github", s.handleGithubWebhook)
+			sockMux.HandleFunc("/api/edge/authz", s.handleEdgeAuthz)
 			sockMux.HandleFunc("/api/users", authOwner(s.handleUsers))
 			sockMux.HandleFunc("/api/users/", authOwner(s.handleUserByID))
 			sockMux.HandleFunc("/api/audit", authOwner(s.handleAuditLog))
@@ -4159,7 +4185,7 @@ func (s *Server) broadcastSnapshot() {
 // buildSnapshotJSON returns the projects+deploys payload for the /api/events endpoint.
 func (s *Server) buildSnapshotJSON() ([]byte, error) {
 	rows, err := s.db.Query(
-		`SELECT app, env, branch, COALESCE(engine,''), mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(webhook_secret,''), repo_url, COALESCE(stopped,0)
+		`SELECT app, env, branch, COALESCE(engine,''), mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), repo_url, COALESCE(stopped,0)
 		FROM app_state ORDER BY app, env, branch`,
 	)
 	if err != nil {
@@ -4181,6 +4207,9 @@ func (s *Server) buildSnapshotJSON() ([]byte, error) {
 		StandbySlot      string `json:"standby_slot,omitempty"`
 		DrainUntil       int64  `json:"drain_until,omitempty"`
 		TrafficMode      string `json:"traffic_mode,omitempty"`
+		AccessPolicy     string `json:"access_policy,omitempty"`
+		IPAllowlist      string `json:"ip_allowlist,omitempty"`
+		ExpiresAt        int64  `json:"expires_at,omitempty"`
 		WebhookSecret    string `json:"webhook_secret,omitempty"`
 		RepoURL          string `json:"repo_url"`
 		Stopped          bool   `json:"stopped,omitempty"`
@@ -4196,10 +4225,12 @@ func (s *Server) buildSnapshotJSON() ([]byte, error) {
 	for rows.Next() {
 		var pe snapEnv
 		if err := rows.Scan(&pe.App, &pe.Env, &pe.Branch, &pe.Engine, &pe.Mode,
-			&pe.HostPort, &pe.HostPortExplicit, &pe.ServicePort, &pe.PublicHost, &pe.ActiveSlot, &pe.StandbySlot, &pe.DrainUntil, &pe.TrafficMode, &pe.WebhookSecret, &pe.RepoURL, &pe.Stopped); err != nil {
+			&pe.HostPort, &pe.HostPortExplicit, &pe.ServicePort, &pe.PublicHost, &pe.ActiveSlot, &pe.StandbySlot, &pe.DrainUntil, &pe.TrafficMode, &pe.AccessPolicy, &pe.IPAllowlist, &pe.ExpiresAt, &pe.WebhookSecret, &pe.RepoURL, &pe.Stopped); err != nil {
 			continue
 		}
 		pe.Engine = firstNonEmptyEngine(pe.Engine)
+		pe.TrafficMode = firstNonEmpty(normalizeTrafficMode(pe.TrafficMode), s.lanePolicy(DeployEnv(pe.Env)).DefaultTrafficMode)
+		pe.AccessPolicy = firstNonEmpty(normalizeAccessPolicy(pe.AccessPolicy), s.lanePolicy(DeployEnv(pe.Env)).DefaultAccessPolicy)
 		pe.Running = s.appLaneRunning(pe.App, DeployEnv(pe.Env), pe.Branch)
 		if _, ok := byApp[pe.App]; !ok {
 			byApp[pe.App] = &snapProject{Name: pe.App, Envs: []snapEnv{}, Services: []ProjectService{}}
@@ -4452,7 +4483,7 @@ func (s *Server) handleSyncStart(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "invalid json")
 		return
 	}
-	if req.App == "" || req.Branch == "" || (req.Env != EnvProd && req.Env != EnvPreview) {
+	if !validDeployTarget(req.App, req.Env, req.Branch) {
 		httpError(w, 400, "app, branch, env required")
 		return
 	}
@@ -4950,6 +4981,28 @@ func (s *Server) handleSyncFinish(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// webhookAllowed returns true if the repo has not exceeded the rate limit
+// (5 triggers per 60 seconds). Call sites hold no locks.
+func (s *Server) webhookAllowed(repoURL string) bool {
+	now := time.Now()
+	cutoff := now.Add(-60 * time.Second)
+	s.webhookRateMu.Lock()
+	defer s.webhookRateMu.Unlock()
+	hits := s.webhookHits[repoURL]
+	var recent []time.Time
+	for _, t := range hits {
+		if t.After(cutoff) {
+			recent = append(recent, t)
+		}
+	}
+	if len(recent) >= 5 {
+		s.webhookHits[repoURL] = recent
+		return false
+	}
+	s.webhookHits[repoURL] = append(recent, now)
+	return true
+}
+
 func (s *Server) handleGithubWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		httpError(w, 405, "method not allowed")
@@ -5095,6 +5148,10 @@ func (s *Server) handleGithubWebhook(w http.ResponseWriter, r *http.Request) {
 		if len(shortSHA) > 7 {
 			shortSHA = shortSHA[:7]
 		}
+		if !s.webhookAllowed(payload.Repository.CloneURL) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{"status": "rate_limited", "triggered": 0})
+			return
+		}
 		s.auditLog("github", "deploy.trigger", st.App, fmt.Sprintf("build #%d commit=%s env=%s", buildNum, shortSHA, st.Env))
 		s.queue <- DeployJob{ID: deployID, Req: req}
 		s.broadcastSnapshot()
@@ -5150,41 +5207,42 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "invalid json")
 		return
 	}
-	if req.App == "" || req.Branch == "" || (req.Env != EnvProd && req.Env != EnvPreview) {
+	if !validDeployTarget(req.App, req.Env, req.Branch) {
 		httpError(w, 400, "app, branch, env required")
 		return
 	}
-
-	state, err := s.getAppState(req.App, req.Env, req.Branch)
-	if err != nil || state.PreviousImage == "" {
-		httpError(w, 400, "no previous image to rollback")
+	deployID, err := s.enqueueRollbackForLane(req, requestActorLabel(s, r), "rollback")
+	if err != nil {
+		httpError(w, 400, err.Error())
 		return
 	}
-
-	deployID := newID()
-	logPath := filepath.Join(s.logsDir, deployID+".log")
-	deploy := &Deploy{ID: deployID, App: req.App, RepoURL: "", Branch: req.Branch, Env: req.Env, Status: StatusQueued, CreatedAt: time.Now(), LogPath: logPath}
-
-	s.mu.Lock()
-	s.deploys[deployID] = deploy
-	s.mu.Unlock()
-
-	rollbackReq := DeployRequest{
-		App:              req.App,
-		Branch:           req.Branch,
-		Env:              req.Env,
-		Mode:             state.Mode,
-		HostPort:         state.HostPort,
-		HostPortExplicit: state.HostPortExplicit,
-		ServicePort:      state.ServicePort,
-		PublicHost:       state.PublicHost,
-		Source:           "rollback",
+	deploy, err := s.getDeployFromDB(deployID)
+	if err != nil {
+		httpError(w, 500, "rollback queued but deploy could not be loaded")
+		return
 	}
-	_ = s.saveDeployToDB(deploy, rollbackReq)
-
-	s.queue <- DeployJob{ID: deployID, Req: rollbackReq, Rollback: true, RollbackImage: state.PreviousImage}
-	s.broadcastSnapshot()
 	writeJSON(w, 200, deploy)
+}
+
+func (s *Server) handleDeployCancel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpError(w, 405, "method not allowed")
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/deploys/cancel/")
+	if id == "" {
+		httpError(w, 400, "missing deploy id")
+		return
+	}
+	s.buildCancelsMu.Lock()
+	cancel, ok := s.buildCancels[id]
+	s.buildCancelsMu.Unlock()
+	if !ok {
+		httpError(w, 404, "no active build for this deploy")
+		return
+	}
+	cancel()
+	writeJSON(w, 200, map[string]string{"status": "cancelled"})
 }
 
 // ---------------------- App control (start/stop/restart) ----------------------
@@ -5209,7 +5267,7 @@ func (s *Server) handleAppStop(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "invalid json")
 		return
 	}
-	if req.App == "" || req.Branch == "" || (req.Env != EnvProd && req.Env != EnvPreview) {
+	if !validDeployTarget(req.App, req.Env, req.Branch) {
 		httpError(w, 400, "app, branch, env required")
 		return
 	}
@@ -5219,7 +5277,7 @@ func (s *Server) handleAppStop(w http.ResponseWriter, r *http.Request) {
 	s.stopLaneServices(req.App, req.Env, req.Branch)
 	if st, err := s.getAppState(req.App, req.Env, req.Branch); err == nil && st != nil {
 		st.Stopped = true
-		constrainAppStateForEngine(st)
+		s.constrainAppState(st)
 		_ = s.saveAppState(st)
 	}
 	msg := "stopped"
@@ -5236,7 +5294,7 @@ func (s *Server) handleAppStart(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "invalid json")
 		return
 	}
-	if req.App == "" || req.Branch == "" || (req.Env != EnvProd && req.Env != EnvPreview) {
+	if !validDeployTarget(req.App, req.Env, req.Branch) {
 		httpError(w, 400, "app, branch, env required")
 		return
 	}
@@ -5246,7 +5304,7 @@ func (s *Server) handleAppStart(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "no image found for app")
 		return
 	}
-	constrainAppStateForEngine(st)
+	s.constrainAppState(st)
 	engine := firstNonEmptyEngine(st.Engine)
 
 	networkName := ""
@@ -5326,7 +5384,8 @@ func (s *Server) handleAppStart(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	st.Stopped = false
-	constrainAppStateForEngine(st)
+	s.constrainAppState(st)
+	s.refreshLaneExpiry(st, time.Now())
 	_ = s.saveAppState(st)
 	_ = s.setLatestDeployPreviewURL(st.App, st.Env, st.Branch, previewURLFromConfig(st.Mode, st.PublicHost, st.HostPort))
 
@@ -5343,7 +5402,7 @@ func (s *Server) handleAppRestart(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "invalid json")
 		return
 	}
-	if req.App == "" || req.Branch == "" || (req.Env != EnvProd && req.Env != EnvPreview) {
+	if !validDeployTarget(req.App, req.Env, req.Branch) {
 		httpError(w, 400, "app, branch, env required")
 		return
 	}
@@ -5353,7 +5412,7 @@ func (s *Server) handleAppRestart(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "no image found for app")
 		return
 	}
-	constrainAppStateForEngine(st)
+	s.constrainAppState(st)
 	engine := firstNonEmptyEngine(st.Engine)
 	controlReq := DeployRequest{
 		App:              st.App,
@@ -5433,7 +5492,8 @@ func (s *Server) handleAppRestart(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	st.Stopped = false
-	constrainAppStateForEngine(st)
+	s.constrainAppState(st)
+	s.refreshLaneExpiry(st, time.Now())
 	_ = s.saveAppState(st)
 	_ = s.setLatestDeployPreviewURL(st.App, st.Env, st.Branch, previewURLFromConfig(st.Mode, st.PublicHost, st.HostPort))
 	writeJSON(w, 200, map[string]string{"status": "restarted"})
@@ -5450,6 +5510,8 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 			Engine        *string   `json:"engine"`
 			Mode          *string   `json:"mode"`
 			TrafficMode   *string   `json:"traffic_mode"`
+			AccessPolicy  *string   `json:"access_policy"`
+			IPAllowlist   *string   `json:"ip_allowlist"`
 			HostPort      *int      `json:"host_port"`
 			ServicePort   *int      `json:"service_port"`
 			PublicHost    *string   `json:"public_host"`
@@ -5459,7 +5521,8 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 400, "invalid json")
 			return
 		}
-		if body.App == "" || body.Branch == "" || (body.Env != EnvProd && body.Env != EnvPreview) {
+		body.Env = normalizeDeployEnv(string(body.Env))
+		if !validDeployTarget(body.App, body.Env, body.Branch) {
 			httpError(w, 400, "app, branch, env required")
 			return
 		}
@@ -5475,7 +5538,7 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 				App:    body.App,
 				Env:    body.Env,
 				Branch: body.Branch,
-				Engine: EngineStation,
+				Engine: detectDefaultEngine(),
 			}
 		}
 		st.Engine = firstNonEmptyEngine(st.Engine)
@@ -5507,6 +5570,17 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 			}
 			st.TrafficMode = trafficMode
 		}
+		if body.AccessPolicy != nil {
+			accessPolicy := normalizeAccessPolicy(*body.AccessPolicy)
+			if accessPolicy == "" {
+				httpError(w, 400, "access_policy must be public, relay-login, signed-link, or ip-allowlist")
+				return
+			}
+			st.AccessPolicy = accessPolicy
+		}
+		if body.IPAllowlist != nil {
+			st.IPAllowlist = normalizeIPAllowlist(*body.IPAllowlist)
+		}
 		if body.HostPort != nil {
 			if *body.HostPort < 0 {
 				httpError(w, 400, "host_port must be >= 0")
@@ -5537,7 +5611,15 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 		if body.WebhookSecret != nil {
 			st.WebhookSecret = strings.TrimSpace(*body.WebhookSecret)
 		}
-		constrainAppStateForEngine(st)
+		if normalizeAccessPolicy(st.AccessPolicy) == AccessPolicyIPAllowlist && strings.TrimSpace(st.IPAllowlist) == "" {
+			httpError(w, 400, "ip_allowlist is required when access_policy is ip-allowlist")
+			return
+		}
+		policy := s.lanePolicy(st.Env)
+		if normalizeAccessPolicy(st.AccessPolicy) == "" {
+			st.AccessPolicy = policy.DefaultAccessPolicy
+		}
+		s.constrainAppState(st)
 		if err := s.saveAppState(st); err != nil {
 			httpError(w, 500, "failed to save app state: "+err.Error())
 			return
@@ -5570,11 +5652,10 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 400, "app required")
 			return
 		}
-		var e DeployEnv
-		if env == string(EnvProd) {
-			e = EnvProd
-		} else {
-			e = EnvPreview
+		e := normalizeDeployEnv(env)
+		if !isKnownDeployEnv(e) {
+			writeJSON(w, 200, map[string]any{})
+			return
 		}
 		st, err := s.getAppState(app, e, branch)
 		if err != nil {
@@ -5599,7 +5680,8 @@ func (s *Server) handleAppCompanions(w http.ResponseWriter, r *http.Request) {
 		app := r.URL.Query().Get("app")
 		env := DeployEnv(r.URL.Query().Get("env"))
 		branch := r.URL.Query().Get("branch")
-		if app == "" || branch == "" || (env != EnvProd && env != EnvPreview) {
+		env = normalizeDeployEnv(string(env))
+		if !validDeployTarget(app, env, branch) {
 			httpError(w, 400, "app, branch, env required")
 			return
 		}
@@ -5667,7 +5749,8 @@ func (s *Server) handleAppCompanions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 400, "invalid json")
 			return
 		}
-		if body.App == "" || body.Branch == "" || (body.Env != EnvProd && body.Env != EnvPreview) {
+		body.Env = normalizeDeployEnv(string(body.Env))
+		if !validDeployTarget(body.App, body.Env, body.Branch) {
 			httpError(w, 400, "app, branch, env required")
 			return
 		}
@@ -5706,10 +5789,10 @@ func (s *Server) handleAppCompanions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, cfg)
 	case http.MethodDelete:
 		app := r.URL.Query().Get("app")
-		env := r.URL.Query().Get("env")
+		env := string(normalizeDeployEnv(r.URL.Query().Get("env")))
 		branch := r.URL.Query().Get("branch")
 		name := r.URL.Query().Get("name")
-		if app == "" || branch == "" || name == "" || (env != string(EnvProd) && env != string(EnvPreview)) {
+		if app == "" || branch == "" || name == "" || !isKnownDeployEnv(DeployEnv(env)) {
 			httpError(w, 400, "app, branch, env, name required")
 			return
 		}
@@ -5750,7 +5833,8 @@ func (s *Server) handleCompanionRestart(w http.ResponseWriter, r *http.Request) 
 		httpError(w, 400, "invalid json")
 		return
 	}
-	if body.App == "" || body.Branch == "" || body.Name == "" || (body.Env != EnvProd && body.Env != EnvPreview) {
+	body.Env = normalizeDeployEnv(string(body.Env))
+	if body.App == "" || body.Branch == "" || body.Name == "" || !isKnownDeployEnv(body.Env) {
 		httpError(w, 400, "app, branch, env, name required")
 		return
 	}
@@ -5976,6 +6060,18 @@ func (s *Server) runDeploy(job DeployJob) {
 		s.buildLock.Unlock()
 	}()
 
+	// Register a cancel func so the admin UI can abort an active build.
+	buildCtx, buildCancel := context.WithCancel(context.Background())
+	defer buildCancel()
+	s.buildCancelsMu.Lock()
+	s.buildCancels[job.ID] = buildCancel
+	s.buildCancelsMu.Unlock()
+	defer func() {
+		s.buildCancelsMu.Lock()
+		delete(s.buildCancels, job.ID)
+		s.buildCancelsMu.Unlock()
+	}()
+
 	// Load deploy record (in-memory + db)
 	s.mu.RLock()
 	d = s.deploys[job.ID]
@@ -6025,6 +6121,7 @@ func (s *Server) runDeploy(job DeployJob) {
 		engine = firstNonEmptyEngine(state.Engine)
 	}
 	constrainDeployRequestForEngine(engine, &req)
+	s.applyLaneDefaultsToDeployRequest(&req)
 
 	// Mark running
 	now := time.Now()
@@ -6054,28 +6151,28 @@ func (s *Server) runDeploy(job DeployJob) {
 	mustMkdir(repoDir)
 
 	// If source is git, ensure repo is up to date
-	if req.Source == "git" && req.RepoURL != "" {
+	if (req.Source == "git" || strings.TrimSpace(job.PromoteImage) != "") && req.RepoURL != "" {
 		log("source is git: preparing repo from %s [%s]", req.RepoURL, req.Branch)
 		if !fileExists(filepath.Join(repoDir, ".git")) {
 			log("cloning repository...")
 			// Clone into a temp dir then move or just clone into repoDir
 			// Since repoDir exists (mustMkdir), we might need to remove it or clone inside
 			_ = os.RemoveAll(repoDir)
-			if err := runCmdLogged(workspace, logf, "git", "clone", "--depth", "1", "--branch", req.Branch, req.RepoURL, "repo"); err != nil {
+			if err := runCmdLoggedCtx(buildCtx, workspace, logf, "git", "clone", "--depth", "1", "--branch", req.Branch, req.RepoURL, "repo"); err != nil {
 				failDeploy(s, d, err, "git clone failed: "+err.Error())
 				return
 			}
 		} else {
 			log("updating existing repository...")
-			if err := runCmdLogged(repoDir, logf, "git", "fetch", "origin", req.Branch); err != nil {
+			if err := runCmdLoggedCtx(buildCtx, repoDir, logf, "git", "fetch", "origin", req.Branch); err != nil {
 				log("fetch failed, attempting clean clone: %v", err)
 				_ = os.RemoveAll(repoDir)
-				if err := runCmdLogged(workspace, logf, "git", "clone", "--depth", "1", "--branch", req.Branch, req.RepoURL, "repo"); err != nil {
+				if err := runCmdLoggedCtx(buildCtx, workspace, logf, "git", "clone", "--depth", "1", "--branch", req.Branch, req.RepoURL, "repo"); err != nil {
 					failDeploy(s, d, err, "git clone failed after retry: "+err.Error())
 					return
 				}
 			} else {
-				if err := runCmdLogged(repoDir, logf, "git", "reset", "--hard", "origin/"+req.Branch); err != nil {
+				if err := runCmdLoggedCtx(buildCtx, repoDir, logf, "git", "reset", "--hard", "origin/"+req.Branch); err != nil {
 					failDeploy(s, d, err, "git reset failed: "+err.Error())
 					return
 				}
@@ -6187,9 +6284,22 @@ func (s *Server) runDeploy(job DeployJob) {
 				}
 				return ""
 			}(),
+			AccessPolicy: func() string {
+				if state != nil {
+					return state.AccessPolicy
+				}
+				return ""
+			}(),
+			IPAllowlist: func() string {
+				if state != nil {
+					return state.IPAllowlist
+				}
+				return ""
+			}(),
 			Stopped: false,
 		}
-		constrainAppStateForEngine(nextState)
+		s.constrainAppState(nextState)
+		s.refreshLaneExpiry(nextState, time.Now())
 		_ = s.saveAppState(nextState)
 		if err := s.pruneRuntimeArtifacts(rollbackEngine, req.App, req.Env, req.Branch, job.RollbackImage, prevCurrent); err != nil {
 			log("warning: image prune failed after rollback: %v", err)
@@ -6311,14 +6421,18 @@ func (s *Server) runDeploy(job DeployJob) {
 	repoHash := repoFingerprint(repoDir)
 	artifactRef := ""
 	reusedArtifact := false
-	if s.canReuseRuntimeArtifact(state, engine, repoHash) {
+	if strings.TrimSpace(job.PromoteImage) != "" {
+		artifactRef = strings.TrimSpace(job.PromoteImage)
+		reusedArtifact = true
+		log("promotion requested: reusing artifact %s", artifactRef)
+	} else if s.canReuseRuntimeArtifact(state, engine, repoHash) {
 		artifactRef = state.CurrentImage
 		reusedArtifact = true
 		log("build reuse: unchanged build inputs; reusing %s", artifactRef)
 	} else if engine == EngineStation {
 		artifactRef = stationSnapshotName(req.App, req.Env, req.Branch, d.ID)
 		log("station build starting...")
-		if _, err := s.buildStationSnapshot(repoDir, dockerfilePath, artifactRef, logf); err != nil {
+		if _, err := s.buildStationSnapshot(buildCtx, repoDir, dockerfilePath, artifactRef, logf); err != nil {
 			end := time.Now()
 			d.Status = StatusFailed
 			d.EndedAt = &end
@@ -6342,7 +6456,7 @@ func (s *Server) runDeploy(job DeployJob) {
 		if cfg != nil && strings.TrimSpace(cfg.Dockerfile) != "" {
 			buildDockerfilePath = dockerfilePath
 		}
-		if err := s.runtime.Build(artifactRef, repoDir, buildDockerfilePath, logf); err != nil {
+		if err := s.runtime.Build(buildCtx, artifactRef, repoDir, buildDockerfilePath, logf); err != nil {
 			end := time.Now()
 			d.Status = StatusFailed
 			d.EndedAt = &end
@@ -6375,10 +6489,10 @@ func (s *Server) runDeploy(job DeployJob) {
 		req.ServicePort = plan.ServicePort
 	}
 	if req.PublicHost == "" {
-		if host := s.autoPreviewHostFull(req.App, req.Branch); host != "" {
+		if host := s.autoPreviewHostFull(req.Env, req.App, req.Branch, req.PublicHost); host != "" {
 			req.PublicHost = host
 			req.Mode = "traefik"
-			log("auto preview URL: %s", host)
+			log("auto lane URL: %s", host)
 		}
 	}
 
@@ -6517,9 +6631,28 @@ func (s *Server) runDeploy(job DeployJob) {
 			}
 			return ""
 		}(),
+		AccessPolicy: func() string {
+			if currentState != nil {
+				return currentState.AccessPolicy
+			}
+			if prev != nil {
+				return prev.AccessPolicy
+			}
+			return ""
+		}(),
+		IPAllowlist: func() string {
+			if currentState != nil {
+				return currentState.IPAllowlist
+			}
+			if prev != nil {
+				return prev.IPAllowlist
+			}
+			return ""
+		}(),
 		Stopped: appStopped,
 	}
-	constrainAppStateForEngine(nextState)
+	s.constrainAppState(nextState)
+	s.refreshLaneExpiry(nextState, time.Now())
 	_ = s.saveAppState(nextState)
 
 	end := time.Now()
@@ -6568,10 +6701,7 @@ func (s *Server) runDeploy(job DeployJob) {
 }
 
 func defaultHostPort(env DeployEnv) int {
-	if env == EnvProd {
-		return 3000
-	}
-	return 3001
+	return defaultLanePolicy(env).DefaultHostPort
 }
 
 func previewHostPortExplicit(req DeployRequest, state *AppState) bool {
@@ -6598,13 +6728,14 @@ func persistedHostPortExplicit(req DeployRequest, state *AppState) bool {
 }
 
 func shouldAutoAssignPreviewHostPort(req DeployRequest, state *AppState) bool {
-	if req.Env != EnvPreview {
+	policy := defaultLanePolicy(req.Env)
+	if policy.Env == EnvProd {
 		return false
 	}
 	if strings.TrimSpace(req.PublicHost) != "" {
 		return false
 	}
-	if autoPreviewHost(req.App, req.Branch) != "" {
+	if laneNeedsManagedHost(policy, strings.TrimSpace(os.Getenv("RELAY_BASE_DOMAIN"))) {
 		return false
 	}
 	if firstNonEmpty(strings.ToLower(strings.TrimSpace(req.Mode)), "port") != "port" {
@@ -6653,13 +6784,13 @@ func (s *Server) assignPreviewHostPort(runtime ContainerRuntime, req *DeployRequ
 	if req == nil {
 		return
 	}
-	if req.Env != EnvPreview {
+	if s.lanePolicy(req.Env).Env == EnvProd {
 		return
 	}
 	if strings.TrimSpace(req.PublicHost) != "" {
 		return
 	}
-	if s.autoPreviewHostFull(req.App, req.Branch) != "" {
+	if s.autoPreviewHostFull(req.Env, req.App, req.Branch, "") != "" {
 		return
 	}
 	if firstNonEmpty(strings.ToLower(strings.TrimSpace(req.Mode)), "port") != "port" {
@@ -6716,7 +6847,7 @@ func (s *Server) previewHostPortUsable(runtime ContainerRuntime, app string, env
 }
 
 func (s *Server) previewHostPortReservedByOtherApp(app string, env DeployEnv, branch string, port int) bool {
-	if s == nil || s.db == nil || env != EnvPreview || port <= 0 {
+	if s == nil || s.db == nil || defaultLanePolicy(env).Env == EnvProd || port <= 0 {
 		return false
 	}
 	rows, err := s.db.Query(
@@ -6933,6 +7064,11 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 	activeUpstream := fmt.Sprintf("%s:%d", appSlotContainerName(app, env, branch, activeSlot), firstNonZero(servicePort, 3000))
 	standbyMode := normalizeActiveSlot(standbySlot)
 	trafficMode = firstNonEmpty(normalizeTrafficMode(trafficMode), "edge")
+	relayPort := listenAddrPort(s.httpAddr)
+	authURL := ""
+	if relayPort > 0 {
+		authURL = edgeAuthProxyURL(relayPort, app, env, branch, "host.docker.internal")
+	}
 	var conf strings.Builder
 	conf.WriteString("worker_processes auto;\n")
 	conf.WriteString("events { worker_connections 1024; }\n")
@@ -6987,7 +7123,34 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 	conf.WriteString("      add_header Content-Type text/plain;\n")
 	conf.WriteString("      return 200 'ok';\n")
 	conf.WriteString("    }\n")
+	if authURL != "" {
+		conf.WriteString("    location = /__relay/authz {\n")
+		conf.WriteString("      internal;\n")
+		conf.WriteString("      proxy_pass_request_body off;\n")
+		conf.WriteString("      proxy_set_header Content-Length \"\";\n")
+		conf.WriteString("      proxy_set_header Cookie $http_cookie;\n")
+		conf.WriteString("      proxy_set_header Authorization $http_authorization;\n")
+		conf.WriteString("      proxy_set_header X-Relay-Token $http_x_relay_token;\n")
+		conf.WriteString("      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n")
+		conf.WriteString("      proxy_set_header X-Forwarded-Host $host;\n")
+		conf.WriteString("      proxy_set_header X-Original-Uri $request_uri;\n")
+		conf.WriteString("      proxy_pass " + authURL + ";\n")
+		conf.WriteString("    }\n")
+		conf.WriteString("    location @relay_unauthorized {\n")
+		conf.WriteString("      add_header Content-Type text/plain always;\n")
+		conf.WriteString("      return 401 'relay login required';\n")
+		conf.WriteString("    }\n")
+		conf.WriteString("    location @relay_forbidden {\n")
+		conf.WriteString("      add_header Content-Type text/plain always;\n")
+		conf.WriteString("      return 403 'request blocked';\n")
+		conf.WriteString("    }\n")
+	}
 	conf.WriteString("    location / {\n")
+	if authURL != "" {
+		conf.WriteString("      auth_request /__relay/authz;\n")
+		conf.WriteString("      error_page 401 = @relay_unauthorized;\n")
+		conf.WriteString("      error_page 403 = @relay_forbidden;\n")
+	}
 	conf.WriteString("      proxy_http_version 1.1;\n")
 	conf.WriteString("      proxy_set_header Host $host;\n")
 	conf.WriteString("      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n")
@@ -7098,6 +7261,7 @@ func (s *Server) ensureEdgeProxy(log func(string, ...any), app string, env Deplo
 			RestartPolicy: "always",
 			Volumes:       []string{fmt.Sprintf("%s:/etc/nginx/nginx.conf:ro", dockerPath(configPath))},
 			PortBindings:  portBindings,
+			ExtraHosts:    []string{"host.docker.internal:host-gateway"},
 		}
 		if log != nil {
 			log("runtime run edge: %s", containerName)
@@ -7762,6 +7926,19 @@ func runCmdLoggedEnv(dir string, logw io.Writer, extraEnv []string, name string,
 	return cmd.Run()
 }
 
+func runCmdLoggedCtx(ctx context.Context, dir string, logw io.Writer, name string, args ...string) error {
+	return runCmdLoggedEnvCtx(ctx, dir, logw, nil, name, args...)
+}
+
+func runCmdLoggedEnvCtx(ctx context.Context, dir string, logw io.Writer, extraEnv []string, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), extraEnv...)
+	cmd.Stdout = logw
+	cmd.Stderr = logw
+	return cmd.Run()
+}
+
 // ---------------------- Auth + CORS ----------------------
 
 func (s *Server) validateToken(token string) bool {
@@ -7797,8 +7974,8 @@ func isHTTPSRequest(r *http.Request) bool {
 	return strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
 }
 
-func setDashboardSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
-	http.SetCookie(w, &http.Cookie{
+func (s *Server) setDashboardSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
+	cookie := &http.Cookie{
 		Name:     dashboardSessionCookie,
 		Value:    token,
 		Path:     "/",
@@ -7806,11 +7983,13 @@ func setDashboardSessionCookie(w http.ResponseWriter, r *http.Request, token str
 		SameSite: http.SameSiteLaxMode,
 		Secure:   isHTTPSRequest(r),
 		MaxAge:   60 * 60 * 12,
-	})
+	}
+	cookie.Domain = s.sessionCookieDomainForRequest(r)
+	http.SetCookie(w, cookie)
 }
 
-func clearDashboardSessionCookie(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
+func (s *Server) clearDashboardSessionCookie(w http.ResponseWriter, r *http.Request) {
+	cookie := &http.Cookie{
 		Name:     dashboardSessionCookie,
 		Value:    "",
 		Path:     "/",
@@ -7818,7 +7997,9 @@ func clearDashboardSessionCookie(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		Secure:   isHTTPSRequest(r),
 		MaxAge:   -1,
-	})
+	}
+	cookie.Domain = s.sessionCookieDomainForRequest(r)
+	http.SetCookie(w, cookie)
 }
 
 func isSameOriginRequest(r *http.Request) bool {
@@ -8002,7 +8183,7 @@ func (s *Server) handleDashboardSession(w http.ResponseWriter, r *http.Request) 
 			httpError(w, 403, "invalid token")
 			return
 		}
-		setDashboardSessionCookie(w, r, strings.TrimSpace(body.Token))
+		s.setDashboardSessionCookie(w, r, strings.TrimSpace(body.Token))
 		writeJSON(w, 200, map[string]any{"authenticated": true})
 	case http.MethodDelete:
 		if s.hasUsers() {
@@ -8011,7 +8192,7 @@ func (s *Server) handleDashboardSession(w http.ResponseWriter, r *http.Request) 
 				_, _ = s.db.Exec(`DELETE FROM user_sessions WHERE token=?`, token)
 			}
 		}
-		clearDashboardSessionCookie(w, r)
+		s.clearDashboardSessionCookie(w, r)
 		writeJSON(w, 200, map[string]any{"authenticated": false})
 	default:
 		httpError(w, 405, "method not allowed")
@@ -8185,7 +8366,7 @@ func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, "user created but session failed")
 		return
 	}
-	setDashboardSessionCookie(w, r, token)
+	s.setDashboardSessionCookie(w, r, token)
 	writeJSON(w, 200, map[string]any{"username": body.Username, "role": "owner"})
 }
 
@@ -8223,7 +8404,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, "session error")
 		return
 	}
-	setDashboardSessionCookie(w, r, token)
+	s.setDashboardSessionCookie(w, r, token)
 	resp := map[string]any{"username": u.Username, "role": u.Role}
 	// CLI browser flow: if cli_port given, generate a short-lived auth code
 	// that the CLI can exchange for a bearer token.
@@ -8589,7 +8770,10 @@ func migrateDB(db *sql.DB) error {
 			standby_slot TEXT,
 			drain_until INTEGER,
 			traffic_mode TEXT,
+			access_policy TEXT,
+			ip_allowlist TEXT,
 			repo_hash TEXT,
+			expires_at INTEGER DEFAULT 0,
 			stopped INTEGER DEFAULT 0,
 			updated_at INTEGER,
 			PRIMARY KEY (app, env, branch)
@@ -8658,6 +8842,9 @@ func migrateDB(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN standby_slot TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN drain_until INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN traffic_mode TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN access_policy TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN ip_allowlist TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN expires_at INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN stopped INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN host_port_explicit INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN image TEXT DEFAULT ''`)
@@ -8713,6 +8900,30 @@ func migrateDB(db *sql.DB) error {
 		detail TEXT NOT NULL DEFAULT ''
 	)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)`)
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS promotions (
+		id TEXT PRIMARY KEY,
+		app TEXT NOT NULL,
+		source_env TEXT NOT NULL,
+		source_branch TEXT NOT NULL,
+		source_deploy_id TEXT DEFAULT '',
+		source_image TEXT DEFAULT '',
+		target_env TEXT NOT NULL,
+		target_branch TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'pending_approval',
+		approval_required INTEGER NOT NULL DEFAULT 0,
+		requested_by TEXT DEFAULT '',
+		requested_at INTEGER NOT NULL DEFAULT 0,
+		approved_by TEXT DEFAULT '',
+		approved_at INTEGER NOT NULL DEFAULT 0,
+		target_deploy_id TEXT DEFAULT '',
+		rollback_deploy_id TEXT DEFAULT '',
+		health_status TEXT DEFAULT '',
+		health_detail TEXT DEFAULT ''
+	)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_promotions_app_ts ON promotions(app, requested_at DESC)`)
+	if err := seedLanePolicies(db); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -9201,28 +9412,25 @@ func (s *Server) reconcileStaleDeploysOnStartup() error {
 func (s *Server) saveAppState(st *AppState) error {
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO app_state
-		(app, env, branch, repo_url, engine, current_image, previous_image, mode, host_port, host_port_explicit, service_port, public_host, active_slot, standby_slot, drain_until, traffic_mode, repo_hash, webhook_secret, stopped, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(app, env, branch, repo_url, engine, current_image, previous_image, mode, host_port, host_port_explicit, service_port, public_host, active_slot, standby_slot, drain_until, traffic_mode, access_policy, ip_allowlist, repo_hash, expires_at, webhook_secret, stopped, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		st.App, string(st.Env), st.Branch, st.RepoURL, firstNonEmptyEngine(st.Engine), st.CurrentImage, st.PreviousImage, st.Mode,
-		st.HostPort, st.HostPortExplicit, st.ServicePort, st.PublicHost, normalizeActiveSlot(st.ActiveSlot), normalizeActiveSlot(st.StandbySlot), st.DrainUntil, firstNonEmpty(normalizeTrafficMode(st.TrafficMode), "edge"), st.RepoHash, st.WebhookSecret, st.Stopped, time.Now().UnixMilli(),
+		st.HostPort, st.HostPortExplicit, st.ServicePort, st.PublicHost, normalizeActiveSlot(st.ActiveSlot), normalizeActiveSlot(st.StandbySlot), st.DrainUntil, firstNonEmpty(normalizeTrafficMode(st.TrafficMode), "edge"), firstNonEmpty(normalizeAccessPolicy(st.AccessPolicy), s.lanePolicy(st.Env).DefaultAccessPolicy), normalizeIPAllowlist(st.IPAllowlist), st.RepoHash, st.ExpiresAt, st.WebhookSecret, st.Stopped, time.Now().UnixMilli(),
 	)
 	return err
 }
 
 func (s *Server) getAppState(app string, env DeployEnv, branch string) (*AppState, error) {
-	row := s.db.QueryRow(`SELECT app, env, branch, repo_url, COALESCE(engine,''), current_image, previous_image, mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), repo_hash, COALESCE(webhook_secret,''), COALESCE(stopped,0)
+	row := s.db.QueryRow(`SELECT app, env, branch, repo_url, COALESCE(engine,''), current_image, previous_image, mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), repo_hash, COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(stopped,0)
 		FROM app_state WHERE app=? AND env=? AND branch=?`, app, string(env), branch)
 
 	var st AppState
 	var envS string
-	if err := row.Scan(&st.App, &envS, &st.Branch, &st.RepoURL, &st.Engine, &st.CurrentImage, &st.PreviousImage, &st.Mode, &st.HostPort, &st.HostPortExplicit, &st.ServicePort, &st.PublicHost, &st.ActiveSlot, &st.StandbySlot, &st.DrainUntil, &st.TrafficMode, &st.RepoHash, &st.WebhookSecret, &st.Stopped); err != nil {
+	if err := row.Scan(&st.App, &envS, &st.Branch, &st.RepoURL, &st.Engine, &st.CurrentImage, &st.PreviousImage, &st.Mode, &st.HostPort, &st.HostPortExplicit, &st.ServicePort, &st.PublicHost, &st.ActiveSlot, &st.StandbySlot, &st.DrainUntil, &st.TrafficMode, &st.AccessPolicy, &st.IPAllowlist, &st.RepoHash, &st.ExpiresAt, &st.WebhookSecret, &st.Stopped); err != nil {
 		return nil, err
 	}
 	st.Env = DeployEnv(envS)
-	st.Engine = firstNonEmptyEngine(st.Engine)
-	st.ActiveSlot = normalizeActiveSlot(st.ActiveSlot)
-	st.StandbySlot = normalizeActiveSlot(st.StandbySlot)
-	st.TrafficMode = firstNonEmpty(normalizeTrafficMode(st.TrafficMode), "edge")
+	s.constrainAppState(&st)
 	return &st, nil
 }
 
@@ -9282,8 +9490,9 @@ func validateDeployRequest(req DeployRequest) error {
 	if req.Branch == "" {
 		return fmt.Errorf("branch required")
 	}
-	if req.Env != EnvProd && req.Env != EnvPreview {
-		return fmt.Errorf("env must be preview or prod")
+	req.Env = normalizeDeployEnv(string(req.Env))
+	if !isKnownDeployEnv(req.Env) {
+		return fmt.Errorf("env must be one of: preview, dev, staging, prod")
 	}
 	if req.Mode != "" {
 		m := strings.ToLower(strings.TrimSpace(req.Mode))

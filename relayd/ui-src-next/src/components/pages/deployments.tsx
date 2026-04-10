@@ -26,11 +26,12 @@ interface DeploymentsPageProps {
   envMap: Map<string, SelectedEnvMeta>;
   selectedEnv: SelectedEnvMeta | null;
   onOpenDeploy: (deploy: Deploy) => void;
+  onCancelDeploy?: (deployId: string) => Promise<void>;
 }
 
 const ALL = "__all__";
 
-export function DeploymentsPage({ deploys, envMap, selectedEnv, onOpenDeploy }: DeploymentsPageProps) {
+export function DeploymentsPage({ deploys, envMap, selectedEnv, onOpenDeploy, onCancelDeploy }: DeploymentsPageProps) {
   const [envFilter, setEnvFilter] = useState<string>(ALL);
   const [statusFilter, setStatusFilter] = useState<string>(ALL);
   const [searchQuery, setSearchQuery] = useState("");
@@ -121,13 +122,24 @@ export function DeploymentsPage({ deploys, envMap, selectedEnv, onOpenDeploy }: 
                   <div className="text-xs text-white/40 text-right shrink-0">{deploy.env}<span className="text-white/20">/</span>{deploy.branch}</div>
                   <div className="text-xs text-white/40 text-right font-mono shrink-0">{deployDurationLabel(deploy)}</div>
                   <div className="text-xs text-white/30 text-right shrink-0">{timeAgo(deploy.created_at)} ago</div>
-                  <button
-                    type="button"
-                    onClick={() => onOpenDeploy(deploy)}
-                    className="text-xs text-white/40 hover:text-white transition-colors px-2 py-1 rounded hover:bg-white/[0.06] shrink-0"
-                  >
-                    Inspect
-                  </button>
+                  <div className="flex items-center gap-1 shrink-0">
+                    {isActive && onCancelDeploy && (
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); onCancelDeploy(deploy.id); }}
+                        className="text-xs text-red-400/60 hover:text-red-400 transition-colors px-2 py-1 rounded hover:bg-red-500/[0.08] shrink-0"
+                      >
+                        Cancel
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => onOpenDeploy(deploy)}
+                      className="text-xs text-white/40 hover:text-white transition-colors px-2 py-1 rounded hover:bg-white/[0.06] shrink-0"
+                    >
+                      Inspect
+                    </button>
+                  </div>
                 </div>
               );
             })}
