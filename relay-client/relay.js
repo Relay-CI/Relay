@@ -348,6 +348,38 @@ function prompt(question, defaultVal = "") {
   });
 }
 
+const WIZARD_ENV_OPTIONS = ["dev", "staging", "prod", "preview"];
+
+async function promptSelect(question, options, defaultVal) {
+  const normalized = options.map((opt) => String(opt));
+  let fallback = String(defaultVal || normalized[0] || "");
+  if (!normalized.includes(fallback)) fallback = normalized[0] || "";
+
+  console.log(`  ${question}:`);
+  normalized.forEach((opt, i) => {
+    const mark = opt === fallback ? "*" : " ";
+    console.log(`    ${mark} ${i + 1}) ${opt}`);
+  });
+
+  const defaultIndex = Math.max(1, normalized.indexOf(fallback) + 1);
+  const raw = await prompt(`Choose 1-${normalized.length}`, String(defaultIndex));
+  const input = String(raw || "").trim().toLowerCase();
+
+  const asNum = Number.parseInt(input, 10);
+  if (Number.isInteger(asNum) && asNum >= 1 && asNum <= normalized.length) {
+    return normalized[asNum - 1];
+  }
+
+  const exact = normalized.find((opt) => opt.toLowerCase() === input);
+  if (exact) return exact;
+
+  const byPrefix = normalized.find((opt) => opt.toLowerCase().startsWith(input));
+  if (byPrefix) return byPrefix;
+
+  warn(`Unknown option "${raw}". Using ${fallback}.`);
+  return fallback;
+}
+
 function promptSecret(question) {
   return new Promise((resolve) => {
     const rl = readline.createInterface({
@@ -626,7 +658,7 @@ async function runSetupWizard(args, cfgPath, missingFields = []) {
 
   const existingEnv = args.env || process.env.RELAY_ENV || existingCfg.env;
   if (needAll || missing.has("env") || !existingEnv) {
-    env = await prompt("Env     ", existingEnv || "preview");
+    env = await promptSelect("Env lane", WIZARD_ENV_OPTIONS, existingEnv || "dev");
   } else {
     env = existingEnv;
     showConfigField("Env      ", env);
@@ -639,6 +671,10 @@ async function runSetupWizard(args, cfgPath, missingFields = []) {
     branch = existingBranch;
     showConfigField("Branch   ", branch);
   }
+
+  console.log(
+    `  ${c.dim}Tip: deactivate a lane with: relay stop --app ${app} --env ${env} --branch ${branch}${c.reset}`,
+  );
 
   // ── 3. Engine ──
   console.log("");
@@ -678,6 +714,42 @@ async function runSetupWizard(args, cfgPath, missingFields = []) {
 }
 
 /**
+ * When the user is connected but has no .relay.json, offer a numbered list of
+ * existing server projects to choose from.  Returns { app, env, branch, engine }
+ * when a selection is made, or null to fall through to the standard wizard.
+ */
+async function pickExistingProject(transport) {
+  try {
+    const projects = await apiJSON(transport, "GET", "/api/projects");
+    if (!Array.isArray(projects) || !projects.length) return null;
+
+    // Build flat list of app/env/branch triples.
+    const choices = [];
+    for (const p of projects) {
+      for (const e of p.envs || []) {
+        choices.push({ app: p.name, env: e.env, branch: e.branch, engine: e.engine || "docker" });
+      }
+    }
+    if (!choices.length) return null;
+
+    console.log(`\n${c.bold}Projects on this server:${c.reset}\n`);
+    choices.forEach((ch, i) => {
+      const branchStr = ch.branch !== "main" ? ` ${c.dim}(${ch.branch})${c.reset}` : "";
+      console.log(`  ${c.dim}${i + 1})${c.reset} ${c.bold}${ch.app}${c.reset} › ${ch.env}${branchStr}`);
+    });
+    console.log(`  ${c.dim}${choices.length + 1}) Create a new project${c.reset}\n`);
+
+    const raw = await prompt(`Pick a number (1–${choices.length + 1})`, `${choices.length + 1}`);
+    const num = parseInt(raw, 10);
+    if (!Number.isInteger(num) || num < 1 || num > choices.length + 1) return null;
+    if (num === choices.length + 1) return null; // user wants a new project
+    return choices[num - 1];
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Resolve transport (and optionally deploy args) from cli/env/config.
  * When resolution fails and stdin is a TTY, launch the interactive setup
  * wizard rather than crashing with a raw error message.
@@ -702,7 +774,6 @@ async function resolveOrSetup(args, { needDeploy = false } = {}) {
     const resolved = needDeploy ? resolveDeployArgs(args) : null;
     return { transport, resolved };
   } catch {}
-
   // If --dir is specified (e.g. relay deploy --dir ./site), also try loading
   // config from that directory before giving up and running the wizard.
   if (args.dir) {
@@ -748,6 +819,26 @@ async function resolveOrSetup(args, { needDeploy = false } = {}) {
   }
 
   const missingFields = parseMissingFields(resolveError);
+
+  // ── Project picker: when connection is already set but app/env/branch are
+  //    missing and no .relay.json exists (fresh folder), offer the user a list
+  //    of existing projects to pick from instead of filling them in manually.
+  const onlyAppMissing = missingFields.every((f) => ["app", "env", "branch"].includes(f)) && missingFields.length > 0;
+  if (onlyAppMissing && !fs.existsSync(cfgPath) && process.stdin.isTTY) {
+    // If we can establish a transport with current connection args, try the picker.
+    let existingTransport = null;
+    try { existingTransport = resolveTransport(args); } catch {}
+    if (existingTransport) {
+      const picked = await pickExistingProject(existingTransport);
+      if (picked) {
+        args.app = picked.app;
+        args.env = picked.env;
+        args.branch = picked.branch;
+        if (picked.engine) args.engine = picked.engine;
+      }
+    }
+  }
+
   const wiz = await runSetupWizard(args, cfgPath, missingFields);
   // Patch args so the re-resolution picks up wizard answers as CLI overrides.
   if (wiz.socket) args.socket = wiz.socket;
@@ -1178,6 +1269,9 @@ ${c.bold}COMMANDS${c.reset}
   ${c.cyan}projects${c.reset}                     List projects and their environments
 
   ${c.cyan}rollback${c.reset}                     Roll back the last deploy
+    --app  --env  --branch
+
+  ${c.cyan}lane delete${c.reset}                  Delete a lane and all lane data
     --app  --env  --branch
 
   ${c.cyan}start${c.reset} / ${c.cyan}stop${c.reset} / ${c.cyan}restart${c.reset}       Control a running container
@@ -2072,6 +2166,47 @@ async function main() {
     );
   }
 
+  // ── lane delete ───────────────────────────────────────────────────────────
+  if (cmd === "lane" || cmd === "lanes") {
+    const sub = String(args._[1] || "").toLowerCase();
+    if (sub === "delete" || sub === "rm" || sub === "remove") {
+      const { transport, resolved } = await resolveOrSetup(args, {
+        needDeploy: true,
+      });
+      try {
+        if (process.stdin.isTTY && !(args.yes === "true" || args.yes === true)) {
+          const confirm = await prompt(
+            `Permanently delete lane ${resolved.app}/${resolved.env}/${resolved.branch}?`,
+            "yes",
+          );
+          if (!confirm.toLowerCase().startsWith("y")) {
+            info("Cancelled");
+            process.exit(0);
+          }
+          const typed = await prompt(
+            `Type DELETE to confirm`,
+            "",
+          );
+          if (String(typed || "").trim() !== "DELETE") {
+            info("Cancelled: confirmation text did not match DELETE");
+            process.exit(0);
+          }
+        }
+        await apiJSON(transport, "POST", "/api/apps/delete-lane", {
+          app: resolved.app,
+          env: resolved.env,
+          branch: resolved.branch,
+          confirm: "DELETE",
+        });
+        ok(`Lane deleted ${resolved.app}/${resolved.env}/${resolved.branch}`);
+      } catch (e) {
+        die(e.message);
+      }
+      process.exit(0);
+    }
+    die("Usage: relay lane delete --app APP --env ENV --branch BRANCH [--yes]");
+  }
+
   // â”€â”€ deploy â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (cmd !== "deploy") {
     err(`Unknown command: ${c.bold}${cmd}${c.reset}`);
@@ -2087,6 +2222,58 @@ async function main() {
   const env = resolved.env;
   const branch = resolved.branch;
   const dir = resolved.dir || ".";
+
+  // ── Overwrite protection ───────────────────────────────────────────────────
+  // If the project exists on the server but its repo_url doesn't match the
+  // current git remote, only owners/admins may proceed.  Members/deployers are
+  // blocked unless --force is set.
+  if (!args.force) {
+    try {
+      const projects = await apiJSON(transport, "GET", "/api/projects");
+      const serverProject = Array.isArray(projects) ? projects.find((p) => p.name === app) : null;
+      if (serverProject) {
+        let localRepoURL = "";
+        try {
+          localRepoURL = String(
+            require("child_process").execSync("git remote get-url origin 2>/dev/null", { cwd: path.resolve(dir), stdio: "pipe" })
+          ).trim();
+        } catch {}
+
+        const serverRepoURL = serverProject.repo_url || "";
+        if (serverRepoURL && localRepoURL && serverRepoURL !== localRepoURL) {
+          let role = "deployer";
+          try {
+            const me = await apiJSON(transport, "GET", "/api/auth/me");
+            role = me.role || "deployer";
+          } catch {}
+
+          const canOverwrite = role === "owner" || role === "admin";
+          if (!canOverwrite) {
+            err(`Project ${c.bold}${app}${c.reset} is already associated with a different repository.`);
+            err(`Server repo: ${c.dim}${serverRepoURL}${c.reset}`);
+            err(`Your repo:   ${c.dim}${localRepoURL}${c.reset}`);
+            err(`Only owners and admins can overwrite. Use ${c.dim}--force${c.reset} to bypass (owners/admins only).`);
+            process.exit(1);
+          }
+
+          // Owner/admin: warn but proceed after confirmation.
+          warn(`Project ${c.bold}${app}${c.reset} is linked to a different repo.`);
+          warn(`Server: ${c.dim}${serverRepoURL}${c.reset}`);
+          warn(`Local:  ${c.dim}${localRepoURL}${c.reset}`);
+          if (process.stdin.isTTY) {
+            const confirm = await prompt("Overwrite the existing project? (yes/no)", "no");
+            if (!confirm.toLowerCase().startsWith("y")) {
+              info("Cancelled. Pass --force to skip this prompt.");
+              process.exit(0);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      // Non-critical check — don't block deploy on lookup failures.
+      if (e.status && e.status >= 500) warn(`Could not verify project ownership: ${e.message}`);
+    }
+  }
   const hasModeOverride = Object.prototype.hasOwnProperty.call(args, "mode");
   const hasHostPortOverride = Object.prototype.hasOwnProperty.call(
     args,

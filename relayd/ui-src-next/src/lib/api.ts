@@ -246,6 +246,13 @@ export async function stopApp(target: AppTarget): Promise<void> {
   });
 }
 
+export async function deleteLane(target: AppTarget): Promise<void> {
+  await apiFetch("/api/apps/delete-lane", {
+    method: "POST",
+    body: JSON.stringify({ ...target, confirm: "DELETE" }),
+  });
+}
+
 export async function restartApp(target: AppTarget): Promise<void> {
   await apiFetch("/api/apps/restart", {
     method: "POST",
@@ -488,6 +495,8 @@ export interface ServerConfig {
   base_domain?: string;
   dashboard_host?: string;
   acme_disabled?: string;
+  theme_name?: string;
+  theme_css?: string;
   [key: string]: unknown;
 }
 
@@ -502,6 +511,15 @@ export async function saveServerConfig(
     method: "POST",
     body: JSON.stringify(config),
   });
+}
+
+export interface PublicTheme {
+  theme_name?: string;
+  theme_css?: string;
+}
+
+export async function getPublicTheme(): Promise<PublicTheme> {
+  return apiFetch<PublicTheme>("/api/public/theme");
 }
 
 // ── Build logs ────────────────────────────────────────────────────────────

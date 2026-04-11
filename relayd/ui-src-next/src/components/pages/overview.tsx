@@ -48,7 +48,7 @@ interface OverviewPageProps {
 
 function MetricCard({ label, value, meta, tone }: { label: string; value: string; meta?: string; tone?: string }) {
   return (
-    <div className={cn("bg-white/[0.03] border border-white/[0.06] rounded-lg p-4", tone && `border-l-2 border-l-relay-${tone}`)}>
+    <div className={cn("bg-white/5 border border-white/[0.11] rounded-lg p-4", tone && `border-l-2 border-l-relay-${tone}`)}>
       <div className="eyebrow mb-1">{label}</div>
       <div className="text-2xl font-semibold text-white">{value}</div>
       {meta && <div className="text-xs text-white/40 mt-1">{meta}</div>}
@@ -70,8 +70,17 @@ export function OverviewPage({
 }: OverviewPageProps) {
   if (!project) {
     return (
-      <div className="flex items-center justify-center h-full text-white/30 text-sm">
-        Select a project to view the overview
+      <div className="flex items-center justify-center h-full">
+        <div className="empty-state">
+          <div className="empty-state__icon">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+              <rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>
+            </svg>
+          </div>
+          <div className="empty-state__title">No project selected</div>
+          <div className="empty-state__sub">Select a project from the top bar to view its overview and manage deployments.</div>
+        </div>
       </div>
     );
   }
@@ -155,20 +164,70 @@ export function OverviewPage({
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               {contexts.map((context) => {
                 const isActive = selectedEnv && deployKey(context.app, context.env, context.branch) === deployKey(selectedEnv.app, selectedEnv.env, selectedEnv.branch);
+
+                // Expiry countdown
+                const expiryMs = context.expires_at ? context.expires_at * 1000 - Date.now() : null;
+                const expiryLabel = expiryMs !== null
+                  ? expiryMs <= 0 ? "Expired"
+                    : expiryMs < 3600000 ? `${Math.floor(expiryMs / 60000)}m left`
+                    : expiryMs < 86400000 ? `${Math.floor(expiryMs / 3600000)}h left`
+                    : `${Math.floor(expiryMs / 86400000)}d left`
+                  : null;
+                const expiryUrgent = expiryMs !== null && expiryMs < 3600000;
+
+                // Drain indicator
+                const drainActive = context.drain_until && context.drain_until * 1000 > Date.now();
+                const drainTime = drainActive
+                  ? new Date(context.drain_until! * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                  : null;
+
                 return (
                   <div
                     key={deployKey(context.app, context.env, context.branch)}
-                    className={cn("border rounded-lg p-3.5 transition-colors", isActive ? "border-relay-accent/40 bg-relay-accent/5" : "border-white/[0.06] bg-white/[0.02]")}
+                    className={cn(
+                      "border rounded-lg p-3.5 transition-colors",
+                      isActive ? "border-relay-accent/40 bg-relay-accent/5" : "border-white/[0.06] bg-white/[0.02]",
+                      drainActive && "border-amber-500/30",
+                    )}
                   >
                     <div className="flex items-start justify-between gap-2 mb-2">
-                      <div>
-                        <div className="text-sm font-semibold text-white">{context.env} / {context.branch}</div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-sm font-semibold text-white">{context.env}</span>
+                          {context.branch !== "main" && (
+                            <span className="text-[10px] text-white/40 bg-white/[0.04] px-1.5 py-0.5 rounded font-mono">{context.branch}</span>
+                          )}
+                        </div>
                         <div className="text-xs text-white/35 mt-0.5 truncate">{context.previewURL || "No preview route"}</div>
                       </div>
-                      <span className={cn("text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded border shrink-0", context.latestDeploy?.status === "success" ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400" : context.latestDeploy ? "bg-amber-500/10 border-amber-500/30 text-amber-400" : "bg-white/[0.04] border-white/[0.08] text-white/40")}>
-                        {context.latestDeploy?.status ?? "idle"}
-                      </span>
+                      <div className="flex flex-col items-end gap-1 shrink-0">
+                        <span className={cn("text-[10px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded border", context.latestDeploy?.status === "success" ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400" : context.latestDeploy ? "bg-amber-500/10 border-amber-500/30 text-amber-400" : "bg-white/[0.04] border-white/[0.08] text-white/40")}>
+                          {context.latestDeploy?.status ?? "idle"}
+                        </span>
+                        {expiryLabel && (
+                          <span className={cn(
+                            "text-[10px] px-1.5 py-0.5 rounded border",
+                            expiryUrgent ? "bg-red-500/10 border-red-500/30 text-red-400" : "bg-white/[0.04] border-white/[0.08] text-white/40",
+                          )}>
+                            {expiryLabel}
+                          </span>
+                        )}
+                      </div>
                     </div>
+
+                    {drainTime && (
+                      <div className="flex items-center gap-1 mb-2">
+                        <div className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
+                        <span className="text-[10px] text-amber-400">Draining until {drainTime}</span>
+                        <div className="flex-1 mx-1.5 h-1 bg-white/[0.06] rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-amber-400/60 rounded-full transition-all"
+                            style={{ width: `${Math.min(100, Math.max(5, 100 - ((context.drain_until! * 1000 - Date.now()) / 300000) * 100))}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+
                     <div className="flex gap-1 flex-wrap mb-2">
                       <span className="text-[10px] bg-white/[0.04] px-1.5 py-0.5 rounded text-white/40">{trafficModeLabel(context.traffic_mode ?? "")}</span>
                       <span className="text-[10px] bg-white/[0.04] px-1.5 py-0.5 rounded text-white/40">{rolloutStrategy(context)}</span>
@@ -201,7 +260,13 @@ export function OverviewPage({
               <span className="text-xs text-white/40 border border-white/[0.08] px-2 py-0.5 rounded">{deploys.length} total</span>
             </div>
             {!recent.length ? (
-              <div className="text-sm text-white/30 text-center py-6">No deployments yet. Trigger a deploy to see activity here.</div>
+              <div className="empty-state">
+                <div className="empty-state__icon">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+                </div>
+                <div className="empty-state__title">No deploys yet</div>
+                <div className="empty-state__sub">Trigger a deploy to see activity here.</div>
+              </div>
             ) : (
               <div className="divide-y divide-white/[0.04]">
                 {recent.map((deploy) => {

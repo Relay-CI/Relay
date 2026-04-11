@@ -10,9 +10,10 @@ interface ProjectSelectorProps {
   projects: NormalizedProject[];
   selected: string;
   onSelect: (name: string) => void;
+  onCreateNew?: () => void;
 }
 
-export function ProjectSelector({ projects, selected, onSelect }: ProjectSelectorProps) {
+export function ProjectSelector({ projects, selected, onSelect, onCreateNew }: ProjectSelectorProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const ref = useRef<HTMLDivElement>(null);
@@ -97,6 +98,18 @@ export function ProjectSelector({ projects, selected, onSelect }: ProjectSelecto
               <div className="px-3 py-4 text-sm text-white/40 text-center">No projects matched</div>
             )}
           </div>
+          {onCreateNew && (
+            <button
+              type="button"
+              onClick={() => { onCreateNew(); setOpen(false); setQuery(""); }}
+              className="w-full flex items-center gap-2 px-3 py-2.5 text-xs text-relay-accent hover:bg-relay-accent/10 border-t border-white/[0.06] transition-colors"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+              </svg>
+              New project…
+            </button>
+          )}
         </div>
       )}
     </div>

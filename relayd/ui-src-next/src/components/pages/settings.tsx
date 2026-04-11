@@ -20,6 +20,7 @@ import {
   restartApp,
   startApp,
   stopApp,
+  deleteLane,
   getSecrets,
   setSecret,
   deleteSecret,
@@ -363,6 +364,44 @@ export function SettingsPage({
     }
   }
 
+  async function handleDeleteLane() {
+    if (!selectedEnv) return;
+    const laneLabel = `${selectedEnv.app}/${selectedEnv.env}/${selectedEnv.branch}`;
+    const confirmed = window.confirm(
+      `Delete lane ${laneLabel}?\n\nThis permanently removes runtime, workspace, deploy data, and lane state for this lane.`,
+    );
+    if (!confirmed) return;
+
+    const typed = window.prompt(
+      `Type DELETE to confirm lane deletion for ${laneLabel}.`,
+      "",
+    );
+    if ((typed ?? "").trim() !== "DELETE") {
+      setNotice({
+        tone: "warn",
+        text: "Lane deletion cancelled. Confirmation text did not match DELETE.",
+      });
+      return;
+    }
+
+    setBusy(true);
+    try {
+      await deleteLane(selectedEnv);
+      setNotice({
+        tone: "ok",
+        text: `Lane ${laneLabel} was deleted permanently.`,
+      });
+      await onUpdated();
+    } catch (err) {
+      setNotice({
+        tone: "warn",
+        text: `Delete lane failed: ${err instanceof Error ? err.message : "unknown error"}`,
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleRequestPromotion() {
     if (!selectedEnv) return;
     setPromotionBusy(true);
@@ -688,6 +727,17 @@ export function SettingsPage({
             >
               Start App
             </button>
+            <button
+              type="button"
+              onClick={handleDeleteLane}
+              disabled={busy}
+              className="ghost-btn border-red-500/40 text-red-300 hover:bg-red-500/10"
+            >
+              Delete Lane
+            </button>
+          </div>
+          <div className="text-xs text-white/35">
+            Delete Lane permanently removes this lane's runtime, workspace, and lane data.
           </div>
         </div>
       </SectionCard>

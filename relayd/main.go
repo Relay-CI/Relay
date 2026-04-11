@@ -2472,12 +2472,16 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 			"base_domain":    s.serverBaseDomain(),
 			"dashboard_host": s.serverDashboardHost(),
 			"acme_disabled":  s.serverConfigGet("acme_disabled"),
+			"theme_name":     s.serverConfigGet("theme_name"),
+			"theme_css":      s.serverConfigGet("theme_css"),
 		})
 	case http.MethodPost:
 		var body struct {
 			BaseDomain    string `json:"base_domain"`
 			DashboardHost string `json:"dashboard_host"`
 			ACMEDisabled  string `json:"acme_disabled"`
+			ThemeName     string `json:"theme_name"`
+			ThemeCSS      string `json:"theme_css"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httpError(w, 400, "invalid JSON")
@@ -2489,6 +2493,8 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 		if body.ACMEDisabled == "true" {
 			acmeDisabled = "true"
 		}
+		themeName := strings.TrimSpace(body.ThemeName)
+		themeCSS := body.ThemeCSS // preserve internal whitespace
 		if err := validateProxyHostname(baseDomain, "base_domain"); err != nil {
 			httpError(w, 400, err.Error())
 			return
@@ -2511,6 +2517,8 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 			"base_domain":    baseDomain,
 			"dashboard_host": dashboardHost,
 			"acme_disabled":  acmeDisabled,
+			"theme_name":     themeName,
+			"theme_css":      themeCSS,
 		} {
 			if _, err := tx.Exec(
 				`INSERT INTO server_config (key, value) VALUES (?, ?)
@@ -2536,10 +2544,25 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 			"base_domain":    baseDomain,
 			"dashboard_host": dashboardHost,
 			"acme_disabled":  acmeDisabled,
+			"theme_name":     themeName,
+			"theme_css":      themeCSS,
 		})
 	default:
 		httpError(w, 405, "method not allowed")
 	}
+}
+
+// handlePublicTheme handles GET /api/public/theme — no authentication required.
+// Returns the active theme name and any custom CSS so the UI can apply it before login.
+func (s *Server) handlePublicTheme(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, 405, "method not allowed")
+		return
+	}
+	writeJSON(w, 200, map[string]string{
+		"theme_name": s.serverConfigGet("theme_name"),
+		"theme_css":  s.serverConfigGet("theme_css"),
+	})
 }
 
 func (s *Server) writeServerConfig(values map[string]string) error {
@@ -2833,6 +2856,8 @@ type projectSyncRecord struct {
 	StagingDir string
 }
 
+var errLaneNotFound = errors.New("lane not found")
+
 func (s *Server) projectHasActiveWork(app string) bool {
 	app = strings.TrimSpace(app)
 	if app == "" {
@@ -2859,6 +2884,351 @@ func (s *Server) projectHasActiveWork(app string) bool {
 		}
 	}
 	return false
+}
+
+func (s *Server) appLaneHasActiveWork(app string, env DeployEnv, branch string) bool {
+	app = strings.TrimSpace(app)
+	branch = strings.TrimSpace(branch)
+	if !validDeployTarget(app, env, branch) {
+		return false
+	}
+
+	lockKey := fmt.Sprintf("%s__%s__%s", app, env, branch)
+	s.buildLock.Lock()
+	if s.building[lockKey] {
+		s.buildLock.Unlock()
+		return true
+	}
+	s.buildLock.Unlock()
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, deploy := range s.deploys {
+		if deploy == nil || deploy.App != app || deploy.Env != env || deploy.Branch != branch {
+			continue
+		}
+		if deploy.Status == StatusQueued || deploy.Status == StatusRunning {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) deleteLaneData(app string, env DeployEnv, branch string) (map[string]int64, []string, error) {
+	app = strings.TrimSpace(app)
+	branch = strings.TrimSpace(branch)
+	if !validDeployTarget(app, env, branch) {
+		return nil, nil, fmt.Errorf("app, branch, env required")
+	}
+
+	var lane projectLaneRecord
+	lane.Env = env
+	lane.Branch = branch
+	hasLane := true
+	if err := s.db.QueryRow(
+		`SELECT COALESCE(current_image,''), COALESCE(previous_image,'')
+		 FROM app_state WHERE app=? AND env=? AND branch=?`,
+		app, string(env), branch,
+	).Scan(&lane.CurrentImage, &lane.PreviousImage); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			hasLane = false
+		} else {
+			return nil, nil, fmt.Errorf("load lane state: %w", err)
+		}
+	}
+
+	services := make([]ProjectService, 0, 8)
+	serviceRows, err := s.db.Query(
+		`SELECT project, name, type, branch, env, container, network, volume, env_key, env_val, COALESCE(image,''), COALESCE(port,0), COALESCE(host_port,0), COALESCE(spec_hash,'')
+		 FROM project_services WHERE project=? AND env=? AND branch=?`,
+		app, string(env), branch,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load lane services: %w", err)
+	}
+	for serviceRows.Next() {
+		var ps ProjectService
+		if err := serviceRows.Scan(&ps.Project, &ps.Name, &ps.Type, &ps.Branch, &ps.Env, &ps.Container, &ps.Network, &ps.Volume, &ps.EnvKey, &ps.EnvVal, &ps.Image, &ps.Port, &ps.HostPort, &ps.SpecHash); err != nil {
+			continue
+		}
+		services = append(services, ps)
+	}
+	serviceRows.Close()
+
+	deploys := make([]projectDeployRecord, 0, 16)
+	deployRows, err := s.db.Query(
+		`SELECT id, COALESCE(log_path,''), COALESCE(image_tag,''), COALESCE(previous_image_tag,'')
+		 FROM deploys WHERE app=? AND env=? AND branch=?`,
+		app, string(env), branch,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load lane deploys: %w", err)
+	}
+	for deployRows.Next() {
+		var rec projectDeployRecord
+		if err := deployRows.Scan(&rec.ID, &rec.LogPath, &rec.ImageTag, &rec.PrevImage); err != nil {
+			continue
+		}
+		deploys = append(deploys, rec)
+	}
+	deployRows.Close()
+
+	sessions := make([]projectSyncRecord, 0, 4)
+	sessionRows, err := s.db.Query(
+		`SELECT id, repo_dir, staging_dir FROM sync_sessions WHERE app=? AND env=? AND branch=?`,
+		app, string(env), branch,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load lane sync sessions: %w", err)
+	}
+	for sessionRows.Next() {
+		var rec projectSyncRecord
+		if err := sessionRows.Scan(&rec.ID, &rec.RepoDir, &rec.StagingDir); err != nil {
+			continue
+		}
+		sessions = append(sessions, rec)
+	}
+	sessionRows.Close()
+
+	if !hasLane && len(services) == 0 && len(deploys) == 0 && len(sessions) == 0 {
+		return nil, nil, errLaneNotFound
+	}
+
+	warnings := make([]string, 0, 8)
+	images := map[string]struct{}{}
+	networks := map[string]struct{}{}
+	workspaces := map[string]struct{}{}
+	logs := map[string]struct{}{}
+	edgeConfigs := map[string]struct{}{}
+	volumes := map[string]struct{}{}
+
+	s.runtime.Remove(appBaseContainerName(app, env, branch))
+	s.runtime.Remove(appSlotContainerName(app, env, branch, "blue"))
+	s.runtime.Remove(appSlotContainerName(app, env, branch, "green"))
+	_ = s.stopStationLane(app, env, branch)
+	networks[appNetworkName(app, env, branch)] = struct{}{}
+	workspaces[filepath.Join(s.workspacesDir, fmt.Sprintf("%s__%s__%s", safe(app), safe(string(env)), safe(branch)))] = struct{}{}
+	edgeConfigs[s.edgeProxyConfigPath(app, env, branch)] = struct{}{}
+	if lane.CurrentImage != "" {
+		images[lane.CurrentImage] = struct{}{}
+	}
+	if lane.PreviousImage != "" {
+		images[lane.PreviousImage] = struct{}{}
+	}
+
+	for _, svc := range services {
+		s.runtime.Remove(svc.Container)
+		if svc.Network != "" {
+			networks[svc.Network] = struct{}{}
+		}
+		if svc.Volume != "" {
+			volumes[svc.Volume] = struct{}{}
+		}
+	}
+
+	for _, dep := range deploys {
+		if dep.LogPath != "" {
+			logs[dep.LogPath] = struct{}{}
+		}
+		if dep.ImageTag != "" {
+			images[dep.ImageTag] = struct{}{}
+		}
+		if dep.PrevImage != "" {
+			images[dep.PrevImage] = struct{}{}
+		}
+	}
+
+	for _, sess := range sessions {
+		if pathWithinBase(s.workspacesDir, sess.RepoDir) {
+			workspaces[filepath.Dir(sess.RepoDir)] = struct{}{}
+		}
+		if pathWithinBase(s.workspacesDir, sess.StagingDir) {
+			workspaces[filepath.Dir(sess.StagingDir)] = struct{}{}
+		}
+	}
+
+	for path := range logs {
+		if !pathWithinBase(s.logsDir, path) {
+			warnings = append(warnings, fmt.Sprintf("skipped log cleanup outside logs dir: %s", path))
+			continue
+		}
+		_ = os.Remove(path)
+	}
+
+	for path := range workspaces {
+		if !pathWithinBase(s.workspacesDir, path) {
+			warnings = append(warnings, fmt.Sprintf("skipped workspace cleanup outside workspaces dir: %s", path))
+			continue
+		}
+		_ = os.RemoveAll(path)
+	}
+
+	edgeProxyDir := filepath.Join(s.dataDir, "edge-proxy")
+	for path := range edgeConfigs {
+		if !pathWithinBase(edgeProxyDir, path) {
+			warnings = append(warnings, fmt.Sprintf("skipped edge proxy cleanup outside edge-proxy dir: %s", path))
+			continue
+		}
+		_ = os.Remove(path)
+	}
+
+	for volume := range volumes {
+		s.runtime.RemoveVolume(volume)
+		if s.stationRuntime != nil {
+			s.stationRuntime.RemoveVolume(volume)
+		}
+	}
+	for network := range networks {
+		s.runtime.RemoveNetwork(network)
+		if s.stationRuntime != nil {
+			s.stationRuntime.RemoveNetwork(network)
+		}
+	}
+	for image := range images {
+		s.runtime.RemoveImage(image)
+		_ = os.RemoveAll(stationSnapshotDir(image))
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, warnings, fmt.Errorf("begin delete lane transaction: %w", err)
+	}
+
+	execDelete := func(query string, args ...any) (int64, error) {
+		res, err := tx.Exec(query, args...)
+		if err != nil {
+			return 0, err
+		}
+		n, _ := res.RowsAffected()
+		return n, nil
+	}
+
+	deployRequestCount, err := execDelete(`DELETE FROM deploy_requests WHERE app=? AND env=? AND branch=?`, app, string(env), branch)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, warnings, fmt.Errorf("delete deploy requests: %w", err)
+	}
+	deployCount, err := execDelete(`DELETE FROM deploys WHERE app=? AND env=? AND branch=?`, app, string(env), branch)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, warnings, fmt.Errorf("delete deploys: %w", err)
+	}
+	appStateCount, err := execDelete(`DELETE FROM app_state WHERE app=? AND env=? AND branch=?`, app, string(env), branch)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, warnings, fmt.Errorf("delete app state: %w", err)
+	}
+	secretCount, err := execDelete(`DELETE FROM app_secrets WHERE app=? AND env=? AND branch=?`, app, string(env), branch)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, warnings, fmt.Errorf("delete app secrets: %w", err)
+	}
+	serviceStateCount, err := execDelete(`DELETE FROM project_services WHERE project=? AND env=? AND branch=?`, app, string(env), branch)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, warnings, fmt.Errorf("delete service state: %w", err)
+	}
+	serviceSpecCount, err := execDelete(`DELETE FROM project_service_specs WHERE project=? AND env=? AND branch=?`, app, string(env), branch)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, warnings, fmt.Errorf("delete service specs: %w", err)
+	}
+	sessionCount, err := execDelete(`DELETE FROM sync_sessions WHERE app=? AND env=? AND branch=?`, app, string(env), branch)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, warnings, fmt.Errorf("delete sync sessions: %w", err)
+	}
+	promotionCount, err := execDelete(
+		`DELETE FROM promotions
+		  WHERE app=? AND ((source_env=? AND source_branch=?) OR (target_env=? AND target_branch=?))`,
+		app, string(env), branch, string(env), branch,
+	)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, warnings, fmt.Errorf("delete promotions: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, warnings, fmt.Errorf("commit delete lane transaction: %w", err)
+	}
+
+	s.mu.Lock()
+	for id, deploy := range s.deploys {
+		if deploy != nil && deploy.App == app && deploy.Env == env && deploy.Branch == branch {
+			delete(s.deploys, id)
+		}
+	}
+	s.mu.Unlock()
+
+	s.syncMu.Lock()
+	for id, sess := range s.syncSessions {
+		if sess != nil && sess.App == app && sess.Env == env && sess.Branch == branch {
+			delete(s.syncSessions, id)
+		}
+	}
+	s.syncMu.Unlock()
+
+	s.buildLock.Lock()
+	delete(s.building, fmt.Sprintf("%s__%s__%s", app, env, branch))
+	s.buildLock.Unlock()
+
+	s.broadcastSnapshot()
+	go func() { _ = s.ensureGlobalProxy() }()
+
+	return map[string]int64{
+		"lanes":            appStateCount,
+		"deploys":          deployCount,
+		"deploy_requests":  deployRequestCount,
+		"secrets":          secretCount,
+		"service_states":   serviceStateCount,
+		"service_specs":    serviceSpecCount,
+		"sync_sessions":    sessionCount,
+		"promotions":       promotionCount,
+		"runtime_services": int64(len(services)),
+	}, warnings, nil
+}
+
+func (s *Server) handleLaneDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpError(w, 405, "method not allowed")
+		return
+	}
+
+	var req LaneDeleteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, 400, "invalid json")
+		return
+	}
+	if !validDeployTarget(req.App, req.Env, req.Branch) {
+		httpError(w, 400, "app, branch, env required")
+		return
+	}
+	if strings.TrimSpace(req.Confirm) != "DELETE" {
+		httpError(w, 400, "confirm must be DELETE")
+		return
+	}
+	if s.appLaneHasActiveWork(req.App, req.Env, req.Branch) {
+		httpError(w, 409, "cannot delete a lane while deploys are queued or running")
+		return
+	}
+
+	summary, warnings, err := s.deleteLaneData(req.App, req.Env, req.Branch)
+	if err != nil {
+		if errors.Is(err, errLaneNotFound) {
+			httpError(w, 404, "lane not found")
+			return
+		}
+		httpError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"status":   "deleted",
+		"app":      req.App,
+		"env":      req.Env,
+		"branch":   req.Branch,
+		"summary":  summary,
+		"warnings": warnings,
+	})
 }
 
 func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
@@ -3304,6 +3674,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/api/version", s.handleVersion)
+	mux.HandleFunc("/api/public/theme", s.handlePublicTheme)
 	mux.Handle("/.well-known/acme-challenge/",
 		http.StripPrefix("/.well-known/acme-challenge/",
 			http.FileServer(http.Dir(s.acmeWebroot))))
@@ -3339,6 +3710,7 @@ func main() {
 	mux.HandleFunc("/api/deploys/rollback", authDeployer(s.handleRollback))
 	mux.HandleFunc("/api/apps/start", authDeployer(s.handleAppStart))
 	mux.HandleFunc("/api/apps/stop", authDeployer(s.handleAppStop))
+	mux.HandleFunc("/api/apps/delete-lane", authDeployer(s.handleLaneDelete))
 	mux.HandleFunc("/api/apps/restart", authDeployer(s.handleAppRestart))
 	mux.HandleFunc("/api/apps/config", authReadDeployerWrite(s.handleAppConfig))
 	mux.HandleFunc("/api/apps/signed-link", authDeployer(s.handleSignedLink))
@@ -3408,6 +3780,7 @@ func main() {
 			sockMux := http.NewServeMux()
 			sockMux.HandleFunc("/health", s.handleHealth)
 			sockMux.HandleFunc("/api/version", s.handleVersion)
+			sockMux.HandleFunc("/api/public/theme", s.handlePublicTheme)
 			sockMux.HandleFunc("/api/auth/session", s.handleDashboardSession)
 			sockMux.HandleFunc("/api/auth/setup", s.handleAuthSetup)
 			sockMux.HandleFunc("/api/auth/login", s.handleAuthLogin)
@@ -3420,6 +3793,7 @@ func main() {
 			sockMux.HandleFunc("/api/deploys/rollback", authDeployer(s.handleRollback))
 			sockMux.HandleFunc("/api/apps/start", authDeployer(s.handleAppStart))
 			sockMux.HandleFunc("/api/apps/stop", authDeployer(s.handleAppStop))
+			sockMux.HandleFunc("/api/apps/delete-lane", authDeployer(s.handleLaneDelete))
 			sockMux.HandleFunc("/api/apps/restart", authDeployer(s.handleAppRestart))
 			sockMux.HandleFunc("/api/apps/config", authReadDeployerWrite(s.handleAppConfig))
 			sockMux.HandleFunc("/api/apps/signed-link", authDeployer(s.handleSignedLink))
@@ -5277,6 +5651,13 @@ type AppActionRequest struct {
 	App    string    `json:"app"`
 	Branch string    `json:"branch"`
 	Env    DeployEnv `json:"env"`
+}
+
+type LaneDeleteRequest struct {
+	App     string    `json:"app"`
+	Branch  string    `json:"branch"`
+	Env     DeployEnv `json:"env"`
+	Confirm string    `json:"confirm"`
 }
 
 type ProjectDeleteRequest struct {

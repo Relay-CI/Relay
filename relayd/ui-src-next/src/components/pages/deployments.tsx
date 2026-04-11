@@ -94,7 +94,13 @@ export function DeploymentsPage({ deploys, envMap, selectedEnv, onOpenDeploy, on
           <span />
         </div>
         {!filtered.length ? (
-          <div className="text-sm text-white/30 text-center py-10">No deployments match the current filters.</div>
+          <div className="empty-state">
+            <div className="empty-state__icon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+            </div>
+            <div className="empty-state__title">No deployments</div>
+            <div className="empty-state__sub">No deploys match the current filters. Try adjusting your search or filter criteria.</div>
+          </div>
         ) : (
           <div className="divide-y divide-white/[0.04]">
             {filtered.map((deploy) => {

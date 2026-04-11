@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
 import { getServerConfig, saveServerConfig, getVersion, type VersionInfo } from "@/lib/api";
+import { useTheme, BUILT_IN_THEMES } from "@/components/theme-provider";
 
 type CurrentUser = { username: string; role: string } | null;
 
@@ -13,6 +14,7 @@ interface ServerSettingsPageProps {
 
 export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
   const isOwner = currentUser?.role === "owner";
+  const theme = useTheme();
 
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
   const [baseDomain, setBaseDomain] = useState("");
@@ -21,6 +23,13 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
   const [draft, setDraft] = useState({ baseDomain: "", dashboardHost: "", acmeDisabled: false });
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ tone: "ok" | "danger"; text: string } | null>(null);
+
+  // Appearance state
+  const [savedThemeName, setSavedThemeName] = useState("default");
+  const [savedCustomCSS, setSavedCustomCSS] = useState("");
+  const [themeDraft, setThemeDraft] = useState({ name: "default", css: "" });
+  const [appearanceBusy, setAppearanceBusy] = useState(false);
+  const [appearanceNotice, setAppearanceNotice] = useState<{ tone: "ok" | "danger"; text: string } | null>(null);
 
   useEffect(() => {
     getVersion().then((v) => setVersionInfo(v)).catch(() => {});
@@ -31,6 +40,12 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
         const ad = data?.acme_disabled === "true";
         setBaseDomain(bd); setDashboardHost(dh); setAcmeDisabled(ad);
         setDraft({ baseDomain: bd, dashboardHost: dh, acmeDisabled: ad });
+        // Load saved appearance
+        const tn = data?.theme_name ?? "default";
+        const tc = data?.theme_css ?? "";
+        setSavedThemeName(tn);
+        setSavedCustomCSS(tc);
+        setThemeDraft({ name: tn, css: tc });
       }).catch(() => {});
     }
   }, [isOwner]);
@@ -59,6 +74,26 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
     } catch (err) {
       setNotice({ tone: "danger", text: err instanceof Error ? err.message : "Save failed" });
     } finally { setBusy(false); }
+  }
+
+  async function saveAppearance() {
+    setAppearanceBusy(true); setAppearanceNotice(null);
+    try {
+      const saved = await saveServerConfig({
+        theme_name: themeDraft.name,
+        theme_css: themeDraft.css,
+      });
+      const tn = saved?.theme_name ?? "default";
+      const tc = saved?.theme_css ?? "";
+      setSavedThemeName(tn);
+      setSavedCustomCSS(tc);
+      setThemeDraft({ name: tn, css: tc });
+      // Apply the saved theme immediately via the provider
+      theme.previewTheme(tn, tc);
+      setAppearanceNotice({ tone: "ok", text: "Theme saved and applied." });
+    } catch (err) {
+      setAppearanceNotice({ tone: "danger", text: err instanceof Error ? err.message : "Save failed" });
+    } finally { setAppearanceBusy(false); }
   }
 
   return (
@@ -162,6 +197,112 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
               <div className="text-xs text-white/40 mt-0.5">{row.detail}</div>
             </div>
           ))}
+        </div>
+      </div>
+
+      {/* Appearance / Themes */}
+      <div className="bg-white/[0.02] border border-white/[0.06] rounded-xl p-5 space-y-5">
+        <div>
+          <div className="eyebrow mb-0.5">Customization</div>
+          <h2 className="text-base font-semibold text-white">Appearance</h2>
+          <p className="text-xs text-white/40 mt-1">Choose a built-in theme or write your own CSS. Custom CSS is applied after the preset and can override any variable or rule.</p>
+        </div>
+
+        {/* Preset theme grid */}
+        <div>
+          <div className="text-xs text-white/40 mb-2">Theme preset</div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            {BUILT_IN_THEMES.map((t) => {
+              const active = themeDraft.name === t.id;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => {
+                    setThemeDraft((d) => ({ ...d, name: t.id }));
+                    theme.previewTheme(t.id, themeDraft.css);
+                  }}
+                  className={cn(
+                    "relative text-left rounded-lg border p-3 transition-all cursor-pointer",
+                    active
+                      ? "border-white/40 bg-white/[0.07] ring-1 ring-white/20"
+                      : "border-white/[0.06] bg-white/[0.02] hover:bg-white/[0.05] hover:border-white/20"
+                  )}
+                >
+                  {/* Swatch row */}
+                  <div className="flex gap-1 mb-2">
+                    {t.swatches.map((color, i) => (
+                      <span
+                        key={i}
+                        className="w-4 h-4 rounded-full border border-white/10 flex-shrink-0"
+                        style={{ background: color }}
+                      />
+                    ))}
+                  </div>
+                  <div className="text-xs font-medium text-white leading-tight">{t.name}</div>
+                  <div className="text-[10px] text-white/35 mt-0.5 leading-tight">{t.description}</div>
+                  {active && (
+                    <span className="absolute top-2 right-2 w-2 h-2 rounded-full bg-white/70" />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Custom CSS textarea */}
+        <div>
+          <div className="text-xs text-white/40 mb-1.5">Custom CSS</div>
+          <textarea
+            className="text-input font-mono text-xs resize-y"
+            rows={8}
+            placeholder={`:root {\n  --relay-accent: #7c3aed;\n  --relay-accent-bright: #8b5cf6;\n  /* any CSS variable or rule */\n}`}
+            value={themeDraft.css}
+            onChange={(e) => {
+              const css = e.target.value;
+              setThemeDraft((d) => ({ ...d, css }));
+              theme.previewTheme(themeDraft.name, css);
+            }}
+            spellCheck={false}
+          />
+          <p className="text-[10px] text-white/30 mt-1">
+            Raw CSS injected after the preset. Override <code className="font-mono">--relay-accent</code>, <code className="font-mono">--relay-bg</code>, shadcn tokens, or any rule.
+            Changes preview live. Hit Save to persist.
+          </p>
+        </div>
+
+        {appearanceNotice && (
+          <div className={cn("rounded-lg px-4 py-3 text-sm border", appearanceNotice.tone === "ok" ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400" : "bg-red-500/10 border-red-500/30 text-red-400")}>
+            {appearanceNotice.text}
+          </div>
+        )}
+
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={saveAppearance}
+            disabled={appearanceBusy || (themeDraft.name === savedThemeName && themeDraft.css === savedCustomCSS)}
+            className={cn(
+              "text-sm px-4 py-2 rounded font-semibold transition-colors",
+              themeDraft.name !== savedThemeName || themeDraft.css !== savedCustomCSS
+                ? "bg-white text-black hover:bg-white/90"
+                : "bg-white/[0.06] text-white/30 cursor-not-allowed"
+            )}
+          >
+            {appearanceBusy ? "Saving…" : "Save appearance"}
+          </button>
+          {(themeDraft.name !== savedThemeName || themeDraft.css !== savedCustomCSS) && (
+            <button
+              type="button"
+              onClick={() => {
+                setThemeDraft({ name: savedThemeName, css: savedCustomCSS });
+                theme.previewTheme(savedThemeName, savedCustomCSS);
+              }}
+              className="text-xs text-white/40 hover:text-white/70 transition-colors"
+            >
+              Revert
+            </button>
+          )}
         </div>
       </div>
     </div>

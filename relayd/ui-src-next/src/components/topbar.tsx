@@ -17,6 +17,8 @@ interface TopbarProps {
   isLive: boolean;
   onRefresh: () => void;
   refreshing: boolean;
+  onToggleSidebar?: () => void;
+  onCreateProject?: () => void;
 }
 
 export function Topbar({
@@ -28,6 +30,8 @@ export function Topbar({
   isLive,
   onRefresh,
   refreshing,
+  onToggleSidebar,
+  onCreateProject,
 }: TopbarProps) {
   const initials = currentUser?.username
     ? currentUser.username.slice(0, 2).toUpperCase()
@@ -37,6 +41,20 @@ export function Topbar({
     <header className="flex items-center h-12 px-4 gap-4 border-b border-white/[0.06] bg-zinc-950 shrink-0 z-40">
       {/* Brand */}
       <div className="flex items-center gap-2 shrink-0">
+        {onToggleSidebar && (
+          <button
+            type="button"
+            onClick={onToggleSidebar}
+            className="md:hidden p-1.5 text-white/50 hover:text-white transition-colors rounded hover:bg-white/[0.06] -ml-1"
+            aria-label="Toggle navigation"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <line x1="3" y1="6" x2="21" y2="6"/>
+              <line x1="3" y1="12" x2="21" y2="12"/>
+              <line x1="3" y1="18" x2="21" y2="18"/>
+            </svg>
+          </button>
+        )}
         <RelayMark className="w-6 h-6 text-white" />
         <div className="hidden sm:block">
           <div className="text-sm font-semibold text-white leading-none">Relayd</div>
@@ -52,6 +70,7 @@ export function Topbar({
         projects={projects}
         selected={selectedProjectName}
         onSelect={onSelectProject}
+        onCreateNew={onCreateProject}
       />
 
       {/* Spacer */}
