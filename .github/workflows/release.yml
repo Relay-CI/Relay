@@ -186,13 +186,21 @@ jobs:
           fi
 
       - name: Set package version
-        working-directory: relay-client
         run: |
           VERSION="${{ steps.version.outputs.tag }}"
           VERSION="${VERSION#v}"
-          npm version "$VERSION" --no-git-tag-version
+          (cd relay-client && npm version "$VERSION" --no-git-tag-version)
+          (cd relay-mcp    && npm version "$VERSION" --no-git-tag-version)
 
-      - name: Publish
+      - name: Publish relay-client
         working-directory: relay-client
         # No token needed — npm CLI detects OIDC and exchanges it automatically
+        run: npm publish --access public
+
+      - name: Install relay-mcp dependencies
+        working-directory: relay-mcp
+        run: npm ci
+
+      - name: Publish relay-mcp
+        working-directory: relay-mcp
         run: npm publish --access public

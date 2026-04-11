@@ -1,0 +1,42 @@
+{
+  "name": "@relay-org/relay-mcp",
+  "version": "0.1.0",
+  "description": "Model Context Protocol server for Relay — deploy, inspect, and control apps from any MCP-aware AI tool",
+  "type": "commonjs",
+  "bin": {
+    "relay-mcp": "index.js"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.10.2",
+    "zod": "^3.24.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Relay-CI/Relay.git"
+  },
+  "homepage": "https://github.com/Relay-CI/Relay",
+  "bugs": {
+    "url": "https://github.com/Relay-CI/Relay/issues"
+  },
+  "keywords": [
+    "relay",
+    "mcp",
+    "model-context-protocol",
+    "deploy",
+    "self-hosted"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "index.js",
+    "README.md"
+  ]
+}
