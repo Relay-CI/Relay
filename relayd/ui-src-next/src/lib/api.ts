@@ -427,6 +427,20 @@ export async function setSecret(
   });
 }
 
+export async function setSecretsRaw(
+  target: AppTarget,
+  raw: string,
+  replace = false,
+): Promise<{ ok: boolean; count?: number; replace?: boolean }> {
+  return apiFetch<{ ok: boolean; count?: number; replace?: boolean }>(
+    "/api/apps/secrets",
+    {
+      method: "POST",
+      body: JSON.stringify({ ...target, raw, replace }),
+    },
+  );
+}
+
 export async function deleteSecret(
   target: AppTarget,
   key: string,

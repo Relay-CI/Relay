@@ -1174,6 +1174,7 @@ function streamLogsTransport(transport, deployId) {
 
 function shouldIgnore(rel) {
   const top = rel.split("/")[0];
+  const base = path.posix.basename(rel);
   const ignoreTop = new Set([
     "node_modules",
     ".git",
@@ -1188,6 +1189,14 @@ function shouldIgnore(rel) {
     "target",
   ]);
   if (ignoreTop.has(top)) return true;
+  if (base === ".env") return true;
+  if (base.startsWith(".env.")) {
+    const suffix = base.slice(5).toLowerCase();
+    const keep = new Set(["example", "sample", "template", "defaults"]);
+    if (!keep.has(suffix) && !suffix.endsWith(".example") && !suffix.endsWith(".sample") && !suffix.endsWith(".template")) {
+      return true;
+    }
+  }
   if (rel === ".relay.json" || rel === ".relayrc" || rel === ".relayrc.json")
     return true;
   return false;

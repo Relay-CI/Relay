@@ -3039,6 +3039,26 @@ type projectSyncRecord struct {
 
 var errLaneNotFound = errors.New("lane not found")
 
+func seedAllBaselineLanesEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("RELAY_SEED_BASELINE_LANES"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func baselineLaneSeedTargets(preferredEnv DeployEnv) []DeployEnv {
+	preferredEnv = normalizeDeployEnv(string(preferredEnv))
+	if preferredEnv == "" {
+		preferredEnv = EnvProd
+	}
+	if seedAllBaselineLanesEnabled() {
+		return baselineDeployEnvs()
+	}
+	return []DeployEnv{preferredEnv}
+}
+
 func (s *Server) ensureBaselineLanes(app string, branch string, preferredEnv DeployEnv, preferredRepoURL string, preferredEngine string) error {
 	app = strings.TrimSpace(app)
 	branch = strings.TrimSpace(branch)
@@ -3053,7 +3073,7 @@ func (s *Server) ensureBaselineLanes(app string, branch string, preferredEnv Dep
 		baseEngine = detectDefaultEngine()
 	}
 
-	for _, env := range baselineDeployEnvs() {
+	for _, env := range baselineLaneSeedTargets(preferredEnv) {
 		if existing, err := s.getAppState(app, env, branch); err == nil && existing != nil {
 			continue
 		}
@@ -3076,6 +3096,29 @@ func (s *Server) ensureBaselineLanes(app string, branch string, preferredEnv Dep
 		s.constrainAppState(st)
 		if err := s.saveAppState(st); err != nil {
 			return err
+		}
+	}
+
+	// Keep unused baseline lanes fully off by default when only one lane is
+	// seeded for a project (e.g. first deploy to prod).
+	if !seedAllBaselineLanesEnabled() {
+		for _, env := range baselineDeployEnvs() {
+			if env == preferredEnv {
+				continue
+			}
+			st, err := s.getAppState(app, env, branch)
+			if err != nil || st == nil {
+				continue
+			}
+			if strings.TrimSpace(st.CurrentImage) != "" || st.Stopped {
+				continue
+			}
+			s.stopDockerAppLane(app, env, branch)
+			_ = s.stopStationLane(app, env, branch)
+			s.stopLaneServices(app, env, branch)
+			st.Stopped = true
+			s.constrainAppState(st)
+			_ = s.saveAppState(st)
 		}
 	}
 	return nil
@@ -5269,6 +5312,32 @@ func (s *Server) handleSyncStart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, SyncStartResponse{SessionID: sessionID, WorkspaceVersion: wsVersion})
 }
 
+func isIgnoredWorkspaceEnvPath(rel string) bool {
+	rel = filepath.ToSlash(strings.TrimPrefix(strings.TrimSpace(rel), "./"))
+	if rel == "" {
+		return false
+	}
+	base := strings.ToLower(strings.TrimSpace(path.Base(rel)))
+	if base == ".env" {
+		return true
+	}
+	if !strings.HasPrefix(base, ".env.") {
+		return false
+	}
+	suffix := strings.TrimPrefix(base, ".env.")
+	if suffix == "" {
+		return true
+	}
+	switch suffix {
+	case "example", "sample", "template", "defaults":
+		return false
+	}
+	if strings.HasSuffix(suffix, ".example") || strings.HasSuffix(suffix, ".sample") || strings.HasSuffix(suffix, ".template") {
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleSyncPlan(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		httpError(w, 405, "method not allowed")
@@ -5293,6 +5362,9 @@ func (s *Server) handleSyncPlan(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		p := filepath.ToSlash(strings.TrimPrefix(f.Path, "./"))
+		if isIgnoredWorkspaceEnvPath(p) {
+			continue
+		}
 		client[p] = f
 	}
 
@@ -5401,6 +5473,10 @@ func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "invalid path")
 		return
 	}
+	if isIgnoredWorkspaceEnvPath(rel) {
+		httpError(w, 400, "environment files are ignored during workspace sync; add variables in admin secrets")
+		return
+	}
 
 	sess.uploadMu.Lock()
 	defer sess.uploadMu.Unlock()
@@ -5495,6 +5571,19 @@ func (s *Server) handleSyncBundle(w http.ResponseWriter, r *http.Request) {
 		if name == "" || !isSafeRelPath(name) {
 			httpError(w, 400, "invalid path in bundle")
 			return
+		}
+		if isIgnoredWorkspaceEnvPath(name) {
+			wn, err := io.Copy(io.Discard, tr)
+			if err != nil {
+				httpError(w, 400, "invalid bundle entry")
+				return
+			}
+			totalWritten += wn
+			if totalWritten > remaining {
+				httpError(w, 413, "bundle exceeds session remaining quota")
+				return
+			}
+			continue
 		}
 
 		if hdr.Size > (remaining - totalWritten) {
@@ -6115,17 +6204,14 @@ func (s *Server) handleAppStart(w http.ResponseWriter, r *http.Request) {
 			}
 			s.reconcileProjectServices(nil, req.App, req.Env, req.Branch, desiredMap)
 		}
+		s.mergeLaneSecretsIntoEnv(req.App, req.Env, req.Branch, extraEnv, nil)
 		if err := s.runContainer(nil, st.App, st.Env, st.Branch, st.CurrentImage, st.ServicePort, st.HostPort, st.Mode, st.TrafficMode, networkName, extraEnv); err != nil {
 			httpError(w, 500, err.Error())
 			return
 		}
 	} else {
 		s.stopDockerAppLane(req.App, req.Env, req.Branch)
-		if secs, err := s.getAppSecrets(req.App, req.Env, req.Branch); err == nil {
-			for k, v := range secs {
-				extraEnv[k] = v
-			}
-		}
+		s.mergeLaneSecretsIntoEnv(req.App, req.Env, req.Branch, extraEnv, nil)
 		if err := s.runStationApp(logf, DeployRequest{
 			App:              st.App,
 			Env:              st.Env,
@@ -6224,17 +6310,14 @@ func (s *Server) handleAppRestart(w http.ResponseWriter, r *http.Request) {
 			}
 			s.reconcileProjectServices(nil, req.App, req.Env, req.Branch, desiredMap)
 		}
+		s.mergeLaneSecretsIntoEnv(req.App, req.Env, req.Branch, extraEnv, nil)
 		if err := s.runContainer(nil, st.App, st.Env, st.Branch, st.CurrentImage, st.ServicePort, st.HostPort, st.Mode, st.TrafficMode, networkName, extraEnv); err != nil {
 			httpError(w, 500, err.Error())
 			return
 		}
 	} else {
 		s.stopDockerAppLane(req.App, req.Env, req.Branch)
-		if secs, err := s.getAppSecrets(req.App, req.Env, req.Branch); err == nil {
-			for k, v := range secs {
-				extraEnv[k] = v
-			}
-		}
+		s.mergeLaneSecretsIntoEnv(req.App, req.Env, req.Branch, extraEnv, nil)
 		if err := s.runStationApp(logf, DeployRequest{
 			App:              st.App,
 			Env:              st.Env,
@@ -6692,6 +6775,61 @@ func (s *Server) handleCompanionRestart(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, 200, map[string]string{"status": "restarted"})
 }
 
+func validSecretEnvKey(key string) bool {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return false
+	}
+	for i := 0; i < len(key); i++ {
+		ch := key[i]
+		isAlpha := (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+		isDigit := ch >= '0' && ch <= '9'
+		if i == 0 {
+			if !isAlpha && ch != '_' {
+				return false
+			}
+			continue
+		}
+		if !isAlpha && !isDigit && ch != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func parseRawSecretEnvText(raw string) (map[string]string, error) {
+	out := map[string]string{}
+	lines := strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n")
+	for idx, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "export ") {
+			line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		}
+		eq := strings.Index(line, "=")
+		if eq <= 0 {
+			return nil, fmt.Errorf("line %d must be KEY=VALUE", idx+1)
+		}
+		key := strings.TrimSpace(line[:eq])
+		if !validSecretEnvKey(key) {
+			return nil, fmt.Errorf("line %d has invalid key %q", idx+1, key)
+		}
+		value := strings.TrimSpace(line[eq+1:])
+		if len(value) >= 2 {
+			if (strings.HasPrefix(value, "\"") && strings.HasSuffix(value, "\"")) || (strings.HasPrefix(value, "'") && strings.HasSuffix(value, "'")) {
+				value = value[1 : len(value)-1]
+			}
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no KEY=VALUE pairs found")
+	}
+	return out, nil
+}
+
 func (s *Server) handleAppSecrets(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -6736,33 +6874,91 @@ func (s *Server) handleAppSecrets(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, out)
 
 	case http.MethodPost:
-		var sec AppSecret
-		if err := json.NewDecoder(r.Body).Decode(&sec); err != nil {
+		var body struct {
+			App     string `json:"app"`
+			Env     string `json:"env"`
+			Branch  string `json:"branch"`
+			Key     string `json:"key"`
+			Value   string `json:"value"`
+			Raw     string `json:"raw"`
+			Replace bool   `json:"replace"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httpError(w, 400, "invalid json")
 			return
 		}
-		sec.Env = string(normalizeDeployEnv(sec.Env))
-		if sec.App == "" || sec.Key == "" || !isKnownDeployEnv(DeployEnv(sec.Env)) || strings.TrimSpace(sec.Branch) == "" {
-			httpError(w, 400, "app, env, branch, and key required")
+		body.Env = string(normalizeDeployEnv(body.Env))
+		body.App = strings.TrimSpace(body.App)
+		body.Branch = strings.TrimSpace(body.Branch)
+		body.Key = strings.TrimSpace(body.Key)
+		raw := strings.TrimSpace(body.Raw)
+		if body.App == "" || !isKnownDeployEnv(DeployEnv(body.Env)) || body.Branch == "" {
+			httpError(w, 400, "app, env, and branch required")
 			return
 		}
-		if _, ok := s.requireLaneAccess(w, r, sec.App, DeployEnv(sec.Env), "deployer"); !ok {
+		if _, ok := s.requireLaneAccess(w, r, body.App, DeployEnv(body.Env), "deployer"); !ok {
 			return
 		}
-
-		encrypted := s.encryptSecret(sec.Value)
-		_, err := s.db.Exec(`INSERT OR REPLACE INTO app_secrets (app, env, branch, key, value) VALUES (?, ?, ?, ?, ?)`,
-			sec.App, sec.Env, sec.Branch, sec.Key, encrypted)
-		if err != nil {
-			httpError(w, 500, "failed to save secret: "+err.Error())
-			return
-		}
-		// Audit secret writes (log key name only, never the value)
 		actor := ""
 		if userSess := s.validateUserSession(r); userSess != nil {
 			actor = userSess.Username
 		}
-		s.auditLog(actor, "secret.set", sec.App, fmt.Sprintf("key=%s env=%s branch=%s", sec.Key, sec.Env, sec.Branch))
+		if raw != "" {
+			pairs, err := parseRawSecretEnvText(raw)
+			if err != nil {
+				httpError(w, 400, "invalid raw env: "+err.Error())
+				return
+			}
+			tx, err := s.db.Begin()
+			if err != nil {
+				httpError(w, 500, "failed to start secret transaction: "+err.Error())
+				return
+			}
+			if body.Replace {
+				if _, err := tx.Exec(`DELETE FROM app_secrets WHERE app=? AND env=? AND branch=?`, body.App, body.Env, body.Branch); err != nil {
+					_ = tx.Rollback()
+					httpError(w, 500, "failed to replace secrets: "+err.Error())
+					return
+				}
+			}
+			keys := make([]string, 0, len(pairs))
+			for key := range pairs {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				encrypted := s.encryptSecret(pairs[key])
+				if _, err := tx.Exec(`INSERT OR REPLACE INTO app_secrets (app, env, branch, key, value) VALUES (?, ?, ?, ?, ?)`,
+					body.App, body.Env, body.Branch, key, encrypted); err != nil {
+					_ = tx.Rollback()
+					httpError(w, 500, "failed to save secret: "+err.Error())
+					return
+				}
+			}
+			if err := tx.Commit(); err != nil {
+				httpError(w, 500, "failed to commit secrets: "+err.Error())
+				return
+			}
+			s.auditLog(actor, "secret.bulk_set", body.App, fmt.Sprintf("count=%d env=%s branch=%s replace=%v", len(keys), body.Env, body.Branch, body.Replace))
+			writeJSON(w, 200, map[string]any{"ok": true, "count": len(keys), "replace": body.Replace})
+			return
+		}
+		if body.Key == "" {
+			httpError(w, 400, "key required")
+			return
+		}
+		if !validSecretEnvKey(body.Key) {
+			httpError(w, 400, "key must match [A-Za-z_][A-Za-z0-9_]*")
+			return
+		}
+		encrypted := s.encryptSecret(body.Value)
+		if _, err := s.db.Exec(`INSERT OR REPLACE INTO app_secrets (app, env, branch, key, value) VALUES (?, ?, ?, ?, ?)`,
+			body.App, body.Env, body.Branch, body.Key, encrypted); err != nil {
+			httpError(w, 500, "failed to save secret: "+err.Error())
+			return
+		}
+		// Audit secret writes (log key name only, never the value)
+		s.auditLog(actor, "secret.set", body.App, fmt.Sprintf("key=%s env=%s branch=%s", body.Key, body.Env, body.Branch))
 		writeJSON(w, 200, map[string]bool{"ok": true})
 
 	case http.MethodDelete:
@@ -6835,6 +7031,50 @@ func (s *Server) getAppSecrets(app string, env DeployEnv, branch string) (map[st
 		res[k] = e.val
 	}
 	return res, nil
+}
+
+func (s *Server) mergeLaneSecretsIntoEnv(app string, env DeployEnv, branch string, target map[string]string, log func(string, ...any)) {
+	if target == nil {
+		return
+	}
+	secs, err := s.getAppSecrets(app, env, branch)
+	if err != nil {
+		if log != nil {
+			log("warning: could not load admin secrets: %v", err)
+		}
+		return
+	}
+	for k, v := range secs {
+		target[k] = v
+	}
+}
+
+func scrubWorkspaceEnvFiles(repoDir string) (int, error) {
+	removed := 0
+	walkErr := filepath.Walk(repoDir, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info == nil || info.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(repoDir, p)
+		if relErr != nil {
+			return nil
+		}
+		if !isIgnoredWorkspaceEnvPath(rel) {
+			return nil
+		}
+		if rmErr := os.Remove(p); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+			return rmErr
+		}
+		removed++
+		return nil
+	})
+	if walkErr != nil {
+		return removed, walkErr
+	}
+	return removed, nil
 }
 
 // ---------------------- Worker / Deploy pipeline ----------------------
@@ -7000,6 +7240,11 @@ func (s *Server) runDeploy(job DeployJob) {
 			}
 		}
 	}
+	if removedEnvFiles, scrubErr := scrubWorkspaceEnvFiles(repoDir); scrubErr != nil {
+		log("warning: failed to sanitize workspace env files: %v", scrubErr)
+	} else if removedEnvFiles > 0 {
+		log("ignored %d workspace env file(s); use admin secrets instead", removedEnvFiles)
+	}
 
 	// If rollback: we only re-run container with previous image
 	if job.Rollback {
@@ -7023,18 +7268,12 @@ func (s *Server) runDeploy(job DeployJob) {
 			s.stopDockerAppLane(req.App, req.Env, req.Branch)
 		}
 		extraEnv := map[string]string{}
-		if rollbackEngine == EngineStation {
-			if secs, err := s.getAppSecrets(req.App, req.Env, req.Branch); err == nil {
-				for k, v := range secs {
-					extraEnv[k] = v
-				}
-			}
-		}
+		s.mergeLaneSecretsIntoEnv(req.App, req.Env, req.Branch, extraEnv, log)
 		var runErr error
 		if rollbackEngine == EngineStation {
 			runErr = s.runStationApp(log, req, job.RollbackImage, extraEnv)
 		} else {
-			runErr = s.swapContainer(log, req, job.RollbackImage, "", nil)
+			runErr = s.swapContainer(log, req, job.RollbackImage, "", extraEnv)
 		}
 		if runErr != nil {
 			end := time.Now()
@@ -7351,6 +7590,7 @@ func (s *Server) runDeploy(job DeployJob) {
 			}
 		}
 		s.reconcileProjectServices(log, req.App, req.Env, req.Branch, desiredMap)
+		s.mergeLaneSecretsIntoEnv(req.App, req.Env, req.Branch, extraEnv, log)
 
 		if !appStopped {
 			_ = s.stopStationLane(req.App, req.Env, req.Branch)
@@ -7380,11 +7620,7 @@ func (s *Server) runDeploy(job DeployJob) {
 			log("station engine does not support companion services; skipping %d service(s)", len(desiredServices))
 		}
 		s.reconcileProjectServices(log, req.App, req.Env, req.Branch, desiredMap)
-		if secs, err := s.getAppSecrets(req.App, req.Env, req.Branch); err == nil {
-			for k, v := range secs {
-				extraEnv[k] = v
-			}
-		}
+		s.mergeLaneSecretsIntoEnv(req.App, req.Env, req.Branch, extraEnv, log)
 		if !appStopped {
 			if err := s.runStationApp(log, req, artifactRef, extraEnv); err != nil {
 				end := time.Now()
@@ -7942,19 +8178,12 @@ func (s *Server) edgeProxyConfigPath(app string, env DeployEnv, branch string) s
 	return filepath.Join(dir, fmt.Sprintf("%s__%s__%s.nginx.conf", safe(app), safe(string(env)), safe(branch)))
 }
 
-func (s *Server) edgeProxyLogPath(app string, env DeployEnv, branch string) string {
-	dir := filepath.Join(s.dataDir, "edge-proxy", "logs")
-	mustMkdir(dir)
-	return filepath.Join(dir, fmt.Sprintf("%s__%s__%s.access.log", safe(app), safe(string(env)), safe(branch)))
-}
-
 func edgeCookieName(app string, env DeployEnv, branch string) string {
 	return fmt.Sprintf("relay_slot_%s_%s_%s", safe(app), safe(string(env)), safe(branch))
 }
 
 func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, activeSlot string, standbySlot string, servicePort int, trafficMode string, splitPercent int) (string, error) {
 	p := s.edgeProxyConfigPath(app, env, branch)
-	logPath := s.edgeProxyLogPath(app, env, branch)
 	activeUpstream := fmt.Sprintf("%s:%d", appSlotContainerName(app, env, branch, activeSlot), firstNonZero(servicePort, 3000))
 	standbyMode := normalizeActiveSlot(standbySlot)
 	trafficMode = firstNonEmpty(normalizeTrafficMode(trafficMode), "edge")
@@ -7973,8 +8202,9 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 	conf.WriteString("    '' close;\n")
 	conf.WriteString("  }\n")
 	conf.WriteString("  resolver 127.0.0.11 ipv6=off valid=5s;\n")
+	conf.WriteString("  error_log /dev/stderr;\n")
 	conf.WriteString("  log_format relay_json escape=json '{\"ts\":$msec,\"status\":$status,\"host\":\"$host\",\"method\":\"$request_method\",\"path\":\"$request_uri\",\"slot\":\"$relay_target_slot\",\"request_id\":\"$request_id\"}';\n")
-	conf.WriteString(fmt.Sprintf("  access_log %s relay_json;\n", logPath))
+	conf.WriteString("  access_log /dev/stdout relay_json;\n")
 	conf.WriteString("  map $arg___relay_target $relay_slot_override {\n")
 	conf.WriteString("    default \"\";\n")
 	conf.WriteString(fmt.Sprintf("    ~*^(new|live|active|%s)$ %s;\n", activeSlot, activeSlot))
@@ -8151,9 +8381,11 @@ func (s *Server) ensureEdgeProxy(log func(string, ...any), app string, env Deplo
 	if err != nil {
 		return fmt.Errorf("write edge proxy config: %w", err)
 	}
-	logPath := s.edgeProxyLogPath(app, env, branch)
-	if !fileExists(logPath) {
-		_ = os.WriteFile(logPath, []byte{}, 0644)
+	volumes := []string{
+		fmt.Sprintf("%s:/etc/nginx/nginx.conf:ro", dockerPath(configPath)),
+	}
+	if err := validateEdgeProxyLogPaths(configPath, volumes); err != nil {
+		return fmt.Errorf("edge proxy config validation failed: %w", err)
 	}
 
 	containerName := appBaseContainerName(app, env, branch)
@@ -8171,12 +8403,9 @@ func (s *Server) ensureEdgeProxy(log func(string, ...any), app string, env Deplo
 			Image:         getenv("RELAY_NGINX_IMAGE", "nginx:alpine"),
 			Network:       networkName,
 			RestartPolicy: "always",
-			Volumes: []string{
-				fmt.Sprintf("%s:/etc/nginx/nginx.conf:ro", dockerPath(configPath)),
-				fmt.Sprintf("%s:/var/log/nginx/access.log", dockerPath(logPath)),
-			},
-			PortBindings: portBindings,
-			ExtraHosts:   []string{"host.docker.internal:host-gateway"},
+			Volumes:       volumes,
+			PortBindings:  portBindings,
+			ExtraHosts:    []string{"host.docker.internal:host-gateway"},
 		}
 		if log != nil {
 			log("runtime run edge: %s", containerName)
@@ -8193,6 +8422,91 @@ func (s *Server) ensureEdgeProxy(log func(string, ...any), app string, env Deplo
 	out, reloadErr := s.runtime.Exec(containerName, []string{"nginx", "-s", "reload"})
 	if reloadErr != nil {
 		return fmt.Errorf("edge proxy reload failed: %v (%s)", reloadErr, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func edgeProxyLogDestinations(configText string) []string {
+	paths := make([]string, 0, 4)
+	scanner := bufio.NewScanner(strings.NewReader(configText))
+	scanner.Buffer(make([]byte, 0, 4*1024), 128*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if idx := strings.Index(line, "#"); idx >= 0 {
+			line = strings.TrimSpace(line[:idx])
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		directive := fields[0]
+		if directive != "access_log" && directive != "error_log" {
+			continue
+		}
+		dest := strings.TrimSuffix(strings.TrimSpace(fields[1]), ";")
+		if dest == "" || dest == "off" {
+			continue
+		}
+		paths = append(paths, filepath.ToSlash(dest))
+	}
+	return paths
+}
+
+func edgeProxyVolumeTarget(volume string) string {
+	spec := strings.TrimSpace(volume)
+	if spec == "" {
+		return ""
+	}
+	idx := strings.LastIndex(spec, ":/")
+	if idx < 0 {
+		return ""
+	}
+	target := strings.TrimSpace(spec[idx+1:])
+	if optIdx := strings.LastIndex(target, ":"); optIdx > 0 {
+		opt := target[optIdx+1:]
+		if !strings.Contains(opt, "/") && !strings.Contains(opt, "\\") {
+			target = target[:optIdx]
+		}
+	}
+	return filepath.ToSlash(strings.TrimSpace(target))
+}
+
+func validateEdgeProxyLogPaths(configPath string, volumes []string) error {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("read nginx config: %w", err)
+	}
+	dests := edgeProxyLogDestinations(string(data))
+	if len(dests) == 0 {
+		return nil
+	}
+	mountedTargets := make(map[string]struct{}, len(volumes))
+	for _, vol := range volumes {
+		if target := edgeProxyVolumeTarget(vol); target != "" {
+			mountedTargets[target] = struct{}{}
+		}
+	}
+	missing := make([]string, 0, len(dests))
+	seen := map[string]struct{}{}
+	for _, dest := range dests {
+		if !strings.HasPrefix(dest, "/") || strings.HasPrefix(dest, "/dev/") {
+			continue
+		}
+		if _, ok := mountedTargets[dest]; ok {
+			continue
+		}
+		if _, dup := seen[dest]; dup {
+			continue
+		}
+		seen[dest] = struct{}{}
+		missing = append(missing, dest)
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return fmt.Errorf("nginx config references file log path(s) without matching mounts: %s; use /dev/stdout and /dev/stderr or add matching bind mounts", strings.Join(missing, ", "))
 	}
 	return nil
 }
@@ -8233,24 +8547,61 @@ type edgeProxyAccessLogEntry struct {
 	Slot   string  `json:"slot"`
 }
 
+func edgeProxyLogJSONPayload(line string) string {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return ""
+	}
+	if strings.HasPrefix(trimmed, "{") {
+		return trimmed
+	}
+	parts := strings.SplitN(trimmed, " ", 2)
+	if len(parts) < 2 {
+		return ""
+	}
+	payload := strings.TrimSpace(parts[1])
+	if strings.HasPrefix(payload, "{") {
+		return payload
+	}
+	return ""
+}
+
 func (s *Server) assessRolloutLog(app string, env DeployEnv, branch string, activeSlot string, sinceMillis int64) (int, int, error) {
-	f, err := os.Open(s.edgeProxyLogPath(app, env, branch))
+	containerName := appBaseContainerName(app, env, branch)
+	if !s.runtime.IsRunning(containerName) {
+		return 0, 0, fmt.Errorf("edge proxy %s is not running", containerName)
+	}
+
+	since := ""
+	if sinceMillis > 0 {
+		since = strconv.FormatInt(sinceMillis/1000, 10)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	pr, err := s.runtime.LogStream(ctx, containerName, 20000, since)
 	if err != nil {
 		return 0, 0, err
 	}
-	defer f.Close()
+	if pr == nil {
+		return 0, 0, fmt.Errorf("edge proxy log stream unavailable")
+	}
+	defer pr.Close()
 
 	total := 0
-	errors := 0
-	scanner := bufio.NewScanner(f)
+	errorCount := 0
+	scanner := bufio.NewScanner(pr)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
+		payload := edgeProxyLogJSONPayload(scanner.Text())
+		if payload == "" {
+			continue
+		}
 		var entry edgeProxyAccessLogEntry
-		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+		if err := json.Unmarshal([]byte(payload), &entry); err != nil {
 			continue
 		}
 		tsMillis := int64(entry.Ts * 1000)
-		if tsMillis < sinceMillis {
+		if sinceMillis > 0 && tsMillis < sinceMillis {
 			continue
 		}
 		if normalizeActiveSlot(entry.Slot) != normalizeActiveSlot(activeSlot) {
@@ -8258,13 +8609,16 @@ func (s *Server) assessRolloutLog(app string, env DeployEnv, branch string, acti
 		}
 		total++
 		if entry.Status >= 500 {
-			errors++
+			errorCount++
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return total, errors, err
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, io.ErrClosedPipe) {
+			return total, errorCount, nil
+		}
+		return total, errorCount, err
 	}
-	return total, errors, nil
+	return total, errorCount, nil
 }
 
 func rolloutWatchKey(app string, env DeployEnv, branch string) string {
@@ -11782,7 +12136,7 @@ func writeRelayDockerignore(repoDir string) {
 	if fileExists(filepath.Join(repoDir, ".dockerignore")) {
 		return // respect the user's own .dockerignore
 	}
-	content := ".git\nnode_modules\n.next\ndist\nbuild\n*.log\n.env.local\n.env*.local\n"
+	content := ".git\nnode_modules\n.next\ndist\nbuild\n*.log\n.env\n.env.*\n!.env.example\n!.env.sample\n!.env.template\n"
 	_ = os.WriteFile(filepath.Join(repoDir, ".dockerignore"), []byte(content), 0644)
 	_ = os.WriteFile(filepath.Join(repoDir, ".relay_dockerignore_created"), []byte("1"), 0644)
 }

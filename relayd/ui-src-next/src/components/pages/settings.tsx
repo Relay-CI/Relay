@@ -23,6 +23,7 @@ import {
   deleteLane,
   getSecrets,
   setSecret,
+  setSecretsRaw,
   deleteSecret,
   getCompanions,
   saveCompanion,
@@ -152,6 +153,9 @@ export function SettingsPage({
 
   const [secrets, setSecrets] = useState<Secret[]>([]);
   const [draftSecret, setDraftSecret] = useState({ key: "", value: "" });
+  const [rawSecretsText, setRawSecretsText] = useState("");
+  const [rawSecretsReplace, setRawSecretsReplace] = useState(false);
+  const [rawSecretsBusy, setRawSecretsBusy] = useState(false);
 
   const [companions, setCompanions] = useState<Companion[]>([]);
   const [companionBusy, setCompanionBusy] = useState(false);
@@ -251,17 +255,55 @@ export function SettingsPage({
 
   async function handleAddSecret() {
     if (!selectedEnv || !canWrite || !draftSecret.key || !draftSecret.value) return;
-    await setSecret(selectedEnv, draftSecret.key, draftSecret.value);
-    const next = await getSecrets(selectedEnv);
-    setSecrets(next ?? []);
-    setDraftSecret({ key: "", value: "" });
+    try {
+      await setSecret(selectedEnv, draftSecret.key, draftSecret.value);
+      const next = await getSecrets(selectedEnv);
+      setSecrets(next ?? []);
+      setDraftSecret({ key: "", value: "" });
+      setNotice({ tone: "ok", text: `Saved ${draftSecret.key}` });
+    } catch (err) {
+      setNotice({
+        tone: "warn",
+        text: `Failed to save secret: ${err instanceof Error ? err.message : "unknown error"}`,
+      });
+    }
   }
 
   async function handleDeleteSecret(key: string) {
     if (!selectedEnv || !canWrite) return;
-    await deleteSecret(selectedEnv, key);
-    const next = await getSecrets(selectedEnv);
-    setSecrets(next ?? []);
+    try {
+      await deleteSecret(selectedEnv, key);
+      const next = await getSecrets(selectedEnv);
+      setSecrets(next ?? []);
+      setNotice({ tone: "ok", text: `Deleted ${key}` });
+    } catch (err) {
+      setNotice({
+        tone: "warn",
+        text: `Failed to delete secret: ${err instanceof Error ? err.message : "unknown error"}`,
+      });
+    }
+  }
+
+  async function handleSaveRawSecrets() {
+    if (!selectedEnv || !canWrite || !rawSecretsText.trim()) return;
+    setRawSecretsBusy(true);
+    try {
+      const result = await setSecretsRaw(selectedEnv, rawSecretsText, rawSecretsReplace);
+      const next = await getSecrets(selectedEnv);
+      setSecrets(next ?? []);
+      setRawSecretsText("");
+      setNotice({
+        tone: "ok",
+        text: `Saved ${result.count ?? 0} env var${(result.count ?? 0) === 1 ? "" : "s"} from raw input.`,
+      });
+    } catch (err) {
+      setNotice({
+        tone: "warn",
+        text: `Failed to save raw env: ${err instanceof Error ? err.message : "unknown error"}`,
+      });
+    } finally {
+      setRawSecretsBusy(false);
+    }
   }
 
   function hydrateCompanion(c: Companion) {
@@ -1249,6 +1291,33 @@ export function SettingsPage({
         >
           Add Secret
         </button>
+        <div className="border-t border-white/[0.06] pt-4 mb-4 space-y-2">
+          <div className="text-xs text-white/40">Paste Raw `.env`</div>
+          <textarea
+            className="text-input min-h-[120px] resize-y"
+            value={rawSecretsText}
+            onChange={(e) => setRawSecretsText(e.target.value)}
+            placeholder={"API_URL=https://api.example.com\nJWT_SECRET=super-secret\nexport FEATURE_FLAG=true"}
+          />
+          <label className="inline-flex items-center gap-2 text-xs text-white/50">
+            <input
+              type="checkbox"
+              checked={rawSecretsReplace}
+              onChange={(e) => setRawSecretsReplace(e.target.checked)}
+            />
+            Replace existing secrets for this lane first
+          </label>
+          <div>
+            <button
+              type="button"
+              onClick={handleSaveRawSecrets}
+              disabled={!rawSecretsText.trim() || rawSecretsBusy}
+              className="primary-btn"
+            >
+              {rawSecretsBusy ? "Saving..." : "Save Raw Env"}
+            </button>
+          </div>
+        </div>
         <div className="divide-y divide-white/[0.04]">
           {!secrets.length ? (
             <div className="text-sm text-white/25 py-3">

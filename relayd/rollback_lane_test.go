@@ -110,32 +110,24 @@ func TestEnqueueRollbackForLaneRejectsEngineMismatch(t *testing.T) {
 	}
 }
 
-func TestEnsureBaselineLanesSeedsProdStagingDev(t *testing.T) {
+func TestEnsureBaselineLanesSeedsOnlyPreferredLaneByDefault(t *testing.T) {
 	s := newPreviewPortTestServer(t)
 	if err := s.ensureBaselineLanes("demo", "main", EnvStaging, "https://github.com/acme/demo.git", EngineDocker); err != nil {
 		t.Fatalf("ensure baseline lanes: %v", err)
 	}
 
-	prod, err := s.getAppState("demo", EnvProd, "main")
-	if err != nil || prod == nil {
-		t.Fatalf("expected prod lane state, err=%v", err)
-	}
 	staging, err := s.getAppState("demo", EnvStaging, "main")
 	if err != nil || staging == nil {
 		t.Fatalf("expected staging lane state, err=%v", err)
 	}
-	dev, err := s.getAppState("demo", EnvDev, "main")
-	if err != nil || dev == nil {
-		t.Fatalf("expected dev lane state, err=%v", err)
-	}
 
-	if prod.RepoURL != "" {
-		t.Fatalf("expected prod repo url to stay empty, got %q", prod.RepoURL)
-	}
 	if staging.RepoURL != "https://github.com/acme/demo.git" {
 		t.Fatalf("expected staging repo url to match preferred lane, got %q", staging.RepoURL)
 	}
-	if dev.RepoURL != "" {
-		t.Fatalf("expected dev repo url to stay empty, got %q", dev.RepoURL)
+	if prod, err := s.getAppState("demo", EnvProd, "main"); err == nil && prod != nil {
+		t.Fatalf("expected prod lane to remain unseeded by default")
+	}
+	if dev, err := s.getAppState("demo", EnvDev, "main"); err == nil && dev != nil {
+		t.Fatalf("expected dev lane to remain unseeded by default")
 	}
 }
