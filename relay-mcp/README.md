@@ -76,3 +76,26 @@ For a local agent on the same machine, use a Unix socket instead (no token neede
 | `create_signed_link` | Time-bounded share URL for signed-link lanes |
 | `list_companions` | Companion services for an app lane |
 | `restart_companion` | Restart a companion service |
+
+## Publishing (maintainers)
+
+`@relay-org/relay-mcp` is published from GitHub Actions using npm trusted publishing (OIDC).
+
+If publish fails with `npm ERR! code E404` on:
+
+`PUT https://registry.npmjs.org/@relay-org%2frelay-mcp`
+
+verify package-level trusted publisher settings on npmjs.com for `@relay-org/relay-mcp`:
+
+- Organization/user: `Relay-CI`
+- Repository: `Relay`
+- Workflow filename: `auto-release.yml` (must match exactly)
+- Environment: `npm-publish` (must match exactly if configured in workflow)
+
+Important:
+
+- Trusted publishing is configured per package, not per scope.
+- npm currently allows one trusted publisher connection per package.
+- If another workflow publishes this package, either:
+  - switch the trusted publisher to that workflow, or
+  - use a granular npm token in that alternate workflow.

@@ -37,8 +37,33 @@ v0.2.0
 5. Verify the CLI command paths touched by the release.
 6. Run framework smoke checks for affected buildpacks.
 7. Confirm no secrets, logs, databases, or local binaries are staged.
-8. Create a changelog summary.
-9. Tag and publish the release.
+8. Verify npm trusted publishing settings for both `@relay-org/relay` and `@relay-org/relay-mcp`.
+9. Create a changelog summary.
+10. Tag and publish the release.
+
+## npm Trusted Publishing
+
+Relay publishes two npm packages from GitHub Actions:
+
+- `@relay-org/relay`
+- `@relay-org/relay-mcp`
+
+Trusted publisher settings are package-specific on npmjs.com and must be configured for each package.
+
+Required values for `@relay-org/relay-mcp`:
+
+- Organization/user: `Relay-CI`
+- Repository: `Relay`
+- Workflow filename: `auto-release.yml`
+- Environment: `npm-publish` (when workflow uses an environment)
+
+If publish fails with:
+
+`E404 Not Found - PUT https://registry.npmjs.org/@relay-org%2frelay-mcp`
+
+it usually means the package trusted publisher mapping does not match the workflow that is trying to publish.
+
+Note: npm allows one trusted publisher connection per package. If multiple workflows publish the same package, use one trusted workflow or use granular token auth for the alternate workflow.
 
 ## Changelog Structure
 

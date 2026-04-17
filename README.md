@@ -64,6 +64,20 @@ Relay detects your buildpack, syncs only changed files, builds a container, and 
 
 ---
 
+## MCP Server
+
+Use Relay from MCP-aware AI tools (Cursor, Claude Desktop, VS Code Copilot):
+
+```bash
+npx -y @relay-org/relay-mcp
+```
+
+Config examples and tool list:
+
+- [relay-mcp README](relay-mcp/README.md)
+
+---
+
 ## Commands
 
 ```
@@ -245,6 +259,7 @@ docs/           Roadmap and release notes
 - [Extensibility roadmap](docs/extensibility-roadmap.md)
 - [Agent docs](relayd/README.md)
 - [CLI docs](relay-client/README.md)
+- [MCP server docs](relay-mcp/README.md)
 
 ---
 

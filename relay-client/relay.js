@@ -103,7 +103,7 @@ function die(msg) {
 
 function laneDisplayName(env) {
   const normalized = normalizeLaneEnv(env);
-  if (normalized === "dev") return "ddev";
+  if (normalized === "dev") return "dev";
   if (normalized === "prod") return "production";
   return normalized || String(env || "").trim();
 }
@@ -356,7 +356,7 @@ function prompt(question, defaultVal = "") {
   });
 }
 
-const WIZARD_ENV_OPTIONS = ["ddev", "staging", "production", "preview"];
+const WIZARD_ENV_OPTIONS = ["dev", "staging", "production", "preview"];
 
 async function promptSelect(question, options, defaultVal) {
   const normalized = options.map((opt) => String(opt));
@@ -667,7 +667,7 @@ async function runSetupWizard(args, cfgPath, missingFields = []) {
   const existingEnv = normalizeLaneEnv(args.env || process.env.RELAY_ENV || existingCfg.env);
   if (needAll || missing.has("env") || !existingEnv) {
     env = normalizeLaneEnv(
-      await promptSelect("Env lane", WIZARD_ENV_OPTIONS, laneDisplayName(existingEnv || "dev") || "ddev"),
+      await promptSelect("Env lane", WIZARD_ENV_OPTIONS, laneDisplayName(existingEnv || "dev") || "dev"),
     );
   } else {
     env = existingEnv;

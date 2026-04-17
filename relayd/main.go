@@ -10973,7 +10973,7 @@ func validateDeployRequest(req DeployRequest) error {
 	}
 	req.Env = normalizeDeployEnv(string(req.Env))
 	if !isKnownDeployEnv(req.Env) {
-		return fmt.Errorf("env must be one of: preview, dev (or ddev), staging, prod (or production)")
+		return fmt.Errorf("env must be one of: preview, dev, staging, prod (or production; ddev alias accepted)")
 	}
 	if req.Mode != "" {
 		m := strings.ToLower(strings.TrimSpace(req.Mode))

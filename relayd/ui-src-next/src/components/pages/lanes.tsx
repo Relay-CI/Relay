@@ -39,7 +39,7 @@ interface LanesPageProps {
   onNavigateSettings: (envKey: string) => void;
 }
 
-const ENV_PRESETS = ["production", "staging", "ddev", "preview", "test"];
+const ENV_PRESETS = ["production", "staging", "dev", "preview", "test"];
 const ENGINE_OPTIONS = ["docker", "station"];
 const MODE_OPTIONS = [
   { value: "port", label: "HTTP" },
@@ -68,7 +68,7 @@ function drainLabel(drainUntil: number | undefined): string | null {
 
 function laneLabel(env: string): string {
   if (env === "prod") return "production";
-  if (env === "dev") return "ddev";
+  if (env === "dev") return "dev";
   return env;
 }
 
@@ -79,7 +79,7 @@ interface CreateLaneModalProps {
 }
 
 function CreateLaneModal({ app, onClose, onCreated }: CreateLaneModalProps) {
-  const [env, setEnv] = useState("ddev");
+  const [env, setEnv] = useState("dev");
   const [customEnv, setCustomEnv] = useState("");
   const [branch, setBranch] = useState("main");
   const [engine, setEngine] = useState("docker");

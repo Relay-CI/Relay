@@ -43,7 +43,7 @@ var builtInLanePolicies = map[DeployEnv]LanePolicy{
 	},
 	EnvDev: {
 		Env:                 EnvDev,
-		DisplayName:         "ddev",
+		DisplayName:         "dev",
 		DefaultMode:         "port",
 		DefaultTrafficMode:  "edge",
 		DefaultAccessPolicy: "relay-login",
