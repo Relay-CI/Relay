@@ -11734,7 +11734,11 @@ func nodeRunStepWithCaches(repoDir string, laneID string, cmd string, extraTarge
 }
 
 func nodeDefaultBuildCmd(repoDir string) string {
-	// Pick package manager based on lockfile
+	// Only emit a build step if package.json actually defines a "build" script.
+	if nodePackageScript(repoDir, "build") == "" {
+		return ""
+	}
+	// Pick package manager based on lockfile.
 	if fileExists(filepath.Join(repoDir, "pnpm-lock.yaml")) {
 		return "pnpm run build"
 	}
