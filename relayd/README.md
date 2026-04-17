@@ -2,11 +2,11 @@
 
 # relayd — Relay Agent
 
-`relayd` is the local deployment agent for Relay-CI. It receives deploy requests over HTTP, builds app artifacts from simple buildpacks (Next.js, Vite, Expo Web, Sprint UI, Node, Go, .NET, Python, Java, Rust, C/C++, WASM Static, Static), runs lanes with Docker or the experimental Vessel backend, stores deploy history in SQLite, and exposes logs + a fast sync-based deploy flow (no GitHub required).
+`relayd` is the local deployment agent for Relay-CI. It receives deploy requests over HTTP, builds app artifacts from simple buildpacks (Next.js, Vite, Expo Web, Sprint UI, Bun, Node, Go, .NET, Python, Ruby, Java, Rust, C/C++, WASM Static, Static), runs lanes with Docker or the experimental Vessel backend, stores deploy history in SQLite, and exposes logs + a fast sync-based deploy flow (no GitHub required).
 
 ## Features
 
-- **Multi-language support**: Auto-detects and builds Next.js (standalone & classic), Vite, Expo Web, Sprint UI, Go, .NET, Python, Java, Rust, C/C++, WASM static, and Static sites.
+- **Multi-language support**: Auto-detects and builds Next.js (standalone & classic), Vite, Expo Web, Sprint UI, Bun, Go, .NET, Python (Django/Flask/FastAPI), Ruby (Rails/Rack), Java, Rust, C/C++, WASM static, and Static sites.
 - **Secrets Management**: Inject environment variables per app/branch via the secure Web UI.
 - **Concurrency Control**: Prevents parallel build conflicts for the same app context using an internal build queue.
 - **Persistent Configuration**: Link GitHub repositories and configure ports/modes server-side.
@@ -172,12 +172,16 @@ Environment variables:
 | `RELAY_VESSEL_SOURCE_DIR`   |                                  `""` | Explicit path to `vessel/`; Relay rebuilds `vessel` from it when newer |
 | `RELAY_NODE_IMAGE`          |                             `node:22` | Build image for Node builds                                        |
 | `RELAY_NODE_RUN_IMAGE`      |                        `node:22-slim` | Runtime image for Node apps                                        |
+| `RELAY_BUN_IMAGE`           |                           `oven/bun:1` | Build image for Bun apps                                           |
+| `RELAY_BUN_RUN_IMAGE`       |                      `oven/bun:1-slim` | Runtime image for Bun apps                                         |
 | `RELAY_GO_IMAGE`            |                         `golang:1.22` | Build image for Go builds                                          |
 | `RELAY_GO_RUN_IMAGE`        |     `gcr.io/distroless/base-debian12` | Runtime for Go                                                     |
 | `RELAY_DOTNET_SDK_IMAGE`    |    `mcr.microsoft.com/dotnet/sdk:8.0` | Build image for .NET                                               |
 | `RELAY_DOTNET_ASPNET_IMAGE` | `mcr.microsoft.com/dotnet/aspnet:8.0` | Runtime image for .NET                                             |
 | `RELAY_PY_IMAGE`            |                         `python:3.12` | Build image for Python                                             |
 | `RELAY_PY_RUN_IMAGE`        |                    `python:3.12-slim` | Runtime image for Python                                           |
+| `RELAY_RUBY_IMAGE`          |                              `ruby:3.3` | Build image for Ruby                                               |
+| `RELAY_RUBY_RUN_IMAGE`      |                         `ruby:3.3-slim` | Runtime image for Ruby                                             |
 | `RELAY_JAVA_BUILD_IMAGE`    |        `maven:3.9-eclipse-temurin-21` | Build image for Java                                               |
 | `RELAY_JAVA_RUN_IMAGE`      |              `eclipse-temurin:21-jre` | Runtime image for Java                                             |
 | `RELAY_RUST_IMAGE`          |                           `rust:1.77` | Build image for Rust                                               |
@@ -282,11 +286,17 @@ Useful `kind` values in this checkout:
 - `vite-static`
 - `expo-web`
 - `sprint-ui`
+- `bun`
 - `node`
 - `go`
 - `dotnet`
 - `python`
+- `django`
+- `ruby`
+- `rails`
 - `java`
+- `jvm`
+- `spring-boot`
 - `rust`
 - `c`
 - `cpp`

@@ -92,7 +92,7 @@ relay agent status                 Show installed/latest versions and outdated s
 
 Relay auto-detects your framework:
 
-`node-next` · `node-vite` · `expo-web` · `node-generic` · `go` · `dotnet` · `python` (Flask/FastAPI) · `java` · `rust` · `c-cpp` · `wasm-static` · `static` · `sprint-ui`
+`node-next` · `node-vite` · `expo-web` · `sprint-ui` · `bun` · `node-generic` · `go` · `dotnet` · `python` (Django/Flask/FastAPI) · `ruby` (Rails/Rack) · `java` (Maven/Gradle, Spring Boot-friendly) · `rust` · `c-cpp` · `wasm-static` · `static`
 
 Add more without rebuilding `relayd` — see [Server-Side Buildpack Plugins](#server-side-buildpack-plugins).
 

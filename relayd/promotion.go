@@ -51,6 +51,14 @@ type promotionRequestBody struct {
 func (s *Server) handlePromotions(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		var sess *UserSession
+		if s.hasUsers() {
+			sess = s.validateUserSession(r)
+			if sess == nil {
+				httpError(w, 401, "unauthorized")
+				return
+			}
+		}
 		app := strings.TrimSpace(r.URL.Query().Get("app"))
 		sourceEnv := normalizeDeployEnv(r.URL.Query().Get("source_env"))
 		targetEnv := normalizeDeployEnv(r.URL.Query().Get("target_env"))
@@ -59,6 +67,16 @@ func (s *Server) handlePromotions(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			httpError(w, 500, err.Error())
 			return
+		}
+		if sess != nil {
+			filtered := make([]PromotionRecord, 0, len(items))
+			for _, item := range items {
+				if roleAtLeast(s.effectiveLaneRole(sess, item.App, DeployEnv(item.SourceEnv)), "viewer") ||
+					roleAtLeast(s.effectiveLaneRole(sess, item.App, DeployEnv(item.TargetEnv)), "viewer") {
+					filtered = append(filtered, item)
+				}
+			}
+			items = filtered
 		}
 		writeJSON(w, 200, items)
 	case http.MethodPost:
@@ -84,6 +102,12 @@ func (s *Server) handlePromotions(w http.ResponseWriter, r *http.Request) {
 		}
 		if !isKnownDeployEnv(body.TargetEnv) || strings.TrimSpace(body.TargetBranch) == "" {
 			httpError(w, 400, "target_env and target_branch are required")
+			return
+		}
+		if _, ok := s.requireLaneAccess(w, r, body.App, body.SourceEnv, "deployer"); !ok {
+			return
+		}
+		if _, ok := s.requireLaneAccess(w, r, body.App, body.TargetEnv, "deployer"); !ok {
 			return
 		}
 		if body.SourceEnv == body.TargetEnv && body.SourceBranch == body.TargetBranch {
@@ -540,11 +564,42 @@ func probePromotionRoute(st *AppState) (bool, string) {
 }
 
 func (s *Server) enqueueRollbackForLane(req RollbackRequest, actor string, source string) (string, error) {
+	req.Env = normalizeDeployEnv(string(req.Env))
+	req.SourceEnv = normalizeDeployEnv(string(req.SourceEnv))
+	if req.SourceEnv != "" && strings.TrimSpace(req.SourceBranch) == "" {
+		req.SourceBranch = req.Branch
+	}
 	if !validDeployTarget(req.App, req.Env, req.Branch) {
 		return "", fmt.Errorf("app, branch, env required")
 	}
-	state, err := s.getAppState(req.App, req.Env, req.Branch)
-	if err != nil || state == nil || strings.TrimSpace(state.PreviousImage) == "" {
+	targetState, err := s.getAppState(req.App, req.Env, req.Branch)
+	if err != nil || targetState == nil {
+		return "", fmt.Errorf("target lane not found")
+	}
+
+	rollbackImage := strings.TrimSpace(targetState.PreviousImage)
+	rollbackSource := "previous"
+	if req.SourceEnv != "" {
+		if !validDeployTarget(req.App, req.SourceEnv, req.SourceBranch) {
+			return "", fmt.Errorf("source lane is invalid")
+		}
+		if req.SourceEnv == req.Env && strings.TrimSpace(req.SourceBranch) == strings.TrimSpace(req.Branch) {
+			return "", fmt.Errorf("source lane must differ from target lane")
+		}
+		sourceState, sourceErr := s.getAppState(req.App, req.SourceEnv, req.SourceBranch)
+		if sourceErr != nil || sourceState == nil {
+			return "", fmt.Errorf("source lane not found")
+		}
+		if strings.TrimSpace(sourceState.CurrentImage) == "" {
+			return "", fmt.Errorf("source lane has no deployed image")
+		}
+		if firstNonEmptyEngine(sourceState.Engine) != firstNonEmptyEngine(targetState.Engine) {
+			return "", fmt.Errorf("source and target lanes must use the same runtime engine")
+		}
+		rollbackImage = strings.TrimSpace(sourceState.CurrentImage)
+		rollbackSource = fmt.Sprintf("lane:%s/%s", req.SourceEnv, req.SourceBranch)
+	}
+	if rollbackImage == "" {
 		return "", fmt.Errorf("no previous image to rollback")
 	}
 	deployID := newID()
@@ -565,19 +620,19 @@ func (s *Server) enqueueRollbackForLane(req RollbackRequest, actor string, sourc
 		App:              req.App,
 		Branch:           req.Branch,
 		Env:              req.Env,
-		Mode:             state.Mode,
-		HostPort:         state.HostPort,
-		HostPortExplicit: state.HostPortExplicit,
-		ServicePort:      state.ServicePort,
-		PublicHost:       state.PublicHost,
+		Mode:             targetState.Mode,
+		HostPort:         targetState.HostPort,
+		HostPortExplicit: targetState.HostPortExplicit,
+		ServicePort:      targetState.ServicePort,
+		PublicHost:       targetState.PublicHost,
 		Source:           source,
 		DeployedBy:       actor,
 	}
 	if err := s.saveDeployToDB(deploy, rollbackReq); err != nil {
 		return "", err
 	}
-	s.queue <- DeployJob{ID: deployID, Req: rollbackReq, Rollback: true, RollbackImage: state.PreviousImage}
-	s.auditLog(actor, "deploy.rollback", req.App, fmt.Sprintf("env=%s branch=%s deploy=%s", req.Env, req.Branch, deployID))
+	s.queue <- DeployJob{ID: deployID, Req: rollbackReq, Rollback: true, RollbackImage: rollbackImage}
+	s.auditLog(actor, "deploy.rollback", req.App, fmt.Sprintf("env=%s branch=%s deploy=%s from=%s", req.Env, req.Branch, deployID, rollbackSource))
 	s.broadcastSnapshot()
 	return deployID, nil
 }

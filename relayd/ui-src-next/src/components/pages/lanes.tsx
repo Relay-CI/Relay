@@ -39,7 +39,7 @@ interface LanesPageProps {
   onNavigateSettings: (envKey: string) => void;
 }
 
-const ENV_PRESETS = ["prod", "staging", "dev", "preview", "test"];
+const ENV_PRESETS = ["production", "staging", "ddev", "preview", "test"];
 const ENGINE_OPTIONS = ["docker", "station"];
 const MODE_OPTIONS = [
   { value: "port", label: "HTTP" },
@@ -66,6 +66,12 @@ function drainLabel(drainUntil: number | undefined): string | null {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function laneLabel(env: string): string {
+  if (env === "prod") return "production";
+  if (env === "dev") return "ddev";
+  return env;
+}
+
 interface CreateLaneModalProps {
   app: string;
   onClose: () => void;
@@ -73,7 +79,7 @@ interface CreateLaneModalProps {
 }
 
 function CreateLaneModal({ app, onClose, onCreated }: CreateLaneModalProps) {
-  const [env, setEnv] = useState("dev");
+  const [env, setEnv] = useState("ddev");
   const [customEnv, setCustomEnv] = useState("");
   const [branch, setBranch] = useState("main");
   const [engine, setEngine] = useState("docker");
@@ -224,7 +230,7 @@ function DeleteLaneDialog({ target, onClose, onDeleted }: DeleteLaneDialogProps)
           <div className="eyebrow mb-0.5 text-red-400">Destructive action</div>
           <h2 className="text-base font-semibold text-white">Delete lane</h2>
           <p className="text-xs text-white/50 mt-1.5">
-            This will permanently delete <span className="text-white">{target.env} / {target.branch}</span> and all its state. Running containers will be stopped.
+            This will permanently delete <span className="text-white">{laneLabel(target.env)} / {target.branch}</span> and all its state. Running containers will be stopped.
           </p>
         </div>
         {error && <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded px-3 py-2">{error}</div>}
@@ -369,7 +375,7 @@ export function LanesPage({
                           ctx.latestDeploy?.status !== undefined ? "bg-amber-400 animate-pulse" : "bg-white/20",
                         )}
                       />
-                      <span className="text-sm font-semibold text-white">{ctx.env}</span>
+                      <span className="text-sm font-semibold text-white">{laneLabel(ctx.env)}</span>
                       {ctx.branch !== "main" && (
                         <span className="text-[10px] text-white/40 bg-white/[0.04] px-1.5 py-0.5 rounded font-mono">{ctx.branch}</span>
                       )}

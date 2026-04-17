@@ -150,6 +150,7 @@ export interface EnvInfo {
   app: string;
   env: string;
   branch: string;
+  access_role?: string;
   engine?: string;
   mode?: string;
   traffic_mode?: string;
@@ -161,6 +162,14 @@ export interface EnvInfo {
   public_host?: string;
   repo_url?: string;
   webhook_secret?: string;
+  notification_webhooks?: string;
+  traffic_split_percent?: number;
+  rollout_min_requests?: number;
+  rollout_error_percent?: number;
+  rollout_assess_seconds?: number;
+  rollout_started_at?: number;
+  rollout_deploy_id?: string;
+  rollout_status?: string;
   stopped?: boolean;
   active_slot?: string;
   standby_slot?: string;
@@ -260,10 +269,22 @@ export async function restartApp(target: AppTarget): Promise<void> {
   });
 }
 
-export async function rollback(deployId: string): Promise<void> {
+export async function rollback(
+  target: AppTarget,
+  source?: { env: string; branch?: string },
+): Promise<void> {
+  const payload: Record<string, string> = {
+    app: target.app,
+    env: target.env,
+    branch: target.branch,
+  };
+  if (source?.env) {
+    payload.source_env = source.env;
+    if (source.branch) payload.source_branch = source.branch;
+  }
   await apiFetch("/api/deploys/rollback", {
     method: "POST",
-    body: JSON.stringify({ deploy_id: deployId }),
+    body: JSON.stringify(payload),
   });
 }
 
@@ -285,6 +306,14 @@ export interface AppConfig {
   service_port?: number;
   public_host?: string;
   webhook_secret?: string;
+  notification_webhooks?: string;
+  traffic_split_percent?: number;
+  rollout_min_requests?: number;
+  rollout_error_percent?: number;
+  rollout_assess_seconds?: number;
+  rollout_started_at?: number;
+  rollout_deploy_id?: string;
+  rollout_status?: string;
 }
 
 export async function getAppConfig(target: AppTarget): Promise<AppConfig> {
@@ -578,6 +607,13 @@ export interface User {
   username: string;
   role: string;
   created_at: string;
+  permissions?: UserPermission[];
+}
+
+export interface UserPermission {
+  app: string;
+  env: string;
+  role: string;
 }
 
 export async function getUsers(): Promise<User[]> {
@@ -588,13 +624,14 @@ export async function createUser(data: {
   username: string;
   password: string;
   role: string;
+  permissions?: UserPermission[];
 }): Promise<void> {
   await apiFetch("/api/users", { method: "POST", body: JSON.stringify(data) });
 }
 
 export async function updateUser(
   id: string,
-  patch: { role: string },
+  patch: { role?: string; permissions?: UserPermission[] },
 ): Promise<void> {
   await apiFetch(`/api/users/${id}`, {
     method: "PATCH",

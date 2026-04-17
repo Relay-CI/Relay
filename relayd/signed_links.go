@@ -126,6 +126,9 @@ func (s *Server) handleSignedLink(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "app, branch, env required")
 		return
 	}
+	if _, ok := s.requireLaneAccess(w, r, req.App, req.Env, "deployer"); !ok {
+		return
+	}
 
 	st, err := s.getAppState(req.App, req.Env, req.Branch)
 	if err != nil || st == nil {

@@ -24,7 +24,7 @@ if (process.platform === "win32") {
  *   logs <id>       stream or print logs for a deploy ID
  *   list            list recent deploys (optionally filtered by --app)
  *   projects        list projects and their environments
- *   rollback        roll the last deploy back to the previous image
+ *   rollback        roll back to previous image or another lane's image
  *   start/stop/restart   control a running app container
  *   secrets list    list secret keys for an app/env/branch
  *   secrets add     add or update a secret
@@ -49,6 +49,7 @@ const {
   resolveDeployArgs,
   resolveServerArgs,
   resolveTransport,
+  normalizeLaneEnv,
 } = require("./deploy");
 const {
   loadRelayConfig,
@@ -98,6 +99,13 @@ function info(msg) {
 function die(msg) {
   err(msg);
   process.exit(1);
+}
+
+function laneDisplayName(env) {
+  const normalized = normalizeLaneEnv(env);
+  if (normalized === "dev") return "ddev";
+  if (normalized === "prod") return "production";
+  return normalized || String(env || "").trim();
 }
 
 // â”€â”€â”€ Utilities â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -348,7 +356,7 @@ function prompt(question, defaultVal = "") {
   });
 }
 
-const WIZARD_ENV_OPTIONS = ["dev", "staging", "prod", "preview"];
+const WIZARD_ENV_OPTIONS = ["ddev", "staging", "production", "preview"];
 
 async function promptSelect(question, options, defaultVal) {
   const normalized = options.map((opt) => String(opt));
@@ -656,12 +664,14 @@ async function runSetupWizard(args, cfgPath, missingFields = []) {
     showConfigField("App name ", app);
   }
 
-  const existingEnv = args.env || process.env.RELAY_ENV || existingCfg.env;
+  const existingEnv = normalizeLaneEnv(args.env || process.env.RELAY_ENV || existingCfg.env);
   if (needAll || missing.has("env") || !existingEnv) {
-    env = await promptSelect("Env lane", WIZARD_ENV_OPTIONS, existingEnv || "dev");
+    env = normalizeLaneEnv(
+      await promptSelect("Env lane", WIZARD_ENV_OPTIONS, laneDisplayName(existingEnv || "dev") || "ddev"),
+    );
   } else {
     env = existingEnv;
-    showConfigField("Env      ", env);
+    showConfigField("Env      ", laneDisplayName(env) || env);
   }
 
   const existingBranch = args.branch || process.env.RELAY_BRANCH || existingCfg.branch;
@@ -1268,8 +1278,8 @@ ${c.bold}COMMANDS${c.reset}
 
   ${c.cyan}projects${c.reset}                     List projects and their environments
 
-  ${c.cyan}rollback${c.reset}                     Roll back the last deploy
-    --app  --env  --branch
+  ${c.cyan}rollback${c.reset}                     Roll back to previous image or another lane
+    --app  --env  --branch  [--from-env ENV]  [--from-branch BRANCH]
 
   ${c.cyan}lane delete${c.reset}                  Delete a lane and all lane data
     --app  --env  --branch
@@ -1315,6 +1325,9 @@ async function main() {
     if (args._[1] && !args.env) args.env = args._[1];
     if (args._[2] && !args.branch) args.branch = args._[2];
   }
+  if (args.env) args.env = normalizeLaneEnv(args.env);
+  if (args["from_env"] && !args["from-env"]) args["from-env"] = args["from_env"];
+  if (args["from-env"]) args["from-env"] = normalizeLaneEnv(args["from-env"]);
 
   if (!cmd && args.version === "true") {
     cmd = "version";
@@ -1773,12 +1786,22 @@ async function main() {
     const { transport, resolved } = await resolveOrSetup(args, {
       needDeploy: true,
     });
+    const sourceEnv = normalizeLaneEnv(args["from-env"] || "");
+    const sourceBranch = (args["from-branch"] || "").trim();
+    if (!sourceEnv && sourceBranch) {
+      die("--from-branch requires --from-env");
+    }
     try {
-      const res = await apiJSON(transport, "POST", "/api/deploys/rollback", {
+      const payload = {
         app: resolved.app,
         env: resolved.env,
         branch: resolved.branch,
-      });
+      };
+      if (sourceEnv) {
+        payload.source_env = sourceEnv;
+        payload.source_branch = sourceBranch || resolved.branch;
+      }
+      const res = await apiJSON(transport, "POST", "/api/deploys/rollback", payload);
       ok(`Rollback queued  id=${res.id}`);
     } catch (e) {
       die(e.message);

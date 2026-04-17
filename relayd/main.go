@@ -258,28 +258,36 @@ type DeployJob struct {
 }
 
 type AppState struct {
-	App              string    `json:"app"`
-	Env              DeployEnv `json:"env"`
-	Branch           string    `json:"branch"`
-	RepoURL          string    `json:"repo_url"`
-	Engine           string    `json:"engine,omitempty"`
-	CurrentImage     string    `json:"current_image,omitempty"`
-	PreviousImage    string    `json:"previous_image,omitempty"`
-	Mode             string    `json:"mode"`
-	HostPort         int       `json:"host_port"`
-	HostPortExplicit bool      `json:"host_port_explicit,omitempty"`
-	ServicePort      int       `json:"service_port"`
-	PublicHost       string    `json:"public_host"`
-	ActiveSlot       string    `json:"active_slot,omitempty"`
-	StandbySlot      string    `json:"standby_slot,omitempty"`
-	DrainUntil       int64     `json:"drain_until,omitempty"`
-	TrafficMode      string    `json:"traffic_mode"`
-	AccessPolicy     string    `json:"access_policy,omitempty"`
-	IPAllowlist      string    `json:"ip_allowlist,omitempty"`
-	ExpiresAt        int64     `json:"expires_at,omitempty"`
-	RepoHash         string    `json:"repo_hash,omitempty"`
-	WebhookSecret    string    `json:"webhook_secret,omitempty"`
-	Stopped          bool      `json:"stopped,omitempty"`
+	App                  string    `json:"app"`
+	Env                  DeployEnv `json:"env"`
+	Branch               string    `json:"branch"`
+	RepoURL              string    `json:"repo_url"`
+	Engine               string    `json:"engine,omitempty"`
+	CurrentImage         string    `json:"current_image,omitempty"`
+	PreviousImage        string    `json:"previous_image,omitempty"`
+	Mode                 string    `json:"mode"`
+	HostPort             int       `json:"host_port"`
+	HostPortExplicit     bool      `json:"host_port_explicit,omitempty"`
+	ServicePort          int       `json:"service_port"`
+	PublicHost           string    `json:"public_host"`
+	ActiveSlot           string    `json:"active_slot,omitempty"`
+	StandbySlot          string    `json:"standby_slot,omitempty"`
+	DrainUntil           int64     `json:"drain_until,omitempty"`
+	TrafficMode          string    `json:"traffic_mode"`
+	AccessPolicy         string    `json:"access_policy,omitempty"`
+	IPAllowlist          string    `json:"ip_allowlist,omitempty"`
+	ExpiresAt            int64     `json:"expires_at,omitempty"`
+	RepoHash             string    `json:"repo_hash,omitempty"`
+	WebhookSecret        string    `json:"webhook_secret,omitempty"`
+	NotificationWebhooks string    `json:"notification_webhooks,omitempty"`
+	TrafficSplitPercent  int       `json:"traffic_split_percent,omitempty"`
+	RolloutMinRequests   int       `json:"rollout_min_requests,omitempty"`
+	RolloutErrorPercent  float64   `json:"rollout_error_percent,omitempty"`
+	RolloutAssessSeconds int       `json:"rollout_assess_seconds,omitempty"`
+	RolloutStartedAt     int64     `json:"rollout_started_at,omitempty"`
+	RolloutDeployID      string    `json:"rollout_deploy_id,omitempty"`
+	RolloutStatus        string    `json:"rollout_status,omitempty"`
+	Stopped              bool      `json:"stopped,omitempty"`
 }
 
 // ---------------------- Multi-service / Project config ----------------------
@@ -407,7 +415,14 @@ type User struct {
 	ID           string
 	Username     string
 	PasswordHash string
-	Role         string // "owner", "deployer", "viewer"
+	Role         string // "owner", "admin", "deployer", "viewer"
+}
+
+type UserPermission struct {
+	UserID string `json:"-"`
+	App    string `json:"app"`
+	Env    string `json:"env"`
+	Role   string `json:"role"`
 }
 
 type UserSession struct {
@@ -660,14 +675,16 @@ type Server struct {
 
 	buildpacks []Buildpack
 
-	buildLock sync.Mutex
-	building  map[string]bool // app__env__branch
+	building sync.Map // key: "app__env__branch" → bool; guards per-lane build dedup
 
 	buildCancelsMu sync.Mutex
 	buildCancels   map[string]context.CancelFunc // deployID → active cancel func
 
 	webhookRateMu sync.Mutex
 	webhookHits   map[string][]time.Time // repoURL → recent trigger timestamps
+
+	rolloutWatchMu sync.Mutex
+	rolloutWatches map[string]struct{}
 
 	eventsMu    sync.RWMutex
 	eventsChans map[chan []byte]struct{}
@@ -780,10 +797,12 @@ func defaultBuildpacks() []Buildpack {
 		&NodeViteBuildpack{},
 		&ExpoWebBuildpack{},
 		&SprintUIBuildpack{},
+		&BunBuildpack{},
 		&NodeGenericBuildpack{},
 		&GoBuildpack{},
 		&DotnetBuildpack{},
 		&PythonBuildpack{},
+		&RubyBuildpack{},
 		&JavaBuildpack{},
 		&RustBuildpack{},
 		&CCppBuildpack{},
@@ -975,6 +994,8 @@ func (b *NodeNextBuildpack) Plan(req DeployRequest, repoDir string, cfg *RelayCo
 	port := 3000
 	install := firstNonEmpty(req.InstallCmd, nodeInstallCmd(repoDir))
 	build := firstNonEmpty(req.BuildCmd, nodeDefaultBuildCmd(repoDir))
+	// Unique ID per deployment lane so each app's .next/cache stays isolated.
+	laneID := fmt.Sprintf("%s-%s-%s", safe(req.App), safe(string(req.Env)), safe(req.Branch))
 
 	if standalone {
 		return BuildPlan{
@@ -1013,11 +1034,13 @@ RUN mkdir -p /app/public/uploads && chown -R node:node /app || true
 USER node
 EXPOSE 3000
 CMD ["node","server.js"]
-`, firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg), nodeRunStepWithCaches(repoDir, install), nodeRunStepWithCaches(repoDir, build, "/app/.next/cache"), firstNonEmpty(cfgStr(cfg, "RunImage"), runImg))
+`, firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg), nodeRunStepWithCaches(repoDir, "", install), nodeRunStepWithCaches(repoDir, laneID, build, "/app/.next/cache"), firstNonEmpty(cfgStr(cfg, "RunImage"), runImg))
 
+				writeRelayDockerignore(repoDir)
 				return os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte(df), 0644)
 			},
 			Cleanup: func(repoDir string) error {
+				cleanupRelayDockerignore(repoDir)
 				_ = os.Remove(filepath.Join(repoDir, "Dockerfile"))
 				return nil
 			},
@@ -1060,11 +1083,13 @@ COPY --from=builder /app /app
 COPY --from=prod-deps /app/node_modules ./node_modules
 EXPOSE 3000
 CMD %s
-`, firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg), nodeRunStepWithCaches(repoDir, install), nodeRunStepWithCaches(repoDir, build, "/app/.next/cache"), nodeProdDepsStage(repoDir), firstNonEmpty(cfgStr(cfg, "RunImage"), runImg), shellJSON(start))
+`, firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg), nodeRunStepWithCaches(repoDir, "", install), nodeRunStepWithCaches(repoDir, laneID, build, "/app/.next/cache"), nodeProdDepsStage(repoDir), firstNonEmpty(cfgStr(cfg, "RunImage"), runImg), shellJSON(start))
 
+			writeRelayDockerignore(repoDir)
 			return os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte(df), 0644)
 		},
 		Cleanup: func(repoDir string) error {
+			cleanupRelayDockerignore(repoDir)
 			_ = os.Remove(filepath.Join(repoDir, "Dockerfile"))
 			return nil
 		},
@@ -1115,8 +1140,9 @@ FROM %s
 COPY --from=builder /app/dist /usr/share/nginx/html
 COPY default.conf /etc/nginx/conf.d/default.conf
 EXPOSE 80
-`, firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg), nodeRunStepWithCaches(repoDir, install), nodeRunStepWithCaches(repoDir, build), firstNonEmpty(cfgStr(cfg, "RunImage"), runImg))
+`, firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg), nodeRunStepWithCaches(repoDir, "", install), nodeRunStepWithCaches(repoDir, "", build), firstNonEmpty(cfgStr(cfg, "RunImage"), runImg))
 
+			writeRelayDockerignore(repoDir)
 			if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte(df), 0644); err != nil {
 				return err
 			}
@@ -1143,6 +1169,7 @@ EXPOSE 80
 			return nil
 		},
 		Cleanup: func(repoDir string) error {
+			cleanupRelayDockerignore(repoDir)
 			_ = os.RemoveAll(filepath.Join(repoDir, "node_modules"))
 			_ = os.RemoveAll(filepath.Join(repoDir, "dist"))
 			_ = os.Remove(filepath.Join(repoDir, "Dockerfile"))
@@ -1202,7 +1229,7 @@ FROM %s
 COPY --from=builder /app/dist /usr/share/nginx/html
 COPY default.conf /etc/nginx/conf.d/default.conf
 EXPOSE 80
-`, firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg), nodeRunStepWithCaches(repoDir, install), nodeRunStepWithCaches(repoDir, build), firstNonEmpty(cfgStr(cfg, "RunImage"), runImg))
+`, firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg), nodeRunStepWithCaches(repoDir, "", install), nodeRunStepWithCaches(repoDir, "", build), firstNonEmpty(cfgStr(cfg, "RunImage"), runImg))
 
 			return writeStaticDockerArtifacts(repoDir, df, false)
 		},
@@ -1211,6 +1238,8 @@ EXPOSE 80
 		},
 	}, nil
 }
+
+type BunBuildpack struct{}
 
 type NodeGenericBuildpack struct{}
 
@@ -1272,13 +1301,81 @@ COPY --from=prod-deps /app/node_modules ./node_modules
 RUN npm install -g serve@14
 EXPOSE %d
 CMD %s
-`, firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg), nodeRunStepWithCaches(repoDir, install), nodeRunStepWithCaches(repoDir, build), nodeProdDepsStage(repoDir), firstNonEmpty(cfgStr(cfg, "RunImage"), runImg), port, port, shellJSON(start))
+`, firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg), nodeRunStepWithCaches(repoDir, "", install), nodeRunStepWithCaches(repoDir, "", build), nodeProdDepsStage(repoDir), firstNonEmpty(cfgStr(cfg, "RunImage"), runImg), port, port, shellJSON(start))
 
+			writeRelayDockerignore(repoDir)
 			return os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte(df), 0644)
 		},
 		Cleanup: func(repoDir string) error {
+			cleanupRelayDockerignore(repoDir)
 			_ = os.RemoveAll(filepath.Join(repoDir, "node_modules"))
 			_ = os.RemoveAll(filepath.Join(repoDir, "build"))
+			_ = os.Remove(filepath.Join(repoDir, "Dockerfile"))
+			return nil
+		},
+	}, nil
+}
+
+func (b *BunBuildpack) Name() string { return "bun" }
+func (b *BunBuildpack) Detect(repoDir string, cfg *RelayConfig) bool {
+	if cfg != nil && (strings.EqualFold(cfg.Kind, "bun") || strings.EqualFold(cfg.Kind, "bun-generic")) {
+		return true
+	}
+	if !fileExists(filepath.Join(repoDir, "package.json")) {
+		return false
+	}
+	return bunProject(repoDir)
+}
+func (b *BunBuildpack) Plan(req DeployRequest, repoDir string, cfg *RelayConfig) (BuildPlan, error) {
+	buildImg := getenv("RELAY_BUN_IMAGE", "oven/bun:1")
+	runImg := getenv("RELAY_BUN_RUN_IMAGE", "oven/bun:1-slim")
+	install := firstNonEmpty(req.InstallCmd, bunInstallCmd(repoDir))
+	build := firstNonEmpty(req.BuildCmd, bunDefaultBuildCmd(repoDir))
+	start := firstNonEmpty(req.StartCmd, bunDefaultStartCmd(repoDir))
+	port := firstNonZero(req.ServicePort, 3000)
+
+	return BuildPlan{
+		Kind:        "bun",
+		ServicePort: port,
+		BuildImage:  firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg),
+		RunImage:    firstNonEmpty(cfgStr(cfg, "RunImage"), runImg),
+		InstallCmd:  install,
+		BuildCmd:    build,
+		StartCmd:    start,
+		WriteDockerfile: func(repoDir string) error {
+			lockCopy := bunLockfileCopyInstruction(repoDir)
+			df := fmt.Sprintf(`# syntax=docker/dockerfile:1.7
+FROM %s AS deps
+WORKDIR /app
+COPY package.json ./
+%s%s
+
+FROM deps AS builder
+COPY . .
+%s
+RUN rm -rf node_modules
+
+FROM %s AS prod-deps
+WORKDIR /app
+COPY package.json ./
+%s%s
+
+FROM %s
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT=%d
+COPY --from=builder /app /app
+COPY --from=prod-deps /app/node_modules ./node_modules
+EXPOSE %d
+CMD %s
+`, firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg), lockCopy, bunRunStepWithCache(install), bunRunStepWithCache(build), firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg), lockCopy, bunRunStepWithCache(bunProdInstallCmd(repoDir)), firstNonEmpty(cfgStr(cfg, "RunImage"), runImg), port, port, shellJSON(start))
+
+			writeRelayDockerignore(repoDir)
+			return os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte(df), 0644)
+		},
+		Cleanup: func(repoDir string) error {
+			cleanupRelayDockerignore(repoDir)
+			_ = os.RemoveAll(filepath.Join(repoDir, "node_modules"))
 			_ = os.Remove(filepath.Join(repoDir, "Dockerfile"))
 			return nil
 		},
@@ -1333,11 +1430,13 @@ COPY --from=builder /app /app
 COPY --from=prod-deps /app/node_modules ./node_modules
 EXPOSE %d
 CMD %s
-`, firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg), nodeRunStepWithCaches(repoDir, install), nodeRunStepWithCaches(repoDir, build), nodeProdDepsStage(repoDir), firstNonEmpty(cfgStr(cfg, "RunImage"), runImg), port, port, shellJSON(start))
+`, firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg), nodeRunStepWithCaches(repoDir, "", install), nodeRunStepWithCaches(repoDir, "", build), nodeProdDepsStage(repoDir), firstNonEmpty(cfgStr(cfg, "RunImage"), runImg), port, port, shellJSON(start))
 
+			writeRelayDockerignore(repoDir)
 			return os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte(df), 0644)
 		},
 		Cleanup: func(repoDir string) error {
+			cleanupRelayDockerignore(repoDir)
 			_ = os.RemoveAll(filepath.Join(repoDir, "node_modules"))
 			_ = os.Remove(filepath.Join(repoDir, "Dockerfile"))
 			return nil
@@ -1464,12 +1563,13 @@ type PythonBuildpack struct{}
 
 func (b *PythonBuildpack) Name() string { return "python" }
 func (b *PythonBuildpack) Detect(repoDir string, cfg *RelayConfig) bool {
-	if cfg != nil && strings.EqualFold(cfg.Kind, "python") {
+	if cfg != nil && (strings.EqualFold(cfg.Kind, "python") || strings.EqualFold(cfg.Kind, "django")) {
 		return true
 	}
 	return fileExists(filepath.Join(repoDir, "requirements.txt")) ||
 		fileExists(filepath.Join(repoDir, "pyproject.toml")) ||
-		fileExists(filepath.Join(repoDir, "Pipfile"))
+		fileExists(filepath.Join(repoDir, "Pipfile")) ||
+		fileExists(filepath.Join(repoDir, "manage.py"))
 }
 func (b *PythonBuildpack) Plan(req DeployRequest, repoDir string, cfg *RelayConfig) (BuildPlan, error) {
 	buildImg := getenv("RELAY_PY_IMAGE", "python:3.12")
@@ -1514,11 +1614,61 @@ CMD %s
 	}, nil
 }
 
+type RubyBuildpack struct{}
+
+func (b *RubyBuildpack) Name() string { return "ruby" }
+func (b *RubyBuildpack) Detect(repoDir string, cfg *RelayConfig) bool {
+	if cfg != nil && (strings.EqualFold(cfg.Kind, "ruby") || strings.EqualFold(cfg.Kind, "rails")) {
+		return true
+	}
+	return fileExists(filepath.Join(repoDir, "Gemfile"))
+}
+func (b *RubyBuildpack) Plan(req DeployRequest, repoDir string, cfg *RelayConfig) (BuildPlan, error) {
+	buildImg := getenv("RELAY_RUBY_IMAGE", "ruby:3.3")
+	runImg := getenv("RELAY_RUBY_RUN_IMAGE", "ruby:3.3-slim")
+
+	port := firstNonZero(req.ServicePort, 3000)
+	install := firstNonEmpty(req.InstallCmd, rubyInstallCmd(repoDir))
+	build := firstNonEmpty(req.BuildCmd, rubyDefaultBuildCmd(repoDir))
+	start := firstNonEmpty(req.StartCmd, rubyDefaultStart(repoDir))
+
+	return BuildPlan{
+		Kind:        "ruby",
+		ServicePort: port,
+		BuildImage:  firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg),
+		RunImage:    firstNonEmpty(cfgStr(cfg, "RunImage"), runImg),
+		InstallCmd:  install,
+		BuildCmd:    build,
+		StartCmd:    start,
+		WriteDockerfile: func(repoDir string) error {
+			df := fmt.Sprintf(`FROM %s
+WORKDIR /app
+ENV PORT=%d
+ENV RACK_ENV=production
+ENV RAILS_ENV=production
+ENV BUNDLE_WITHOUT=development:test
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential git pkg-config libsqlite3-dev && rm -rf /var/lib/apt/lists/*
+COPY Gemfile Gemfile.lock* ./
+RUN %s
+COPY . .
+%s
+EXPOSE %d
+CMD %s
+`, firstNonEmpty(cfgStr(cfg, "RunImage"), runImg), port, install, rubyRunStep(build), port, shellForm(start))
+			return os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte(df), 0644)
+		},
+		Cleanup: func(repoDir string) error {
+			_ = os.Remove(filepath.Join(repoDir, "Dockerfile"))
+			return nil
+		},
+	}, nil
+}
+
 type JavaBuildpack struct{}
 
 func (b *JavaBuildpack) Name() string { return "java" }
 func (b *JavaBuildpack) Detect(repoDir string, cfg *RelayConfig) bool {
-	if cfg != nil && strings.EqualFold(cfg.Kind, "java") {
+	if cfg != nil && (strings.EqualFold(cfg.Kind, "java") || strings.EqualFold(cfg.Kind, "jvm") || strings.EqualFold(cfg.Kind, "spring-boot")) {
 		return true
 	}
 	return fileExists(filepath.Join(repoDir, "pom.xml")) || fileExists(filepath.Join(repoDir, "build.gradle")) || fileExists(filepath.Join(repoDir, "build.gradle.kts"))
@@ -1555,9 +1705,10 @@ FROM %s
 WORKDIR /app
 COPY --from=builder /src/target/*.jar /app/app.jar
 ENV PORT=%d
+ENV SERVER_PORT=%d
 EXPOSE %d
-CMD ["java","-jar","/app/app.jar"]
-`, firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg), firstNonEmpty(cfgStr(cfg, "RunImage"), runImg), port, port)
+CMD %s
+`, firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg), firstNonEmpty(cfgStr(cfg, "RunImage"), runImg), port, port, port, shellForm(start))
 				return os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte(df), 0644)
 			} else if isGradle {
 				gradleCmd := "gradle build -x test"
@@ -1573,9 +1724,10 @@ FROM %s
 WORKDIR /app
 COPY --from=builder /src/build/libs/*.jar /app/app.jar
 ENV PORT=%d
+ENV SERVER_PORT=%d
 EXPOSE %d
-CMD ["java","-jar","/app/app.jar"]
-`, firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg), gradleCmd, firstNonEmpty(cfgStr(cfg, "RunImage"), runImg), port, port)
+CMD %s
+`, firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg), gradleCmd, firstNonEmpty(cfgStr(cfg, "RunImage"), runImg), port, port, port, shellForm(start))
 				return os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte(df), 0644)
 			} else {
 				return fmt.Errorf("java: no pom.xml or build.gradle found")
@@ -2754,9 +2906,17 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 405, "method not allowed")
 		return
 	}
+	var sess *UserSession
+	if s.hasUsers() {
+		sess = s.validateUserSession(r)
+		if sess == nil {
+			httpError(w, 401, "unauthorized")
+			return
+		}
+	}
 
 	rows, err := s.db.Query(
-		`SELECT app, env, branch, COALESCE(engine,''), mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), repo_url, COALESCE(stopped,0)
+		`SELECT app, env, branch, COALESCE(engine,''), mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), repo_url, COALESCE(stopped,0)
 		FROM app_state ORDER BY app, env, branch`,
 	)
 	if err != nil {
@@ -2766,25 +2926,34 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type ProjectEnv struct {
-		App              string `json:"app"`
-		Env              string `json:"env"`
-		Branch           string `json:"branch"`
-		Engine           string `json:"engine,omitempty"`
-		Mode             string `json:"mode"`
-		HostPort         int    `json:"host_port"`
-		HostPortExplicit bool   `json:"host_port_explicit,omitempty"`
-		ServicePort      int    `json:"service_port"`
-		PublicHost       string `json:"public_host"`
-		ActiveSlot       string `json:"active_slot,omitempty"`
-		StandbySlot      string `json:"standby_slot,omitempty"`
-		DrainUntil       int64  `json:"drain_until,omitempty"`
-		TrafficMode      string `json:"traffic_mode,omitempty"`
-		AccessPolicy     string `json:"access_policy,omitempty"`
-		IPAllowlist      string `json:"ip_allowlist,omitempty"`
-		ExpiresAt        int64  `json:"expires_at,omitempty"`
-		WebhookSecret    string `json:"webhook_secret,omitempty"`
-		RepoURL          string `json:"repo_url"`
-		Stopped          bool   `json:"stopped,omitempty"`
+		App                  string  `json:"app"`
+		Env                  string  `json:"env"`
+		Branch               string  `json:"branch"`
+		Engine               string  `json:"engine,omitempty"`
+		Mode                 string  `json:"mode"`
+		HostPort             int     `json:"host_port"`
+		HostPortExplicit     bool    `json:"host_port_explicit,omitempty"`
+		ServicePort          int     `json:"service_port"`
+		PublicHost           string  `json:"public_host"`
+		ActiveSlot           string  `json:"active_slot,omitempty"`
+		StandbySlot          string  `json:"standby_slot,omitempty"`
+		DrainUntil           int64   `json:"drain_until,omitempty"`
+		TrafficMode          string  `json:"traffic_mode,omitempty"`
+		AccessPolicy         string  `json:"access_policy,omitempty"`
+		IPAllowlist          string  `json:"ip_allowlist,omitempty"`
+		ExpiresAt            int64   `json:"expires_at,omitempty"`
+		WebhookSecret        string  `json:"webhook_secret,omitempty"`
+		NotificationWebhooks string  `json:"notification_webhooks,omitempty"`
+		TrafficSplitPercent  int     `json:"traffic_split_percent,omitempty"`
+		RolloutMinRequests   int     `json:"rollout_min_requests,omitempty"`
+		RolloutErrorPercent  float64 `json:"rollout_error_percent,omitempty"`
+		RolloutAssessSeconds int     `json:"rollout_assess_seconds,omitempty"`
+		RolloutStartedAt     int64   `json:"rollout_started_at,omitempty"`
+		RolloutDeployID      string  `json:"rollout_deploy_id,omitempty"`
+		RolloutStatus        string  `json:"rollout_status,omitempty"`
+		RepoURL              string  `json:"repo_url"`
+		Stopped              bool    `json:"stopped,omitempty"`
+		AccessRole           string  `json:"access_role,omitempty"`
 	}
 
 	type ProjectInfo struct {
@@ -2797,12 +2966,18 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var pe ProjectEnv
 		if err := rows.Scan(&pe.App, &pe.Env, &pe.Branch, &pe.Engine, &pe.Mode,
-			&pe.HostPort, &pe.HostPortExplicit, &pe.ServicePort, &pe.PublicHost, &pe.ActiveSlot, &pe.StandbySlot, &pe.DrainUntil, &pe.TrafficMode, &pe.AccessPolicy, &pe.IPAllowlist, &pe.ExpiresAt, &pe.WebhookSecret, &pe.RepoURL, &pe.Stopped); err != nil {
+			&pe.HostPort, &pe.HostPortExplicit, &pe.ServicePort, &pe.PublicHost, &pe.ActiveSlot, &pe.StandbySlot, &pe.DrainUntil, &pe.TrafficMode, &pe.AccessPolicy, &pe.IPAllowlist, &pe.ExpiresAt, &pe.WebhookSecret, &pe.NotificationWebhooks, &pe.TrafficSplitPercent, &pe.RolloutMinRequests, &pe.RolloutErrorPercent, &pe.RolloutAssessSeconds, &pe.RolloutStartedAt, &pe.RolloutDeployID, &pe.RolloutStatus, &pe.RepoURL, &pe.Stopped); err != nil {
 			continue
 		}
 		pe.Engine = firstNonEmptyEngine(pe.Engine)
 		pe.TrafficMode = firstNonEmpty(normalizeTrafficMode(pe.TrafficMode), s.lanePolicy(DeployEnv(pe.Env)).DefaultTrafficMode)
 		pe.AccessPolicy = firstNonEmpty(normalizeAccessPolicy(pe.AccessPolicy), s.lanePolicy(DeployEnv(pe.Env)).DefaultAccessPolicy)
+		if sess != nil {
+			pe.AccessRole = s.effectiveLaneRole(sess, pe.App, DeployEnv(pe.Env))
+			if !roleAtLeast(pe.AccessRole, "viewer") {
+				continue
+			}
+		}
 		if _, ok := byApp[pe.App]; !ok {
 			byApp[pe.App] = &ProjectInfo{Name: pe.App, Envs: []ProjectEnv{}, Services: []ProjectService{}}
 		}
@@ -2820,6 +2995,9 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 				var ps ProjectService
 				_ = svcs.Scan(&ps.Project, &ps.Name, &ps.Type, &ps.Branch, &ps.Env,
 					&ps.Container, &ps.Network, &ps.Volume, &ps.EnvKey, &ps.EnvVal, &ps.Image, &ps.Port, &ps.HostPort, &ps.SpecHash)
+				if sess != nil && !roleAtLeast(s.effectiveLaneRole(sess, ps.Project, DeployEnv(ps.Env)), "viewer") {
+					continue
+				}
 				if ps.Container != "" {
 					ps.Running = s.runtime.IsRunning(ps.Container)
 				}
@@ -2831,6 +3009,9 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]*ProjectInfo, 0, len(byApp))
 	for _, v := range byApp {
+		if len(v.Envs) == 0 && len(v.Services) == 0 {
+			continue
+		}
 		out = append(out, v)
 	}
 	writeJSON(w, 200, out)
@@ -2858,20 +3039,65 @@ type projectSyncRecord struct {
 
 var errLaneNotFound = errors.New("lane not found")
 
+func (s *Server) ensureBaselineLanes(app string, branch string, preferredEnv DeployEnv, preferredRepoURL string, preferredEngine string) error {
+	app = strings.TrimSpace(app)
+	branch = strings.TrimSpace(branch)
+	preferredEnv = normalizeDeployEnv(string(preferredEnv))
+	preferredRepoURL = strings.TrimSpace(preferredRepoURL)
+	if app == "" || branch == "" || s == nil || s.db == nil {
+		return nil
+	}
+
+	baseEngine := firstNonEmptyEngine(preferredEngine)
+	if baseEngine == "" {
+		baseEngine = detectDefaultEngine()
+	}
+
+	for _, env := range baselineDeployEnvs() {
+		if existing, err := s.getAppState(app, env, branch); err == nil && existing != nil {
+			continue
+		}
+		policy := s.lanePolicy(env)
+		st := &AppState{
+			App:          app,
+			Env:          env,
+			Branch:       branch,
+			RepoURL:      "",
+			Engine:       baseEngine,
+			Mode:         policy.DefaultMode,
+			TrafficMode:  policy.DefaultTrafficMode,
+			AccessPolicy: policy.DefaultAccessPolicy,
+			HostPort:     policy.DefaultHostPort,
+			ServicePort:  3000,
+		}
+		if preferredRepoURL != "" && env == preferredEnv {
+			st.RepoURL = preferredRepoURL
+		}
+		s.constrainAppState(st)
+		if err := s.saveAppState(st); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Server) projectHasActiveWork(app string) bool {
 	app = strings.TrimSpace(app)
 	if app == "" {
 		return false
 	}
 
-	s.buildLock.Lock()
-	for key, active := range s.building {
-		if active && strings.HasPrefix(key, app+"__") {
-			s.buildLock.Unlock()
-			return true
+	found := false
+	s.building.Range(func(k, _ any) bool {
+		if strings.HasPrefix(k.(string), app+"__") {
+			found = true
+			return false
 		}
+		return true
+	})
+	if found {
+		return true
 	}
-	s.buildLock.Unlock()
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -2894,12 +3120,9 @@ func (s *Server) appLaneHasActiveWork(app string, env DeployEnv, branch string) 
 	}
 
 	lockKey := fmt.Sprintf("%s__%s__%s", app, env, branch)
-	s.buildLock.Lock()
-	if s.building[lockKey] {
-		s.buildLock.Unlock()
+	if _, ok := s.building.Load(lockKey); ok {
 		return true
 	}
-	s.buildLock.Unlock()
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -3168,9 +3391,7 @@ func (s *Server) deleteLaneData(app string, env DeployEnv, branch string) (map[s
 	}
 	s.syncMu.Unlock()
 
-	s.buildLock.Lock()
-	delete(s.building, fmt.Sprintf("%s__%s__%s", app, env, branch))
-	s.buildLock.Unlock()
+	s.building.Delete(fmt.Sprintf("%s__%s__%s", app, env, branch))
 
 	s.broadcastSnapshot()
 	go func() { _ = s.ensureGlobalProxy() }()
@@ -3199,8 +3420,12 @@ func (s *Server) handleLaneDelete(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "invalid json")
 		return
 	}
+	req.Env = normalizeDeployEnv(string(req.Env))
 	if !validDeployTarget(req.App, req.Env, req.Branch) {
 		httpError(w, 400, "app, branch, env required")
+		return
+	}
+	if _, ok := s.requireLaneAccess(w, r, req.App, req.Env, "deployer"); !ok {
 		return
 	}
 	if strings.TrimSpace(req.Confirm) != "DELETE" {
@@ -3515,13 +3740,12 @@ func (s *Server) deleteProjectData(app string) (map[string]int64, []string, erro
 	}
 	s.syncMu.Unlock()
 
-	s.buildLock.Lock()
-	for key := range s.building {
-		if strings.HasPrefix(key, app+"__") {
-			delete(s.building, key)
+	s.building.Range(func(k, _ any) bool {
+		if strings.HasPrefix(k.(string), app+"__") {
+			s.building.Delete(k)
 		}
-	}
-	s.buildLock.Unlock()
+		return true
+	})
 
 	s.broadcastSnapshot()
 	go func() { _ = s.ensureGlobalProxy() }()
@@ -3621,7 +3845,7 @@ func main() {
 
 	s := &Server{
 		deploys:               make(map[string]*Deploy),
-		queue:                 make(chan DeployJob, 200),
+		queue:                 make(chan DeployJob, 1000),
 		syncSessions:          make(map[string]*SyncSession),
 		dataDir:               dataDir,
 		workspacesDir:         filepath.Join(dataDir, "workspaces"),
@@ -3637,9 +3861,9 @@ func main() {
 		apiToken:              apiToken,
 		secretKey:             secretKey,
 		buildpacks:            defaultBuildpacks(),
-		building:              make(map[string]bool),
 		buildCancels:          make(map[string]context.CancelFunc),
 		webhookHits:           make(map[string][]time.Time),
+		rolloutWatches:        make(map[string]struct{}),
 		eventsChans:           make(map[chan []byte]struct{}),
 		runtime:               &DockerRuntime{},
 		stationRuntime:        newStationRuntime(dataDir),
@@ -3659,15 +3883,17 @@ func main() {
 	_ = s.loadSessionsFromDB()
 	_ = s.loadDeploysFromDB()
 	_ = s.reconcileStaleDeploysOnStartup()
+	_ = s.resumeRolloutWatches()
 
 	// Restore global domain proxy state from DB
 	go func() { _ = s.ensureGlobalProxy() }()
 	go s.runLaneExpiryWorker()
 
-	// Start worker pool: use half of available CPUs (at least 1)
-	n := runtime.NumCPU() / 2
-	if n < 1 {
-		n = 1
+	// Start worker pool: deploy jobs are I/O-bound (git, image pull/push, container
+	// start), so use all available CPUs with a minimum of 2.
+	n := runtime.NumCPU()
+	if n < 2 {
+		n = 2
 	}
 	s.worker(n)
 
@@ -3695,9 +3921,9 @@ func main() {
 	// API (auth)
 	authAny := s.auth
 	authOwner := s.authWithRoles("owner")
-	authDeployer := s.authWithRoles("owner", "deployer")
+	authDeployer := s.authWithRoles("owner", "admin", "deployer")
 	authReadOnly := s.authByMethod(nil, nil)
-	authReadDeployerWrite := s.authByMethod(nil, []string{"owner", "deployer"})
+	authReadDeployerWrite := s.authByMethod(nil, []string{"owner", "admin", "deployer"})
 	mux.HandleFunc("/api/auth/session", s.handleDashboardSession)
 	mux.HandleFunc("/api/auth/setup", s.handleAuthSetup)
 	mux.HandleFunc("/api/auth/login", s.handleAuthLogin)
@@ -4078,8 +4304,16 @@ func (s *Server) handleDeploys(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 400, "invalid json")
 			return
 		}
+		req.Env = normalizeDeployEnv(string(req.Env))
 		if err := validateDeployRequest(req); err != nil {
 			httpError(w, 400, err.Error())
+			return
+		}
+		if _, ok := s.requireLaneAccess(w, r, req.App, req.Env, "deployer"); !ok {
+			return
+		}
+		if err := s.ensureBaselineLanes(req.App, req.Branch, req.Env, req.RepoURL, req.Engine); err != nil {
+			httpError(w, 500, "failed to seed baseline lanes: "+err.Error())
 			return
 		}
 
@@ -4105,6 +4339,7 @@ func (s *Server) handleDeploys(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 500, "failed to persist deploy: "+err.Error())
 			return
 		}
+		s.emitDeployNotificationsByID(deployID)
 
 		s.queue <- DeployJob{ID: deployID, Req: req}
 		s.broadcastSnapshot()
@@ -4115,6 +4350,23 @@ func (s *Server) handleDeploys(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			httpError(w, 500, err.Error())
 			return
+		}
+		if s.hasUsers() {
+			sess := s.validateUserSession(r)
+			if sess == nil {
+				httpError(w, 401, "unauthorized")
+				return
+			}
+			filtered := make([]*Deploy, 0, len(out))
+			for _, deploy := range out {
+				if deploy == nil {
+					continue
+				}
+				if roleAtLeast(s.effectiveLaneRole(sess, deploy.App, deploy.Env), "viewer") {
+					filtered = append(filtered, deploy)
+				}
+			}
+			out = filtered
 		}
 		writeJSON(w, 200, out)
 
@@ -4133,6 +4385,9 @@ func (s *Server) handleDeployByID(w http.ResponseWriter, r *http.Request) {
 	d, err := s.getDeployFromDB(id)
 	if err != nil {
 		httpError(w, 404, "not found")
+		return
+	}
+	if _, ok := s.requireLaneAccess(w, r, d.App, d.Env, "viewer"); !ok {
 		return
 	}
 	writeJSON(w, 200, d)
@@ -4574,18 +4829,18 @@ func (s *Server) broadcastEvent(eventType string, payload []byte) {
 // and fans it out as an "update" SSE event to all connected dashboard clients.
 func (s *Server) broadcastSnapshot() {
 	go func() {
-		snap, err := s.buildSnapshotJSON()
-		if err != nil {
-			return
-		}
-		s.broadcastEvent("update", snap)
+		s.broadcastEvent("update", []byte(`{}`))
 	}()
 }
 
 // buildSnapshotJSON returns the projects+deploys payload for the /api/events endpoint.
 func (s *Server) buildSnapshotJSON() ([]byte, error) {
+	return s.buildSnapshotJSONForSession(nil)
+}
+
+func (s *Server) buildSnapshotJSONForSession(sess *UserSession) ([]byte, error) {
 	rows, err := s.db.Query(
-		`SELECT app, env, branch, COALESCE(engine,''), mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), repo_url, COALESCE(stopped,0)
+		`SELECT app, env, branch, COALESCE(engine,''), mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), repo_url, COALESCE(stopped,0)
 		FROM app_state ORDER BY app, env, branch`,
 	)
 	if err != nil {
@@ -4594,26 +4849,35 @@ func (s *Server) buildSnapshotJSON() ([]byte, error) {
 	defer rows.Close()
 
 	type snapEnv struct {
-		App              string `json:"app"`
-		Env              string `json:"env"`
-		Branch           string `json:"branch"`
-		Engine           string `json:"engine,omitempty"`
-		Mode             string `json:"mode"`
-		HostPort         int    `json:"host_port"`
-		HostPortExplicit bool   `json:"host_port_explicit,omitempty"`
-		ServicePort      int    `json:"service_port"`
-		PublicHost       string `json:"public_host"`
-		ActiveSlot       string `json:"active_slot,omitempty"`
-		StandbySlot      string `json:"standby_slot,omitempty"`
-		DrainUntil       int64  `json:"drain_until,omitempty"`
-		TrafficMode      string `json:"traffic_mode,omitempty"`
-		AccessPolicy     string `json:"access_policy,omitempty"`
-		IPAllowlist      string `json:"ip_allowlist,omitempty"`
-		ExpiresAt        int64  `json:"expires_at,omitempty"`
-		WebhookSecret    string `json:"webhook_secret,omitempty"`
-		RepoURL          string `json:"repo_url"`
-		Stopped          bool   `json:"stopped,omitempty"`
-		Running          bool   `json:"running,omitempty"`
+		App                  string  `json:"app"`
+		Env                  string  `json:"env"`
+		Branch               string  `json:"branch"`
+		Engine               string  `json:"engine,omitempty"`
+		Mode                 string  `json:"mode"`
+		HostPort             int     `json:"host_port"`
+		HostPortExplicit     bool    `json:"host_port_explicit,omitempty"`
+		ServicePort          int     `json:"service_port"`
+		PublicHost           string  `json:"public_host"`
+		ActiveSlot           string  `json:"active_slot,omitempty"`
+		StandbySlot          string  `json:"standby_slot,omitempty"`
+		DrainUntil           int64   `json:"drain_until,omitempty"`
+		TrafficMode          string  `json:"traffic_mode,omitempty"`
+		AccessPolicy         string  `json:"access_policy,omitempty"`
+		IPAllowlist          string  `json:"ip_allowlist,omitempty"`
+		ExpiresAt            int64   `json:"expires_at,omitempty"`
+		WebhookSecret        string  `json:"webhook_secret,omitempty"`
+		NotificationWebhooks string  `json:"notification_webhooks,omitempty"`
+		TrafficSplitPercent  int     `json:"traffic_split_percent,omitempty"`
+		RolloutMinRequests   int     `json:"rollout_min_requests,omitempty"`
+		RolloutErrorPercent  float64 `json:"rollout_error_percent,omitempty"`
+		RolloutAssessSeconds int     `json:"rollout_assess_seconds,omitempty"`
+		RolloutStartedAt     int64   `json:"rollout_started_at,omitempty"`
+		RolloutDeployID      string  `json:"rollout_deploy_id,omitempty"`
+		RolloutStatus        string  `json:"rollout_status,omitempty"`
+		RepoURL              string  `json:"repo_url"`
+		Stopped              bool    `json:"stopped,omitempty"`
+		Running              bool    `json:"running,omitempty"`
+		AccessRole           string  `json:"access_role,omitempty"`
 	}
 	type snapProject struct {
 		Name     string           `json:"name"`
@@ -4625,13 +4889,14 @@ func (s *Server) buildSnapshotJSON() ([]byte, error) {
 	for rows.Next() {
 		var pe snapEnv
 		if err := rows.Scan(&pe.App, &pe.Env, &pe.Branch, &pe.Engine, &pe.Mode,
-			&pe.HostPort, &pe.HostPortExplicit, &pe.ServicePort, &pe.PublicHost, &pe.ActiveSlot, &pe.StandbySlot, &pe.DrainUntil, &pe.TrafficMode, &pe.AccessPolicy, &pe.IPAllowlist, &pe.ExpiresAt, &pe.WebhookSecret, &pe.RepoURL, &pe.Stopped); err != nil {
+			&pe.HostPort, &pe.HostPortExplicit, &pe.ServicePort, &pe.PublicHost, &pe.ActiveSlot, &pe.StandbySlot, &pe.DrainUntil, &pe.TrafficMode, &pe.AccessPolicy, &pe.IPAllowlist, &pe.ExpiresAt, &pe.WebhookSecret, &pe.NotificationWebhooks, &pe.TrafficSplitPercent, &pe.RolloutMinRequests, &pe.RolloutErrorPercent, &pe.RolloutAssessSeconds, &pe.RolloutStartedAt, &pe.RolloutDeployID, &pe.RolloutStatus, &pe.RepoURL, &pe.Stopped); err != nil {
 			continue
 		}
 		pe.Engine = firstNonEmptyEngine(pe.Engine)
 		pe.TrafficMode = firstNonEmpty(normalizeTrafficMode(pe.TrafficMode), s.lanePolicy(DeployEnv(pe.Env)).DefaultTrafficMode)
 		pe.AccessPolicy = firstNonEmpty(normalizeAccessPolicy(pe.AccessPolicy), s.lanePolicy(DeployEnv(pe.Env)).DefaultAccessPolicy)
 		pe.Running = s.appLaneRunning(pe.App, DeployEnv(pe.Env), pe.Branch)
+		pe.AccessRole = "owner"
 		if _, ok := byApp[pe.App]; !ok {
 			byApp[pe.App] = &snapProject{Name: pe.App, Envs: []snapEnv{}, Services: []ProjectService{}}
 		}
@@ -4657,12 +4922,46 @@ func (s *Server) buildSnapshotJSON() ([]byte, error) {
 
 	projects := make([]*snapProject, 0, len(byApp))
 	for _, v := range byApp {
+		if sess != nil {
+			filteredEnvs := make([]snapEnv, 0, len(v.Envs))
+			for _, env := range v.Envs {
+				role := s.effectiveLaneRole(sess, v.Name, DeployEnv(env.Env))
+				if !roleAtLeast(role, "viewer") {
+					continue
+				}
+				env.AccessRole = role
+				filteredEnvs = append(filteredEnvs, env)
+			}
+			filteredServices := make([]ProjectService, 0, len(v.Services))
+			for _, svc := range v.Services {
+				if roleAtLeast(s.effectiveLaneRole(sess, v.Name, DeployEnv(svc.Env)), "viewer") {
+					filteredServices = append(filteredServices, svc)
+				}
+			}
+			v.Envs = filteredEnvs
+			v.Services = filteredServices
+			if len(v.Envs) == 0 && len(v.Services) == 0 {
+				continue
+			}
+		}
 		projects = append(projects, v)
 	}
 
 	deploys, err := s.listDeploysFromDB()
 	if err != nil {
 		return nil, err
+	}
+	if sess != nil {
+		filtered := make([]*Deploy, 0, len(deploys))
+		for _, deploy := range deploys {
+			if deploy == nil {
+				continue
+			}
+			if roleAtLeast(s.effectiveLaneRole(sess, deploy.App, deploy.Env), "viewer") {
+				filtered = append(filtered, deploy)
+			}
+		}
+		deploys = filtered
 	}
 
 	return json.Marshal(struct {
@@ -4677,6 +4976,14 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 405, "method not allowed")
 		return
 	}
+	var sess *UserSession
+	if s.hasUsers() {
+		sess = s.validateUserSession(r)
+		if sess == nil {
+			httpError(w, 401, "unauthorized")
+			return
+		}
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		httpError(w, 500, "streaming unsupported")
@@ -4688,7 +4995,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	if snap, err := s.buildSnapshotJSON(); err == nil {
+	if snap, err := s.buildSnapshotJSONForSession(sess); err == nil {
 		fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", snap)
 		flusher.Flush()
 	}
@@ -4710,6 +5017,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		case msg, ok := <-ch:
 			if !ok {
 				return
+			}
+			if strings.HasPrefix(string(msg), "event: update") {
+				if snap, err := s.buildSnapshotJSONForSession(sess); err == nil {
+					fmt.Fprintf(w, "event: update\ndata: %s\n\n", snap)
+					flusher.Flush()
+				}
+				continue
 			}
 			_, _ = w.Write(msg)
 			flusher.Flush()
@@ -4738,6 +5052,9 @@ func (s *Server) handleLogsStream(w http.ResponseWriter, r *http.Request) {
 	}
 	if d == nil {
 		httpError(w, 404, "not found")
+		return
+	}
+	if _, ok := s.requireLaneAccess(w, r, d.App, d.Env, "viewer"); !ok {
 		return
 	}
 
@@ -4883,8 +5200,12 @@ func (s *Server) handleSyncStart(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "invalid json")
 		return
 	}
+	req.Env = normalizeDeployEnv(string(req.Env))
 	if !validDeployTarget(req.App, req.Env, req.Branch) {
 		httpError(w, 400, "app, branch, env required")
+		return
+	}
+	if _, ok := s.requireLaneAccess(w, r, req.App, req.Env, "deployer"); !ok {
 		return
 	}
 
@@ -5354,12 +5675,17 @@ func (s *Server) handleSyncFinish(w http.ResponseWriter, r *http.Request) {
 		Engine:           normalizeEngine(body.Engine),
 		DeployedBy:       deployedBy,
 	}
+	if err := s.ensureBaselineLanes(sess.App, sess.Branch, sess.Env, "", req.Engine); err != nil {
+		httpError(w, 500, "failed to seed baseline lanes: "+err.Error())
+		return
+	}
 
 	s.mu.Lock()
 	s.deploys[deployID] = deploy
 	s.mu.Unlock()
 
 	_ = s.saveDeployToDB(deploy, req)
+	s.emitDeployNotificationsByID(deployID)
 	s.auditLog(deployedBy, "deploy.trigger", sess.App, fmt.Sprintf("build #%d env=%s branch=%s", buildNum, sess.Env, sess.Branch))
 	s.queue <- DeployJob{ID: deployID, Req: req}
 	s.broadcastSnapshot()
@@ -5544,6 +5870,7 @@ func (s *Server) handleGithubWebhook(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 
 		_ = s.saveDeployToDB(deploy, req)
+		s.emitDeployNotificationsByID(deployID)
 		shortSHA := payload.After
 		if len(shortSHA) > 7 {
 			shortSHA = shortSHA[:7]
@@ -5592,9 +5919,11 @@ func verifyGithubSig256(secret, body []byte, sigHeader string) bool {
 // ---------------------- Rollback ----------------------
 
 type RollbackRequest struct {
-	App    string    `json:"app"`
-	Branch string    `json:"branch"`
-	Env    DeployEnv `json:"env"`
+	App          string    `json:"app"`
+	Branch       string    `json:"branch"`
+	Env          DeployEnv `json:"env"`
+	SourceEnv    DeployEnv `json:"source_env,omitempty"`
+	SourceBranch string    `json:"source_branch,omitempty"`
 }
 
 func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
@@ -5607,9 +5936,30 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "invalid json")
 		return
 	}
+	req.Env = normalizeDeployEnv(string(req.Env))
+	req.SourceEnv = normalizeDeployEnv(string(req.SourceEnv))
+	if req.SourceEnv != "" && strings.TrimSpace(req.SourceBranch) == "" {
+		req.SourceBranch = req.Branch
+	}
 	if !validDeployTarget(req.App, req.Env, req.Branch) {
 		httpError(w, 400, "app, branch, env required")
 		return
+	}
+	if req.SourceEnv == "" && strings.TrimSpace(req.SourceBranch) != "" {
+		httpError(w, 400, "source_env is required when source_branch is set")
+		return
+	}
+	if req.SourceEnv != "" && !validDeployTarget(req.App, req.SourceEnv, req.SourceBranch) {
+		httpError(w, 400, "source_env and source_branch must target an existing lane")
+		return
+	}
+	if _, ok := s.requireLaneAccess(w, r, req.App, req.Env, "deployer"); !ok {
+		return
+	}
+	if req.SourceEnv != "" {
+		if _, ok := s.requireLaneAccess(w, r, req.App, req.SourceEnv, "deployer"); !ok {
+			return
+		}
 	}
 	deployID, err := s.enqueueRollbackForLane(req, requestActorLabel(s, r), "rollback")
 	if err != nil {
@@ -5633,6 +5983,11 @@ func (s *Server) handleDeployCancel(w http.ResponseWriter, r *http.Request) {
 	if id == "" {
 		httpError(w, 400, "missing deploy id")
 		return
+	}
+	if deploy, err := s.getDeployFromDB(id); err == nil && deploy != nil {
+		if _, ok := s.requireLaneAccess(w, r, deploy.App, deploy.Env, "deployer"); !ok {
+			return
+		}
 	}
 	s.buildCancelsMu.Lock()
 	cancel, ok := s.buildCancels[id]
@@ -5674,6 +6029,7 @@ func (s *Server) handleAppStop(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "invalid json")
 		return
 	}
+	req.Env = normalizeDeployEnv(string(req.Env))
 	if !validDeployTarget(req.App, req.Env, req.Branch) {
 		httpError(w, 400, "app, branch, env required")
 		return
@@ -5701,6 +6057,7 @@ func (s *Server) handleAppStart(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "invalid json")
 		return
 	}
+	req.Env = normalizeDeployEnv(string(req.Env))
 	if !validDeployTarget(req.App, req.Env, req.Branch) {
 		httpError(w, 400, "app, branch, env required")
 		return
@@ -5809,6 +6166,7 @@ func (s *Server) handleAppRestart(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "invalid json")
 		return
 	}
+	req.Env = normalizeDeployEnv(string(req.Env))
 	if !validDeployTarget(req.App, req.Env, req.Branch) {
 		httpError(w, 400, "app, branch, env required")
 		return
@@ -5910,19 +6268,24 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
 		var body struct {
-			App           string    `json:"app"`
-			Env           DeployEnv `json:"env"`
-			Branch        string    `json:"branch"`
-			RepoURL       *string   `json:"repo_url"`
-			Engine        *string   `json:"engine"`
-			Mode          *string   `json:"mode"`
-			TrafficMode   *string   `json:"traffic_mode"`
-			AccessPolicy  *string   `json:"access_policy"`
-			IPAllowlist   *string   `json:"ip_allowlist"`
-			HostPort      *int      `json:"host_port"`
-			ServicePort   *int      `json:"service_port"`
-			PublicHost    *string   `json:"public_host"`
-			WebhookSecret *string   `json:"webhook_secret"`
+			App                  string    `json:"app"`
+			Env                  DeployEnv `json:"env"`
+			Branch               string    `json:"branch"`
+			RepoURL              *string   `json:"repo_url"`
+			Engine               *string   `json:"engine"`
+			Mode                 *string   `json:"mode"`
+			TrafficMode          *string   `json:"traffic_mode"`
+			AccessPolicy         *string   `json:"access_policy"`
+			IPAllowlist          *string   `json:"ip_allowlist"`
+			HostPort             *int      `json:"host_port"`
+			ServicePort          *int      `json:"service_port"`
+			PublicHost           *string   `json:"public_host"`
+			WebhookSecret        *string   `json:"webhook_secret"`
+			NotificationWebhooks *string   `json:"notification_webhooks"`
+			TrafficSplitPercent  *int      `json:"traffic_split_percent"`
+			RolloutMinRequests   *int      `json:"rollout_min_requests"`
+			RolloutErrorPercent  *float64  `json:"rollout_error_percent"`
+			RolloutAssessSeconds *int      `json:"rollout_assess_seconds"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httpError(w, 400, "invalid json")
@@ -5931,6 +6294,9 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 		body.Env = normalizeDeployEnv(string(body.Env))
 		if !validDeployTarget(body.App, body.Env, body.Branch) {
 			httpError(w, 400, "app, branch, env required")
+			return
+		}
+		if _, ok := s.requireLaneAccess(w, r, body.App, body.Env, "deployer"); !ok {
 			return
 		}
 
@@ -6018,6 +6384,37 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 		if body.WebhookSecret != nil {
 			st.WebhookSecret = strings.TrimSpace(*body.WebhookSecret)
 		}
+		if body.NotificationWebhooks != nil {
+			st.NotificationWebhooks = normalizeNotificationWebhooks(*body.NotificationWebhooks)
+		}
+		if body.TrafficSplitPercent != nil {
+			if *body.TrafficSplitPercent < 1 || *body.TrafficSplitPercent > 100 {
+				httpError(w, 400, "traffic_split_percent must be between 1 and 100")
+				return
+			}
+			st.TrafficSplitPercent = *body.TrafficSplitPercent
+		}
+		if body.RolloutMinRequests != nil {
+			if *body.RolloutMinRequests < 1 {
+				httpError(w, 400, "rollout_min_requests must be at least 1")
+				return
+			}
+			st.RolloutMinRequests = *body.RolloutMinRequests
+		}
+		if body.RolloutErrorPercent != nil {
+			if *body.RolloutErrorPercent <= 0 || *body.RolloutErrorPercent > 100 {
+				httpError(w, 400, "rollout_error_percent must be greater than 0 and at most 100")
+				return
+			}
+			st.RolloutErrorPercent = *body.RolloutErrorPercent
+		}
+		if body.RolloutAssessSeconds != nil {
+			if *body.RolloutAssessSeconds < 30 {
+				httpError(w, 400, "rollout_assess_seconds must be at least 30")
+				return
+			}
+			st.RolloutAssessSeconds = *body.RolloutAssessSeconds
+		}
 		if normalizeAccessPolicy(st.AccessPolicy) == AccessPolicyIPAllowlist && strings.TrimSpace(st.IPAllowlist) == "" {
 			httpError(w, 400, "ip_allowlist is required when access_policy is ip-allowlist")
 			return
@@ -6064,6 +6461,9 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 200, map[string]any{})
 			return
 		}
+		if _, ok := s.requireLaneAccess(w, r, app, e, "viewer"); !ok {
+			return
+		}
 		st, err := s.getAppState(app, e, branch)
 		if err != nil {
 			// Not found or other DB error: return empty object so UI can continue.
@@ -6090,6 +6490,9 @@ func (s *Server) handleAppCompanions(w http.ResponseWriter, r *http.Request) {
 		env = normalizeDeployEnv(string(env))
 		if !validDeployTarget(app, env, branch) {
 			httpError(w, 400, "app, branch, env required")
+			return
+		}
+		if _, ok := s.requireLaneAccess(w, r, app, env, "viewer"); !ok {
 			return
 		}
 		specs, err := s.getServiceSpecs(app, string(env), branch)
@@ -6161,6 +6564,9 @@ func (s *Server) handleAppCompanions(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 400, "app, branch, env required")
 			return
 		}
+		if _, ok := s.requireLaneAccess(w, r, body.App, body.Env, "deployer"); !ok {
+			return
+		}
 		cfg := normalizeServiceConfig(body.Config)
 		if cfg.Name == "" {
 			httpError(w, 400, "companion name required")
@@ -6201,6 +6607,9 @@ func (s *Server) handleAppCompanions(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("name")
 		if app == "" || branch == "" || name == "" || !isKnownDeployEnv(DeployEnv(env)) {
 			httpError(w, 400, "app, branch, env, name required")
+			return
+		}
+		if _, ok := s.requireLaneAccess(w, r, app, DeployEnv(env), "deployer"); !ok {
 			return
 		}
 		keepDisabled := false
@@ -6245,6 +6654,9 @@ func (s *Server) handleCompanionRestart(w http.ResponseWriter, r *http.Request) 
 		httpError(w, 400, "app, branch, env, name required")
 		return
 	}
+	if _, ok := s.requireLaneAccess(w, r, body.App, body.Env, "deployer"); !ok {
+		return
+	}
 	var selected *ServiceConfig
 	specs, err := s.resolveCompanionSpecs(body.App, body.Env, body.Branch, s.workspaceRepoDir(body.App, body.Env, body.Branch))
 	if err != nil {
@@ -6284,10 +6696,13 @@ func (s *Server) handleAppSecrets(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		app := r.URL.Query().Get("app")
-		env := r.URL.Query().Get("env")
+		env := normalizeDeployEnv(r.URL.Query().Get("env"))
 		branch := r.URL.Query().Get("branch")
-		if app == "" {
-			httpError(w, 400, "app required")
+		if !validDeployTarget(app, env, branch) {
+			httpError(w, 400, "app, env, and branch required")
+			return
+		}
+		if _, ok := s.requireLaneAccess(w, r, app, env, "viewer"); !ok {
 			return
 		}
 
@@ -6295,7 +6710,7 @@ func (s *Server) handleAppSecrets(w http.ResponseWriter, r *http.Request) {
 		args := []any{app}
 		if env != "" {
 			query += ` AND (env=? OR env='')`
-			args = append(args, env)
+			args = append(args, string(env))
 		}
 		if branch != "" {
 			query += ` AND (branch=? OR branch='')`
@@ -6326,8 +6741,12 @@ func (s *Server) handleAppSecrets(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 400, "invalid json")
 			return
 		}
-		if sec.App == "" || sec.Key == "" {
-			httpError(w, 400, "app and key required")
+		sec.Env = string(normalizeDeployEnv(sec.Env))
+		if sec.App == "" || sec.Key == "" || !isKnownDeployEnv(DeployEnv(sec.Env)) || strings.TrimSpace(sec.Branch) == "" {
+			httpError(w, 400, "app, env, branch, and key required")
+			return
+		}
+		if _, ok := s.requireLaneAccess(w, r, sec.App, DeployEnv(sec.Env), "deployer"); !ok {
 			return
 		}
 
@@ -6348,16 +6767,19 @@ func (s *Server) handleAppSecrets(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodDelete:
 		app := r.URL.Query().Get("app")
-		env := r.URL.Query().Get("env")
+		env := normalizeDeployEnv(r.URL.Query().Get("env"))
 		branch := r.URL.Query().Get("branch")
 		key := r.URL.Query().Get("key")
-		if app == "" || key == "" {
-			httpError(w, 400, "app and key required")
+		if !validDeployTarget(app, env, branch) || key == "" {
+			httpError(w, 400, "app, env, branch, and key required")
+			return
+		}
+		if _, ok := s.requireLaneAccess(w, r, app, env, "deployer"); !ok {
 			return
 		}
 
 		_, err := s.db.Exec(`DELETE FROM app_secrets WHERE app=? AND env=? AND branch=? AND key=?`,
-			app, env, branch, key)
+			app, string(env), branch, key)
 		if err != nil {
 			httpError(w, 500, "failed to delete secret: "+err.Error())
 			return
@@ -6451,21 +6873,13 @@ func (s *Server) runDeploy(job DeployJob) {
 		}
 	}()
 
-	s.buildLock.Lock()
-	if s.building[lockKey] {
-		s.buildLock.Unlock()
-		// If already building this specific app/env/branch, retry later without
-		// blocking a goroutine on a full queue.
+	// If already building this specific app/env/branch, retry later without
+	// blocking a goroutine on a full queue.
+	if _, loaded := s.building.LoadOrStore(lockKey, true); loaded {
 		s.requeueDeployLater(job, 5*time.Second)
 		return
 	}
-	s.building[lockKey] = true
-	s.buildLock.Unlock()
-	defer func() {
-		s.buildLock.Lock()
-		delete(s.building, lockKey)
-		s.buildLock.Unlock()
-	}()
+	defer s.building.Delete(lockKey)
 
 	// Register a cancel func so the admin UI can abort an active build.
 	buildCtx, buildCancel := context.WithCancel(context.Background())
@@ -6571,7 +6985,7 @@ func (s *Server) runDeploy(job DeployJob) {
 			}
 		} else {
 			log("updating existing repository...")
-			if err := runCmdLoggedCtx(buildCtx, repoDir, logf, "git", "fetch", "origin", req.Branch); err != nil {
+			if err := runCmdLoggedCtx(buildCtx, repoDir, logf, "git", "fetch", "--depth=1", "origin", req.Branch); err != nil {
 				log("fetch failed, attempting clean clone: %v", err)
 				_ = os.RemoveAll(repoDir)
 				if err := runCmdLoggedCtx(buildCtx, workspace, logf, "git", "clone", "--depth", "1", "--branch", req.Branch, req.RepoURL, "repo"); err != nil {
@@ -7038,6 +7452,72 @@ func (s *Server) runDeploy(job DeployJob) {
 			}
 			return ""
 		}(),
+		NotificationWebhooks: func() string {
+			if currentState != nil {
+				return currentState.NotificationWebhooks
+			}
+			if prev != nil {
+				return prev.NotificationWebhooks
+			}
+			return ""
+		}(),
+		TrafficSplitPercent: func() int {
+			if currentState != nil {
+				return currentState.TrafficSplitPercent
+			}
+			if prev != nil {
+				return prev.TrafficSplitPercent
+			}
+			return defaultTrafficSplitPercent()
+		}(),
+		RolloutMinRequests: func() int {
+			if currentState != nil {
+				return currentState.RolloutMinRequests
+			}
+			if prev != nil {
+				return prev.RolloutMinRequests
+			}
+			return defaultRolloutMinRequests()
+		}(),
+		RolloutErrorPercent: func() float64 {
+			if currentState != nil {
+				return currentState.RolloutErrorPercent
+			}
+			if prev != nil {
+				return prev.RolloutErrorPercent
+			}
+			return defaultRolloutErrorPercent()
+		}(),
+		RolloutAssessSeconds: func() int {
+			if currentState != nil {
+				return currentState.RolloutAssessSeconds
+			}
+			if prev != nil {
+				return prev.RolloutAssessSeconds
+			}
+			return defaultRolloutAssessSeconds()
+		}(),
+		RolloutStartedAt: func() int64 {
+			if currentState != nil {
+				return currentState.RolloutStartedAt
+			}
+			return 0
+		}(),
+		RolloutDeployID: func() string {
+			if currentState != nil {
+				if currentState.RolloutStatus == "monitoring" {
+					return d.ID
+				}
+				return currentState.RolloutDeployID
+			}
+			return d.ID
+		}(),
+		RolloutStatus: func() string {
+			if currentState != nil {
+				return currentState.RolloutStatus
+			}
+			return ""
+		}(),
 		AccessPolicy: func() string {
 			if currentState != nil {
 				return currentState.AccessPolicy
@@ -7462,15 +7942,23 @@ func (s *Server) edgeProxyConfigPath(app string, env DeployEnv, branch string) s
 	return filepath.Join(dir, fmt.Sprintf("%s__%s__%s.nginx.conf", safe(app), safe(string(env)), safe(branch)))
 }
 
+func (s *Server) edgeProxyLogPath(app string, env DeployEnv, branch string) string {
+	dir := filepath.Join(s.dataDir, "edge-proxy", "logs")
+	mustMkdir(dir)
+	return filepath.Join(dir, fmt.Sprintf("%s__%s__%s.access.log", safe(app), safe(string(env)), safe(branch)))
+}
+
 func edgeCookieName(app string, env DeployEnv, branch string) string {
 	return fmt.Sprintf("relay_slot_%s_%s_%s", safe(app), safe(string(env)), safe(branch))
 }
 
-func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, activeSlot string, standbySlot string, servicePort int, trafficMode string) (string, error) {
+func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, activeSlot string, standbySlot string, servicePort int, trafficMode string, splitPercent int) (string, error) {
 	p := s.edgeProxyConfigPath(app, env, branch)
+	logPath := s.edgeProxyLogPath(app, env, branch)
 	activeUpstream := fmt.Sprintf("%s:%d", appSlotContainerName(app, env, branch, activeSlot), firstNonZero(servicePort, 3000))
 	standbyMode := normalizeActiveSlot(standbySlot)
 	trafficMode = firstNonEmpty(normalizeTrafficMode(trafficMode), "edge")
+	splitPercent = normalizeTrafficSplitPercent(splitPercent)
 	relayPort := listenAddrPort(s.httpAddr)
 	authURL := ""
 	if relayPort > 0 {
@@ -7485,6 +7973,8 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 	conf.WriteString("    '' close;\n")
 	conf.WriteString("  }\n")
 	conf.WriteString("  resolver 127.0.0.11 ipv6=off valid=5s;\n")
+	conf.WriteString("  log_format relay_json escape=json '{\"ts\":$msec,\"status\":$status,\"host\":\"$host\",\"method\":\"$request_method\",\"path\":\"$request_uri\",\"slot\":\"$relay_target_slot\",\"request_id\":\"$request_id\"}';\n")
+	conf.WriteString(fmt.Sprintf("  access_log %s relay_json;\n", logPath))
 	conf.WriteString("  map $arg___relay_target $relay_slot_override {\n")
 	conf.WriteString("    default \"\";\n")
 	conf.WriteString(fmt.Sprintf("    ~*^(new|live|active|%s)$ %s;\n", activeSlot, activeSlot))
@@ -7492,10 +7982,20 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 		conf.WriteString(fmt.Sprintf("    ~*^(old|previous|standby|draining|%s)$ %s;\n", standbyMode, standbyMode))
 	}
 	conf.WriteString("  }\n")
+	if standbyMode != "" && splitPercent < 100 {
+		conf.WriteString("  split_clients $request_id $relay_weighted_slot {\n")
+		conf.WriteString(fmt.Sprintf("    %d%% %s;\n", splitPercent, activeSlot))
+		conf.WriteString(fmt.Sprintf("    * %s;\n", standbyMode))
+		conf.WriteString("  }\n")
+	}
 	if trafficMode == "session" {
 		cookieName := edgeCookieName(app, env, branch)
 		conf.WriteString(fmt.Sprintf("  map $cookie_%s $relay_slot_cookie {\n", cookieName))
-		conf.WriteString(fmt.Sprintf("    default %s;\n", activeSlot))
+		if standbyMode != "" && splitPercent < 100 {
+			conf.WriteString("    default $relay_weighted_slot;\n")
+		} else {
+			conf.WriteString(fmt.Sprintf("    default %s;\n", activeSlot))
+		}
 		conf.WriteString(fmt.Sprintf("    ~^%s$ %s;\n", activeSlot, activeSlot))
 		if standbyMode != "" {
 			conf.WriteString(fmt.Sprintf("    ~^%s$ %s;\n", standbyMode, standbyMode))
@@ -7532,6 +8032,7 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 	conf.WriteString("    }\n")
 	if authURL != "" {
 		conf.WriteString("    location = /__relay/authz {\n")
+		conf.WriteString("      access_log off;\n")
 		conf.WriteString("      internal;\n")
 		conf.WriteString("      proxy_pass_request_body off;\n")
 		conf.WriteString("      proxy_set_header Content-Length \"\";\n")
@@ -7629,7 +8130,7 @@ func (s *Server) runSlotContainer(log func(string, ...any), app string, env Depl
 	return s.runSlotContainerWithRuntime(s.runtime, log, app, env, branch, slot, image, servicePort, networkName, extraEnv)
 }
 
-func (s *Server) ensureEdgeProxy(log func(string, ...any), app string, env DeployEnv, branch string, networkName string, activeSlot string, standbySlot string, servicePort int, hostPort int, mode string, trafficMode string, publicHost string, recreate bool) error {
+func (s *Server) ensureEdgeProxy(log func(string, ...any), app string, env DeployEnv, branch string, networkName string, activeSlot string, standbySlot string, servicePort int, hostPort int, mode string, trafficMode string, publicHost string, splitPercent int, recreate bool) error {
 	activeSlot = normalizeActiveSlot(activeSlot)
 	standbySlot = normalizeActiveSlot(standbySlot)
 	if standbySlot != "" && !s.runtime.IsRunning(appSlotContainerName(app, env, branch, standbySlot)) {
@@ -7646,9 +8147,13 @@ func (s *Server) ensureEdgeProxy(log func(string, ...any), app string, env Deplo
 			}
 		}
 	}
-	configPath, err := s.writeEdgeProxyConfig(app, env, branch, activeSlot, standbySlot, servicePort, trafficMode)
+	configPath, err := s.writeEdgeProxyConfig(app, env, branch, activeSlot, standbySlot, servicePort, trafficMode, splitPercent)
 	if err != nil {
 		return fmt.Errorf("write edge proxy config: %w", err)
+	}
+	logPath := s.edgeProxyLogPath(app, env, branch)
+	if !fileExists(logPath) {
+		_ = os.WriteFile(logPath, []byte{}, 0644)
 	}
 
 	containerName := appBaseContainerName(app, env, branch)
@@ -7666,9 +8171,12 @@ func (s *Server) ensureEdgeProxy(log func(string, ...any), app string, env Deplo
 			Image:         getenv("RELAY_NGINX_IMAGE", "nginx:alpine"),
 			Network:       networkName,
 			RestartPolicy: "always",
-			Volumes:       []string{fmt.Sprintf("%s:/etc/nginx/nginx.conf:ro", dockerPath(configPath))},
-			PortBindings:  portBindings,
-			ExtraHosts:    []string{"host.docker.internal:host-gateway"},
+			Volumes: []string{
+				fmt.Sprintf("%s:/etc/nginx/nginx.conf:ro", dockerPath(configPath)),
+				fmt.Sprintf("%s:/var/log/nginx/access.log", dockerPath(logPath)),
+			},
+			PortBindings: portBindings,
+			ExtraHosts:   []string{"host.docker.internal:host-gateway"},
 		}
 		if log != nil {
 			log("runtime run edge: %s", containerName)
@@ -7680,7 +8188,7 @@ func (s *Server) ensureEdgeProxy(log func(string, ...any), app string, env Deplo
 	}
 
 	if log != nil {
-		log("reloading edge proxy %s -> active=%s standby=%s traffic=%s", containerName, appSlotContainerName(app, env, branch, activeSlot), normalizeActiveSlot(standbySlot), firstNonEmpty(normalizeTrafficMode(trafficMode), "edge"))
+		log("reloading edge proxy %s -> active=%s standby=%s traffic=%s split=%d%%", containerName, appSlotContainerName(app, env, branch, activeSlot), normalizeActiveSlot(standbySlot), firstNonEmpty(normalizeTrafficMode(trafficMode), "edge"), normalizeTrafficSplitPercent(splitPercent))
 	}
 	out, reloadErr := s.runtime.Exec(containerName, []string{"nginx", "-s", "reload"})
 	if reloadErr != nil {
@@ -7693,7 +8201,7 @@ func (s *Server) cleanupStandbySlotAfter(app string, env DeployEnv, branch strin
 	name := appSlotContainerName(app, env, branch, oldSlot)
 	if wait <= 0 {
 		s.runtime.Remove(name)
-		_ = s.ensureEdgeProxy(nil, app, env, branch, appNetworkName(app, env, branch), activeSlot, "", servicePort, hostPort, mode, trafficMode, publicHost, false)
+		_ = s.ensureEdgeProxy(nil, app, env, branch, appNetworkName(app, env, branch), activeSlot, "", servicePort, hostPort, mode, trafficMode, publicHost, 100, false)
 		if st, err := s.getAppState(app, env, branch); err == nil && st != nil {
 			if normalizeActiveSlot(st.ActiveSlot) == normalizeActiveSlot(activeSlot) && normalizeActiveSlot(st.StandbySlot) == normalizeActiveSlot(oldSlot) {
 				st.StandbySlot = ""
@@ -7707,7 +8215,7 @@ func (s *Server) cleanupStandbySlotAfter(app string, env DeployEnv, branch strin
 	go func() {
 		time.Sleep(wait)
 		s.runtime.Remove(name)
-		_ = s.ensureEdgeProxy(nil, app, env, branch, appNetworkName(app, env, branch), activeSlot, "", servicePort, hostPort, mode, trafficMode, publicHost, false)
+		_ = s.ensureEdgeProxy(nil, app, env, branch, appNetworkName(app, env, branch), activeSlot, "", servicePort, hostPort, mode, trafficMode, publicHost, 100, false)
 		if st, err := s.getAppState(app, env, branch); err == nil && st != nil {
 			if normalizeActiveSlot(st.ActiveSlot) == normalizeActiveSlot(activeSlot) && normalizeActiveSlot(st.StandbySlot) == normalizeActiveSlot(oldSlot) {
 				st.StandbySlot = ""
@@ -7717,6 +8225,168 @@ func (s *Server) cleanupStandbySlotAfter(app string, env DeployEnv, branch strin
 			}
 		}
 	}()
+}
+
+type edgeProxyAccessLogEntry struct {
+	Ts     float64 `json:"ts"`
+	Status int     `json:"status"`
+	Slot   string  `json:"slot"`
+}
+
+func (s *Server) assessRolloutLog(app string, env DeployEnv, branch string, activeSlot string, sinceMillis int64) (int, int, error) {
+	f, err := os.Open(s.edgeProxyLogPath(app, env, branch))
+	if err != nil {
+		return 0, 0, err
+	}
+	defer f.Close()
+
+	total := 0
+	errors := 0
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		var entry edgeProxyAccessLogEntry
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			continue
+		}
+		tsMillis := int64(entry.Ts * 1000)
+		if tsMillis < sinceMillis {
+			continue
+		}
+		if normalizeActiveSlot(entry.Slot) != normalizeActiveSlot(activeSlot) {
+			continue
+		}
+		total++
+		if entry.Status >= 500 {
+			errors++
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return total, errors, err
+	}
+	return total, errors, nil
+}
+
+func rolloutWatchKey(app string, env DeployEnv, branch string) string {
+	return fmt.Sprintf("%s__%s__%s", app, env, branch)
+}
+
+func (s *Server) startRolloutWatch(app string, env DeployEnv, branch string) {
+	key := rolloutWatchKey(app, env, branch)
+	s.rolloutWatchMu.Lock()
+	if _, ok := s.rolloutWatches[key]; ok {
+		s.rolloutWatchMu.Unlock()
+		return
+	}
+	s.rolloutWatches[key] = struct{}{}
+	s.rolloutWatchMu.Unlock()
+
+	go func() {
+		defer func() {
+			s.rolloutWatchMu.Lock()
+			delete(s.rolloutWatches, key)
+			s.rolloutWatchMu.Unlock()
+		}()
+
+		st, err := s.getAppState(app, env, branch)
+		if err != nil || st == nil {
+			return
+		}
+		wait := time.Duration(normalizeRolloutAssessSeconds(st.RolloutAssessSeconds)) * time.Second
+		time.Sleep(wait)
+
+		st, err = s.getAppState(app, env, branch)
+		if err != nil || st == nil {
+			return
+		}
+		if normalizeActiveSlot(st.StandbySlot) == "" || strings.TrimSpace(st.RolloutStatus) != "monitoring" {
+			return
+		}
+
+		total, errors, logErr := s.assessRolloutLog(app, env, branch, st.ActiveSlot, st.RolloutStartedAt)
+		errorPercent := 0.0
+		if total > 0 {
+			errorPercent = (float64(errors) / float64(total)) * 100
+		}
+		minRequests := normalizeRolloutMinRequests(st.RolloutMinRequests)
+		threshold := normalizeRolloutErrorPercent(st.RolloutErrorPercent)
+
+		if logErr == nil && total >= minRequests && errorPercent > threshold {
+			_ = s.rollbackCanary(app, env, branch, fmt.Sprintf("%.2f%% 5xx over %d requests", errorPercent, total))
+			return
+		}
+		_ = s.graduateCanary(app, env, branch, total, errorPercent, logErr)
+	}()
+}
+
+func (s *Server) graduateCanary(app string, env DeployEnv, branch string, total int, errorPercent float64, assessErr error) error {
+	st, err := s.getAppState(app, env, branch)
+	if err != nil || st == nil {
+		return err
+	}
+	if normalizeActiveSlot(st.StandbySlot) == "" {
+		return nil
+	}
+	st.TrafficSplitPercent = 100
+	st.RolloutStartedAt = 0
+	st.RolloutStatus = "graduated"
+	_ = s.saveAppState(st)
+	s.broadcastSnapshot()
+	s.auditLog("relay-rollout", "rollout.graduate", app, fmt.Sprintf("env=%s branch=%s requests=%d error_percent=%.2f err=%v", env, branch, total, errorPercent, assessErr))
+	s.cleanupStandbySlotAfter(app, env, branch, st.ActiveSlot, st.StandbySlot, st.ServicePort, st.HostPort, st.Mode, st.TrafficMode, st.PublicHost, rolloutDrainDuration())
+	return nil
+}
+
+func (s *Server) rollbackCanary(app string, env DeployEnv, branch string, detail string) error {
+	st, err := s.getAppState(app, env, branch)
+	if err != nil || st == nil {
+		return err
+	}
+	oldSlot := normalizeActiveSlot(st.StandbySlot)
+	newSlot := normalizeActiveSlot(st.ActiveSlot)
+	if oldSlot == "" || newSlot == "" {
+		return nil
+	}
+	if err := s.ensureEdgeProxy(nil, app, env, branch, appNetworkName(app, env, branch), oldSlot, "", st.ServicePort, st.HostPort, st.Mode, st.TrafficMode, st.PublicHost, 100, false); err != nil {
+		return err
+	}
+	s.runtime.Remove(appSlotContainerName(app, env, branch, newSlot))
+	st.ActiveSlot = oldSlot
+	st.StandbySlot = ""
+	st.DrainUntil = 0
+	st.TrafficSplitPercent = 100
+	st.RolloutStartedAt = 0
+	st.RolloutStatus = "rolled_back"
+	if st.PreviousImage != "" {
+		st.CurrentImage = st.PreviousImage
+	}
+	_ = s.saveAppState(st)
+	s.broadcastSnapshot()
+	s.auditLog("relay-rollout", "rollout.rollback", app, fmt.Sprintf("env=%s branch=%s %s", env, branch, detail))
+	return nil
+}
+
+func (s *Server) resumeRolloutWatches() error {
+	rows, err := s.db.Query(
+		`SELECT app, env, branch
+		 FROM app_state
+		 WHERE COALESCE(standby_slot,'') != ''
+		   AND COALESCE(rollout_status,'') = 'monitoring'`,
+	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var app string
+		var env string
+		var branch string
+		if err := rows.Scan(&app, &env, &branch); err != nil {
+			continue
+		}
+		s.startRolloutWatch(app, DeployEnv(env), branch)
+	}
+	return nil
 }
 
 // ensureGlobalProxy maintains a Caddy container that routes public_host domains
@@ -7984,6 +8654,14 @@ type analyticsHost struct {
 func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	period := r.URL.Query().Get("period")
 	app := strings.TrimSpace(r.URL.Query().Get("app"))
+	var sess *UserSession
+	if s.hasUsers() {
+		sess = s.validateUserSession(r)
+		if sess == nil {
+			httpError(w, 401, "unauthorized")
+			return
+		}
+	}
 
 	var since int64
 	var periodLabel string
@@ -8003,6 +8681,24 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	hostFilter := ""
 	hostArgs := []any{since}
 	if app != "" {
+		if sess != nil {
+			rows, err := s.db.Query(`SELECT DISTINCT env FROM app_state WHERE app=?`, app)
+			if err == nil {
+				allowed := false
+				for rows.Next() {
+					var env string
+					if rows.Scan(&env) == nil && roleAtLeast(s.effectiveLaneRole(sess, app, DeployEnv(env)), "viewer") {
+						allowed = true
+						break
+					}
+				}
+				rows.Close()
+				if !allowed {
+					httpError(w, 403, "insufficient app access")
+					return
+				}
+			}
+		}
 		// Match events where the host belongs to the given app.
 		hostFilter = ` AND host IN (SELECT public_host FROM app_state WHERE app=? AND public_host!='')`
 		hostArgs = append(hostArgs, app)
@@ -8331,7 +9027,11 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 	if !recreateEdge && edgeProxyPublishedPortChanged(s.runtime, req.App, req.Env, req.Branch, hostPort, mode, req.PublicHost) {
 		recreateEdge = true
 	}
-	if err := s.ensureEdgeProxy(log, req.App, req.Env, req.Branch, networkName, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, recreateEdge); err != nil {
+	splitPercent := defaultTrafficSplitPercent()
+	if state != nil && normalizeActiveSlot(activeSlot) != "" {
+		splitPercent = state.TrafficSplitPercent
+	}
+	if err := s.ensureEdgeProxy(log, req.App, req.Env, req.Branch, networkName, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, splitPercent, recreateEdge); err != nil {
 		if log != nil {
 			log("edge proxy failed: %v", err)
 		}
@@ -8340,25 +9040,51 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 	}
 
 	if activeSlot != "" && activeSlot != nextSlot {
+		canary := splitPercent > 0 && splitPercent < 100
 		drainUntil := time.Now().Add(rolloutDrainDuration()).UnixMilli()
+		if canary {
+			drainUntil = 0
+		}
 		oldName := appSlotContainerName(req.App, req.Env, req.Branch, activeSlot)
 		if log != nil {
-			log("draining previous slot %s for %s", oldName, rolloutDrainDuration())
+			if canary {
+				log("routing %d%% of traffic to new slot %s while keeping %s hot", splitPercent, nextSlot, activeSlot)
+			} else {
+				log("draining previous slot %s for %s", oldName, rolloutDrainDuration())
+			}
 		}
 		if state != nil {
 			state.ActiveSlot = nextSlot
 			state.StandbySlot = activeSlot
 			state.DrainUntil = drainUntil
 			state.TrafficMode = trafficMode
+			state.TrafficSplitPercent = splitPercent
+			if canary {
+				state.RolloutStartedAt = time.Now().UnixMilli()
+				state.RolloutDeployID = ""
+				state.RolloutStatus = "monitoring"
+			} else {
+				state.RolloutStartedAt = 0
+				state.RolloutDeployID = ""
+				state.RolloutStatus = "graduated"
+			}
 			_ = s.saveAppState(state)
 			s.broadcastSnapshot()
 		}
-		s.cleanupStandbySlotAfter(req.App, req.Env, req.Branch, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, rolloutDrainDuration())
+		if canary {
+			s.startRolloutWatch(req.App, req.Env, req.Branch)
+		} else {
+			s.cleanupStandbySlotAfter(req.App, req.Env, req.Branch, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, rolloutDrainDuration())
+		}
 	} else if state != nil {
 		state.ActiveSlot = nextSlot
 		state.StandbySlot = ""
 		state.DrainUntil = 0
 		state.TrafficMode = trafficMode
+		state.TrafficSplitPercent = defaultTrafficSplitPercent()
+		state.RolloutStartedAt = 0
+		state.RolloutDeployID = ""
+		state.RolloutStatus = ""
 		_ = s.saveAppState(state)
 		s.broadcastSnapshot()
 	}
@@ -8671,8 +9397,9 @@ func userRoleAllowed(role string, allowedRoles []string) bool {
 	if len(allowedRoles) == 0 {
 		return true
 	}
+	role = normalizeUserRole(role)
 	for _, allowed := range allowedRoles {
-		if role == allowed {
+		if role == normalizeUserRole(allowed) {
 			return true
 		}
 	}
@@ -8789,6 +9516,164 @@ func (s *Server) createUserSession(userID string) (string, error) {
 		token, userID, time.Now().UnixMilli(), time.Now().Add(30*24*time.Hour).UnixMilli(),
 	)
 	return token, err
+}
+
+func (s *Server) userPermissions(userID string) ([]UserPermission, error) {
+	rows, err := s.db.Query(
+		`SELECT user_id, app, env, role FROM user_permissions WHERE user_id=? ORDER BY app, env`,
+		userID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]UserPermission, 0, 8)
+	for rows.Next() {
+		var perm UserPermission
+		if err := rows.Scan(&perm.UserID, &perm.App, &perm.Env, &perm.Role); err != nil {
+			continue
+		}
+		perm.App = strings.TrimSpace(perm.App)
+		perm.Env = string(normalizeDeployEnv(perm.Env))
+		perm.Role = normalizeUserRole(perm.Role)
+		if perm.App == "" {
+			continue
+		}
+		if perm.Env == "" {
+			perm.Env = "*"
+		}
+		out = append(out, perm)
+	}
+	return out, nil
+}
+
+func normalizeUserPermissions(perms []UserPermission) []UserPermission {
+	seen := map[string]UserPermission{}
+	for _, perm := range perms {
+		perm.App = strings.TrimSpace(perm.App)
+		perm.Env = strings.TrimSpace(perm.Env)
+		if perm.App == "" {
+			continue
+		}
+		if perm.Env == "" {
+			perm.Env = "*"
+		}
+		if perm.Env != "*" {
+			perm.Env = string(normalizeDeployEnv(perm.Env))
+		}
+		if perm.Env == "" {
+			continue
+		}
+		perm.Role = normalizeUserRole(perm.Role)
+		key := perm.App + "\x00" + perm.Env
+		if existing, ok := seen[key]; !ok || roleRank(perm.Role) > roleRank(existing.Role) {
+			seen[key] = perm
+		}
+	}
+	out := make([]UserPermission, 0, len(seen))
+	for _, perm := range seen {
+		out = append(out, perm)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].App == out[j].App {
+			return out[i].Env < out[j].Env
+		}
+		return out[i].App < out[j].App
+	})
+	return out
+}
+
+func (s *Server) replaceUserPermissions(userID string, perms []UserPermission) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM user_permissions WHERE user_id=?`, userID); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	perms = normalizeUserPermissions(perms)
+	for _, perm := range perms {
+		if _, err := tx.Exec(
+			`INSERT INTO user_permissions (user_id, app, env, role) VALUES (?, ?, ?, ?)`,
+			userID, perm.App, perm.Env, perm.Role,
+		); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Server) userHasScopedPermissions(userID string) bool {
+	var count int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM user_permissions WHERE user_id=?`, userID).Scan(&count)
+	return count > 0
+}
+
+func (s *Server) scopedLaneRole(userID string, app string, env DeployEnv) string {
+	rows, err := s.db.Query(
+		`SELECT role FROM user_permissions
+		 WHERE user_id=?
+		   AND (app=? OR app='*')
+		   AND (env=? OR env='*')`,
+		userID, app, string(env),
+	)
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+	best := ""
+	for rows.Next() {
+		var role string
+		if err := rows.Scan(&role); err != nil {
+			continue
+		}
+		role = normalizeUserRole(role)
+		if roleRank(role) > roleRank(best) {
+			best = role
+		}
+	}
+	return best
+}
+
+func (s *Server) effectiveLaneRole(sess *UserSession, app string, env DeployEnv) string {
+	if sess == nil {
+		return ""
+	}
+	if normalizeUserRole(sess.Role) == "owner" {
+		return "owner"
+	}
+	if role := s.scopedLaneRole(sess.UserID, app, env); role != "" {
+		return role
+	}
+	if s.userHasScopedPermissions(sess.UserID) {
+		return ""
+	}
+	return normalizeUserRole(sess.Role)
+}
+
+func (s *Server) laneAccessAllowed(sess *UserSession, app string, env DeployEnv, requiredRole string) bool {
+	if sess == nil {
+		return false
+	}
+	return roleAtLeast(s.effectiveLaneRole(sess, app, env), requiredRole)
+}
+
+func (s *Server) requireLaneAccess(w http.ResponseWriter, r *http.Request, app string, env DeployEnv, requiredRole string) (*UserSession, bool) {
+	if !s.hasUsers() {
+		return nil, true
+	}
+	sess := s.validateUserSession(r)
+	if sess == nil {
+		httpError(w, 401, "unauthorized")
+		return nil, false
+	}
+	if !s.laneAccessAllowed(sess, app, env, requiredRole) {
+		httpError(w, 403, "insufficient app access")
+		return sess, false
+	}
+	return sess, true
 }
 
 // ─── Auth endpoints ───────────────────────────────────────────────────────────
@@ -9242,6 +10127,15 @@ func migrateDB(db *sql.DB) error {
 			ip_allowlist TEXT,
 			repo_hash TEXT,
 			expires_at INTEGER DEFAULT 0,
+			webhook_secret TEXT DEFAULT '',
+			notification_webhooks TEXT DEFAULT '',
+			traffic_split_percent INTEGER DEFAULT 100,
+			rollout_min_requests INTEGER DEFAULT 25,
+			rollout_error_percent REAL DEFAULT 5,
+			rollout_assess_seconds INTEGER DEFAULT 300,
+			rollout_started_at INTEGER DEFAULT 0,
+			rollout_deploy_id TEXT DEFAULT '',
+			rollout_status TEXT DEFAULT '',
 			stopped INTEGER DEFAULT 0,
 			updated_at INTEGER,
 			PRIMARY KEY (app, env, branch)
@@ -9313,6 +10207,15 @@ func migrateDB(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN access_policy TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN ip_allowlist TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN expires_at INTEGER DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN webhook_secret TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN notification_webhooks TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN traffic_split_percent INTEGER DEFAULT 100`)
+	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN rollout_min_requests INTEGER DEFAULT 25`)
+	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN rollout_error_percent REAL DEFAULT 5`)
+	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN rollout_assess_seconds INTEGER DEFAULT 300`)
+	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN rollout_started_at INTEGER DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN rollout_deploy_id TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN rollout_status TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN stopped INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN host_port_explicit INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN image TEXT DEFAULT ''`)
@@ -9340,6 +10243,13 @@ func migrateDB(db *sql.DB) error {
 		user_id TEXT NOT NULL,
 		created_at INTEGER,
 		expires_at INTEGER
+	)`)
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS user_permissions (
+		user_id TEXT NOT NULL,
+		app TEXT NOT NULL,
+		env TEXT NOT NULL,
+		role TEXT NOT NULL DEFAULT 'viewer',
+		PRIMARY KEY (user_id, app, env)
 	)`)
 	// Analytics tables
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS analytics_events (
@@ -9544,10 +10454,11 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		defer rows.Close()
 		type userRow struct {
-			ID        string `json:"id"`
-			Username  string `json:"username"`
-			Role      string `json:"role"`
-			CreatedAt int64  `json:"created_at"`
+			ID          string           `json:"id"`
+			Username    string           `json:"username"`
+			Role        string           `json:"role"`
+			CreatedAt   int64            `json:"created_at"`
+			Permissions []UserPermission `json:"permissions,omitempty"`
 		}
 		out := []userRow{}
 		for rows.Next() {
@@ -9555,15 +10466,18 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 			if err := rows.Scan(&u.ID, &u.Username, &u.Role, &u.CreatedAt); err != nil {
 				continue
 			}
+			u.Role = normalizeUserRole(u.Role)
+			u.Permissions, _ = s.userPermissions(u.ID)
 			out = append(out, u)
 		}
 		writeJSON(w, 200, out)
 
 	case http.MethodPost:
 		var body struct {
-			Username string `json:"username"`
-			Password string `json:"password"`
-			Role     string `json:"role"`
+			Username    string           `json:"username"`
+			Password    string           `json:"password"`
+			Role        string           `json:"role"`
+			Permissions []UserPermission `json:"permissions"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httpError(w, 400, "invalid json")
@@ -9574,8 +10488,8 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 400, "username required; password must be at least 8 characters")
 			return
 		}
-		role := body.Role
-		if role != "owner" && role != "deployer" && role != "viewer" {
+		role := normalizeUserRole(body.Role)
+		if role == "viewer" && strings.TrimSpace(body.Role) == "" {
 			role = "deployer"
 		}
 		hash, err := hashPassword(body.Password)
@@ -9591,8 +10505,15 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 409, "username already exists")
 			return
 		}
+		for i := range body.Permissions {
+			body.Permissions[i].UserID = id
+		}
+		if err := s.replaceUserPermissions(id, body.Permissions); err != nil {
+			httpError(w, 500, "failed to save permissions")
+			return
+		}
 		s.auditLog(sess.Username, "user.create", body.Username, "role="+role)
-		writeJSON(w, 200, map[string]any{"id": id, "username": body.Username, "role": role})
+		writeJSON(w, 200, map[string]any{"id": id, "username": body.Username, "role": role, "permissions": normalizeUserPermissions(body.Permissions)})
 
 	default:
 		httpError(w, 405, "method not allowed")
@@ -9639,24 +10560,40 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodPatch:
 		var body struct {
-			Role string `json:"role"`
+			Role        *string          `json:"role"`
+			Permissions []UserPermission `json:"permissions"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httpError(w, 400, "invalid json")
 			return
 		}
-		if body.Role != "owner" && body.Role != "deployer" && body.Role != "viewer" {
-			httpError(w, 400, "role must be owner, deployer, or viewer")
-			return
-		}
 		var username string
-		_ = s.db.QueryRow(`SELECT username FROM users WHERE id=?`, userID).Scan(&username)
-		if _, err := s.db.Exec(`UPDATE users SET role=? WHERE id=?`, body.Role, userID); err != nil {
-			httpError(w, 500, err.Error())
+		var currentRole string
+		if err := s.db.QueryRow(`SELECT username, role FROM users WHERE id=?`, userID).Scan(&username, &currentRole); err != nil {
+			httpError(w, 404, "user not found")
 			return
 		}
-		s.auditLog(sess.Username, "user.role", username, "role="+body.Role)
-		writeJSON(w, 200, map[string]any{"id": userID, "role": body.Role})
+		nextRole := normalizeUserRole(currentRole)
+		if body.Role != nil {
+			nextRole = normalizeUserRole(*body.Role)
+			if !validUserRole(nextRole) {
+				httpError(w, 400, "role must be owner, admin, deployer, or viewer")
+				return
+			}
+			if _, err := s.db.Exec(`UPDATE users SET role=? WHERE id=?`, nextRole, userID); err != nil {
+				httpError(w, 500, err.Error())
+				return
+			}
+		}
+		for i := range body.Permissions {
+			body.Permissions[i].UserID = userID
+		}
+		if err := s.replaceUserPermissions(userID, body.Permissions); err != nil {
+			httpError(w, 500, "failed to update permissions")
+			return
+		}
+		s.auditLog(sess.Username, "user.role", username, "role="+nextRole)
+		writeJSON(w, 200, map[string]any{"id": userID, "role": nextRole, "permissions": normalizeUserPermissions(body.Permissions)})
 
 	default:
 		httpError(w, 405, "method not allowed")
@@ -9727,6 +10664,77 @@ func (s *Server) saveDeployToDB(d *Deploy, req DeployRequest) error {
 	return err
 }
 
+func deployNotificationEvent(status DeployStatus) string {
+	switch status {
+	case StatusQueued:
+		return "deploy.queued"
+	case StatusRunning:
+		return "deploy.started"
+	case StatusSuccess:
+		return "deploy.succeeded"
+	case StatusFailed:
+		return "deploy.failed"
+	default:
+		return "deploy.updated"
+	}
+}
+
+func (s *Server) emitDeployNotificationsByID(deployID string) {
+	deploy, err := s.getDeployFromDB(deployID)
+	if err != nil || deploy == nil {
+		return
+	}
+	st, _ := s.getAppState(deploy.App, deploy.Env, deploy.Branch)
+	if st == nil {
+		return
+	}
+	webhooks := notificationWebhookList(st.NotificationWebhooks)
+	if len(webhooks) == 0 {
+		return
+	}
+	payload := map[string]any{
+		"event": deployNotificationEvent(deploy.Status),
+		"deploy": map[string]any{
+			"id":             deploy.ID,
+			"app":            deploy.App,
+			"env":            deploy.Env,
+			"branch":         deploy.Branch,
+			"status":         deploy.Status,
+			"commit_sha":     deploy.CommitSHA,
+			"commit_message": deploy.CommitMessage,
+			"build_number":   deploy.BuildNumber,
+			"preview_url":    deploy.PreviewURL,
+			"deployed_by":    deploy.DeployedBy,
+			"created_at":     deploy.CreatedAt.UnixMilli(),
+			"started_at":     timePtrToMillis(deploy.StartedAt),
+			"ended_at":       timePtrToMillis(deploy.EndedAt),
+			"error":          deploy.Error,
+		},
+		"lane": map[string]any{
+			"public_host":           st.PublicHost,
+			"traffic_split_percent": st.TrafficSplitPercent,
+			"rollout_status":        st.RolloutStatus,
+			"active_slot":           st.ActiveSlot,
+			"standby_slot":          st.StandbySlot,
+		},
+	}
+	body, _ := json.Marshal(payload)
+	go func() {
+		client := &http.Client{Timeout: 5 * time.Second}
+		for _, endpoint := range webhooks {
+			req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+			if err != nil {
+				continue
+			}
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := client.Do(req)
+			if err == nil && resp != nil {
+				_ = resp.Body.Close()
+			}
+		}
+	}()
+}
+
 func (s *Server) updateDeployStatus(id string, status DeployStatus, errMsg string, started, ended *time.Time, imageTag, prevImg string) error {
 	_, err := s.db.Exec(
 		`UPDATE deploys SET status=?, error=?, started_at=?, ended_at=?, image_tag=?, previous_image_tag=? WHERE id=?`,
@@ -9734,6 +10742,7 @@ func (s *Server) updateDeployStatus(id string, status DeployStatus, errMsg strin
 	)
 	if err == nil {
 		s.broadcastSnapshot()
+		s.emitDeployNotificationsByID(id)
 	}
 	return err
 }
@@ -9884,21 +10893,21 @@ func (s *Server) reconcileStaleDeploysOnStartup() error {
 func (s *Server) saveAppState(st *AppState) error {
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO app_state
-		(app, env, branch, repo_url, engine, current_image, previous_image, mode, host_port, host_port_explicit, service_port, public_host, active_slot, standby_slot, drain_until, traffic_mode, access_policy, ip_allowlist, repo_hash, expires_at, webhook_secret, stopped, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(app, env, branch, repo_url, engine, current_image, previous_image, mode, host_port, host_port_explicit, service_port, public_host, active_slot, standby_slot, drain_until, traffic_mode, access_policy, ip_allowlist, repo_hash, expires_at, webhook_secret, notification_webhooks, traffic_split_percent, rollout_min_requests, rollout_error_percent, rollout_assess_seconds, rollout_started_at, rollout_deploy_id, rollout_status, stopped, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		st.App, string(st.Env), st.Branch, st.RepoURL, firstNonEmptyEngine(st.Engine), st.CurrentImage, st.PreviousImage, st.Mode,
-		st.HostPort, st.HostPortExplicit, st.ServicePort, st.PublicHost, normalizeActiveSlot(st.ActiveSlot), normalizeActiveSlot(st.StandbySlot), st.DrainUntil, firstNonEmpty(normalizeTrafficMode(st.TrafficMode), "edge"), firstNonEmpty(normalizeAccessPolicy(st.AccessPolicy), s.lanePolicy(st.Env).DefaultAccessPolicy), normalizeIPAllowlist(st.IPAllowlist), st.RepoHash, st.ExpiresAt, st.WebhookSecret, st.Stopped, time.Now().UnixMilli(),
+		st.HostPort, st.HostPortExplicit, st.ServicePort, st.PublicHost, normalizeActiveSlot(st.ActiveSlot), normalizeActiveSlot(st.StandbySlot), st.DrainUntil, firstNonEmpty(normalizeTrafficMode(st.TrafficMode), "edge"), firstNonEmpty(normalizeAccessPolicy(st.AccessPolicy), s.lanePolicy(st.Env).DefaultAccessPolicy), normalizeIPAllowlist(st.IPAllowlist), st.RepoHash, st.ExpiresAt, st.WebhookSecret, st.NotificationWebhooks, st.TrafficSplitPercent, st.RolloutMinRequests, st.RolloutErrorPercent, st.RolloutAssessSeconds, st.RolloutStartedAt, st.RolloutDeployID, st.RolloutStatus, st.Stopped, time.Now().UnixMilli(),
 	)
 	return err
 }
 
 func (s *Server) getAppState(app string, env DeployEnv, branch string) (*AppState, error) {
-	row := s.db.QueryRow(`SELECT app, env, branch, repo_url, COALESCE(engine,''), current_image, previous_image, mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(repo_hash,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(stopped,0)
+	row := s.db.QueryRow(`SELECT app, env, branch, repo_url, COALESCE(engine,''), current_image, previous_image, mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(repo_hash,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), COALESCE(stopped,0)
 		FROM app_state WHERE app=? AND env=? AND branch=?`, app, string(env), branch)
 
 	var st AppState
 	var envS string
-	if err := row.Scan(&st.App, &envS, &st.Branch, &st.RepoURL, &st.Engine, &st.CurrentImage, &st.PreviousImage, &st.Mode, &st.HostPort, &st.HostPortExplicit, &st.ServicePort, &st.PublicHost, &st.ActiveSlot, &st.StandbySlot, &st.DrainUntil, &st.TrafficMode, &st.AccessPolicy, &st.IPAllowlist, &st.RepoHash, &st.ExpiresAt, &st.WebhookSecret, &st.Stopped); err != nil {
+	if err := row.Scan(&st.App, &envS, &st.Branch, &st.RepoURL, &st.Engine, &st.CurrentImage, &st.PreviousImage, &st.Mode, &st.HostPort, &st.HostPortExplicit, &st.ServicePort, &st.PublicHost, &st.ActiveSlot, &st.StandbySlot, &st.DrainUntil, &st.TrafficMode, &st.AccessPolicy, &st.IPAllowlist, &st.RepoHash, &st.ExpiresAt, &st.WebhookSecret, &st.NotificationWebhooks, &st.TrafficSplitPercent, &st.RolloutMinRequests, &st.RolloutErrorPercent, &st.RolloutAssessSeconds, &st.RolloutStartedAt, &st.RolloutDeployID, &st.RolloutStatus, &st.Stopped); err != nil {
 		return nil, err
 	}
 	st.Env = DeployEnv(envS)
@@ -9964,7 +10973,7 @@ func validateDeployRequest(req DeployRequest) error {
 	}
 	req.Env = normalizeDeployEnv(string(req.Env))
 	if !isKnownDeployEnv(req.Env) {
-		return fmt.Errorf("env must be one of: preview, dev, staging, prod")
+		return fmt.Errorf("env must be one of: preview, dev (or ddev), staging, prod (or production)")
 	}
 	if req.Mode != "" {
 		m := strings.ToLower(strings.TrimSpace(req.Mode))
@@ -10062,6 +11071,127 @@ func firstNonZero(v, def int) int {
 	return def
 }
 
+func defaultTrafficSplitPercent() int {
+	return 100
+}
+
+func defaultRolloutMinRequests() int {
+	return 25
+}
+
+func defaultRolloutErrorPercent() float64 {
+	return 5
+}
+
+func defaultRolloutAssessSeconds() int {
+	return 300
+}
+
+func normalizeTrafficSplitPercent(value int) int {
+	switch {
+	case value <= 0:
+		return defaultTrafficSplitPercent()
+	case value > 100:
+		return 100
+	default:
+		return value
+	}
+}
+
+func normalizeRolloutMinRequests(value int) int {
+	if value <= 0 {
+		return defaultRolloutMinRequests()
+	}
+	return value
+}
+
+func normalizeRolloutErrorPercent(value float64) float64 {
+	if value <= 0 {
+		return defaultRolloutErrorPercent()
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
+}
+
+func normalizeRolloutAssessSeconds(value int) int {
+	if value <= 0 {
+		return defaultRolloutAssessSeconds()
+	}
+	return value
+}
+
+func normalizeNotificationWebhooks(value string) string {
+	lines := strings.Split(value, "\n")
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parsed, err := url.Parse(line)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			continue
+		}
+		line = parsed.String()
+		if _, ok := seen[line]; ok {
+			continue
+		}
+		seen[line] = struct{}{}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
+}
+
+func notificationWebhookList(value string) []string {
+	value = normalizeNotificationWebhooks(value)
+	if value == "" {
+		return nil
+	}
+	return strings.Split(value, "\n")
+}
+
+func validUserRole(role string) bool {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "owner", "admin", "deployer", "viewer":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeUserRole(role string) string {
+	role = strings.ToLower(strings.TrimSpace(role))
+	if !validUserRole(role) {
+		return "viewer"
+	}
+	return role
+}
+
+func roleRank(role string) int {
+	switch normalizeUserRole(role) {
+	case "viewer":
+		return 1
+	case "deployer":
+		return 2
+	case "admin":
+		return 3
+	case "owner":
+		return 4
+	default:
+		return 0
+	}
+}
+
+func roleAtLeast(role string, required string) bool {
+	if required == "" {
+		return true
+	}
+	return roleRank(role) >= roleRank(required)
+}
+
 func timePtrToMillis(t *time.Time) any {
 	if t == nil {
 		return nil
@@ -10123,24 +11253,39 @@ func pathWithinBase(baseDir string, target string) bool {
 }
 
 func hasPackageDependency(repoDir string, dep string) bool {
-	p := filepath.Join(repoDir, "package.json")
-	b, err := os.ReadFile(p)
-	if err != nil {
+	pkg, raw, ok := readPackageManifest(repoDir)
+	if !ok {
 		return false
 	}
-	var pkg struct {
-		Dependencies    map[string]any `json:"dependencies"`
-		DevDependencies map[string]any `json:"devDependencies"`
+	if pkg == nil {
+		return strings.Contains(strings.ToLower(raw), `"`+strings.ToLower(dep)+`"`)
 	}
-	if err := json.Unmarshal(b, &pkg); err != nil {
-		return strings.Contains(strings.ToLower(string(b)), `"`+strings.ToLower(dep)+`"`)
-	}
-	_, ok := pkg.Dependencies[dep]
+	_, ok = pkg.Dependencies[dep]
 	if ok {
 		return true
 	}
 	_, ok = pkg.DevDependencies[dep]
 	return ok
+}
+
+type packageManifest struct {
+	PackageManager  string            `json:"packageManager"`
+	Scripts         map[string]string `json:"scripts"`
+	Dependencies    map[string]any    `json:"dependencies"`
+	DevDependencies map[string]any    `json:"devDependencies"`
+}
+
+func readPackageManifest(repoDir string) (*packageManifest, string, bool) {
+	p := filepath.Join(repoDir, "package.json")
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return nil, "", false
+	}
+	var pkg packageManifest
+	if err := json.Unmarshal(b, &pkg); err != nil {
+		return nil, string(b), true
+	}
+	return &pkg, string(b), true
 }
 
 func findFilesByExt(repoDir string, exts ...string) []string {
@@ -10361,6 +11506,125 @@ func mustJSON(s string) string {
 	return string(b)
 }
 
+func packageManagerName(s string) string {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if i := strings.IndexByte(s, '@'); i >= 0 {
+		s = s[:i]
+	}
+	return s
+}
+
+func bunProject(repoDir string) bool {
+	if fileExists(filepath.Join(repoDir, "bun.lock")) || fileExists(filepath.Join(repoDir, "bun.lockb")) {
+		return true
+	}
+	if pkg, _, ok := readPackageManifest(repoDir); ok && pkg != nil {
+		return packageManagerName(pkg.PackageManager) == "bun"
+	}
+	return false
+}
+
+func bunHasLockfile(repoDir string) bool {
+	return fileExists(filepath.Join(repoDir, "bun.lock")) || fileExists(filepath.Join(repoDir, "bun.lockb"))
+}
+
+func bunLockfileCopyInstruction(repoDir string) string {
+	if !bunHasLockfile(repoDir) {
+		return ""
+	}
+	return "COPY bun.lock* ./\n"
+}
+
+func bunInstallCmd(repoDir string) string {
+	if bunHasLockfile(repoDir) {
+		return "bun install --frozen-lockfile"
+	}
+	return "bun install"
+}
+
+func bunProdInstallCmd(repoDir string) string {
+	if bunHasLockfile(repoDir) {
+		return "bun install --production --frozen-lockfile"
+	}
+	return "bun install --production"
+}
+
+func bunPackageCacheDir() string {
+	return "/root/.bun/install/cache"
+}
+
+func bunRunStepWithCache(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return ""
+	}
+	return fmt.Sprintf("RUN --mount=type=cache,target=%s %s", bunPackageCacheDir(), cmd)
+}
+
+func bunDefaultBuildCmd(repoDir string) string {
+	if nodePackageScript(repoDir, "build") != "" {
+		return "bun run build"
+	}
+	return ""
+}
+
+func bunDefaultStartCmd(repoDir string) string {
+	if nodePackageScript(repoDir, "start") != "" {
+		return "bun run start"
+	}
+	for _, name := range []string{"server.ts", "server.js", "index.ts", "index.js"} {
+		if fileExists(filepath.Join(repoDir, name)) {
+			return "bun run " + name
+		}
+	}
+	return "bun run start"
+}
+
+func rubyInstallCmd(repoDir string) string {
+	if fileExists(filepath.Join(repoDir, "Gemfile")) {
+		return `sh -lc "bundle config set without 'development test' && bundle install"`
+	}
+	return ""
+}
+
+func rubyDefaultBuildCmd(repoDir string) string {
+	if !rubyRailsApp(repoDir) {
+		return ""
+	}
+	return `sh -lc "if [ -f bin/rails ]; then SECRET_KEY_BASE=dummy bundle exec bin/rails assets:precompile; else SECRET_KEY_BASE=dummy bundle exec rails assets:precompile; fi"`
+}
+
+func rubyDefaultStart(repoDir string) string {
+	if rubyRailsApp(repoDir) {
+		if fileExists(filepath.Join(repoDir, "bin", "rails")) {
+			return `sh -lc "bundle exec bin/rails server -e production -b 0.0.0.0 -p ${PORT:-3000}"`
+		}
+		return `sh -lc "bundle exec rails server -e production -b 0.0.0.0 -p ${PORT:-3000}"`
+	}
+	if fileExists(filepath.Join(repoDir, "config.ru")) {
+		return `sh -lc "bundle exec rackup --host 0.0.0.0 --port ${PORT:-3000}"`
+	}
+	return `sh -lc "bundle exec ruby app.rb"`
+}
+
+func rubyRailsApp(repoDir string) bool {
+	if fileExists(filepath.Join(repoDir, "config", "application.rb")) || fileExists(filepath.Join(repoDir, "bin", "rails")) {
+		return true
+	}
+	if b, err := os.ReadFile(filepath.Join(repoDir, "Gemfile")); err == nil {
+		return strings.Contains(strings.ToLower(string(b)), "gem \"rails\"") || strings.Contains(strings.ToLower(string(b)), "gem 'rails'")
+	}
+	return false
+}
+
+func rubyRunStep(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return ""
+	}
+	return "RUN " + cmd + "\n"
+}
+
 // Node helpers
 var (
 	nextConfigStandaloneLiteralRe   = regexp.MustCompile(`\boutput\s*:\s*(?:"standalone"|'standalone')`)
@@ -10411,7 +11675,7 @@ RUN mkdir -p /app/node_modules
 RUN rm -rf node_modules
 %s
 RUN mkdir -p /app/node_modules
-`, nodeRunStepWithCaches(repoDir, nodeProdInstallCmd(repoDir)))
+`, nodeRunStepWithCaches(repoDir, "", nodeProdInstallCmd(repoDir)))
 	default:
 		return `FROM deps AS prod-deps
 RUN npm prune --omit=dev --no-audit --no-fund || true
@@ -10431,7 +11695,15 @@ func nodePackageCacheDir(repoDir string) string {
 	}
 }
 
-func nodeRunStepWithCaches(repoDir string, cmd string, extraTargets ...string) string {
+// nodeRunStepWithCaches emits a Dockerfile RUN line with BuildKit cache mounts.
+//
+// The package-manager cache (npm/pnpm/yarn store) is intentionally shared across
+// all apps — it is content-addressed so sharing only helps.
+//
+// extraTargets are app-specific caches (e.g. .next/cache). When laneID is non-empty
+// each extra target gets an explicit id= so different deployment lanes never clobber
+// each other's incremental build artifacts.
+func nodeRunStepWithCaches(repoDir string, laneID string, cmd string, extraTargets ...string) string {
 	cmd = strings.TrimSpace(cmd)
 	if cmd == "" {
 		return ""
@@ -10439,6 +11711,7 @@ func nodeRunStepWithCaches(repoDir string, cmd string, extraTargets ...string) s
 
 	var mounts []string
 	if target := strings.TrimSpace(nodePackageCacheDir(repoDir)); target != "" {
+		// Shared across all builds — content-addressed, so cross-app hits are free.
 		mounts = append(mounts, fmt.Sprintf("--mount=type=cache,target=%s", target))
 	}
 	for _, target := range extraTargets {
@@ -10446,7 +11719,13 @@ func nodeRunStepWithCaches(repoDir string, cmd string, extraTargets ...string) s
 		if target == "" {
 			continue
 		}
-		mounts = append(mounts, fmt.Sprintf("--mount=type=cache,target=%s", target))
+		if laneID != "" {
+			// Scope per deployment lane so concurrent Next.js (or similar) builds
+			// don't overwrite each other's incremental cache.
+			mounts = append(mounts, fmt.Sprintf("--mount=type=cache,id=%s,target=%s", laneID, target))
+		} else {
+			mounts = append(mounts, fmt.Sprintf("--mount=type=cache,target=%s", target))
+		}
 	}
 	if len(mounts) == 0 {
 		return fmt.Sprintf("RUN %s", cmd)
@@ -10477,14 +11756,8 @@ func nodeDefaultStartCmd(repoDir string) string {
 }
 
 func nodePackageScript(repoDir string, name string) string {
-	b, err := os.ReadFile(filepath.Join(repoDir, "package.json"))
-	if err != nil {
-		return ""
-	}
-	var pkg struct {
-		Scripts map[string]string `json:"scripts"`
-	}
-	if err := json.Unmarshal(b, &pkg); err != nil {
+	pkg, _, ok := readPackageManifest(repoDir)
+	if !ok || pkg == nil {
 		return ""
 	}
 	return strings.TrimSpace(pkg.Scripts[name])
@@ -10495,6 +11768,28 @@ func nextClassicStartCmd(repoDir string) string {
 		return nodeDefaultStartCmd(repoDir)
 	}
 	return `exec ./node_modules/.bin/next start --hostname 0.0.0.0 --port ${PORT:-3000}`
+}
+
+// writeRelayDockerignore writes a .dockerignore to repoDir if none exists,
+// leaving a marker so cleanupRelayDockerignore can remove it afterwards.
+// This prevents .git, leftover node_modules, etc. from inflating the build
+// context and busting layer cache on every commit.
+func writeRelayDockerignore(repoDir string) {
+	if fileExists(filepath.Join(repoDir, ".dockerignore")) {
+		return // respect the user's own .dockerignore
+	}
+	content := ".git\nnode_modules\n.next\ndist\nbuild\n*.log\n.env.local\n.env*.local\n"
+	_ = os.WriteFile(filepath.Join(repoDir, ".dockerignore"), []byte(content), 0644)
+	_ = os.WriteFile(filepath.Join(repoDir, ".relay_dockerignore_created"), []byte("1"), 0644)
+}
+
+// cleanupRelayDockerignore removes the .dockerignore only if we created it.
+func cleanupRelayDockerignore(repoDir string) {
+	marker := filepath.Join(repoDir, ".relay_dockerignore_created")
+	if fileExists(marker) {
+		_ = os.Remove(filepath.Join(repoDir, ".dockerignore"))
+		_ = os.Remove(marker)
+	}
 }
 
 func isNextStandaloneEnabled(repoDir string) bool {
@@ -10702,7 +11997,53 @@ func pythonEntryModule(repoDir string) string {
 	return "main"
 }
 
+func pythonDependencyFileText(repoDir string) string {
+	var parts []string
+	for _, name := range []string{"requirements.txt", "pyproject.toml", "Pipfile"} {
+		if b, err := os.ReadFile(filepath.Join(repoDir, name)); err == nil {
+			parts = append(parts, strings.ToLower(string(b)))
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func pythonHasDependency(repoDir string, names ...string) bool {
+	s := pythonDependencyFileText(repoDir)
+	if s == "" {
+		return false
+	}
+	for _, name := range names {
+		if strings.Contains(s, strings.ToLower(name)) {
+			return true
+		}
+	}
+	return false
+}
+
+func djangoProjectModule(repoDir string) string {
+	if b, err := os.ReadFile(filepath.Join(repoDir, "manage.py")); err == nil {
+		re := regexp.MustCompile(`DJANGO_SETTINGS_MODULE["']\s*,\s*["']([A-Za-z0-9_\.]+)\.settings["']`)
+		if match := re.FindStringSubmatch(string(b)); len(match) == 2 {
+			return strings.TrimSpace(match[1])
+		}
+	}
+	for _, rel := range findFilesByExt(repoDir, ".py") {
+		if filepath.Base(rel) != "settings.py" {
+			continue
+		}
+		dir := filepath.Dir(rel)
+		if dir == "." || dir == "" {
+			continue
+		}
+		return strings.ReplaceAll(filepath.ToSlash(dir), "/", ".")
+	}
+	return ""
+}
+
 func pythonFramework(repoDir string) string {
+	if fileExists(filepath.Join(repoDir, "manage.py")) {
+		return "django"
+	}
 	_, content := readFirstExisting(repoDir, "main.py", "app.py")
 	if content != "" {
 		s := strings.ToLower(content)
@@ -10713,16 +12054,14 @@ func pythonFramework(repoDir string) string {
 			return "flask"
 		}
 	}
-	for _, name := range []string{"requirements.txt", "pyproject.toml", "Pipfile"} {
-		if b, err := os.ReadFile(filepath.Join(repoDir, name)); err == nil {
-			s := strings.ToLower(string(b))
-			switch {
-			case strings.Contains(s, "fastapi"), strings.Contains(s, "uvicorn"):
-				return "fastapi"
-			case strings.Contains(s, "flask"), strings.Contains(s, "gunicorn"):
-				return "flask"
-			}
-		}
+	s := pythonDependencyFileText(repoDir)
+	switch {
+	case strings.Contains(s, "django"):
+		return "django"
+	case strings.Contains(s, "fastapi"), strings.Contains(s, "uvicorn"):
+		return "fastapi"
+	case strings.Contains(s, "flask"), strings.Contains(s, "gunicorn"):
+		return "flask"
 	}
 	return "generic"
 }
@@ -10730,6 +12069,16 @@ func pythonFramework(repoDir string) string {
 func pythonDefaultStart(repoDir string) string {
 	module := pythonEntryModule(repoDir)
 	switch pythonFramework(repoDir) {
+	case "django":
+		project := djangoProjectModule(repoDir)
+		switch {
+		case project != "" && fileExists(filepath.Join(repoDir, filepath.FromSlash(strings.ReplaceAll(project, ".", "/")), "asgi.py")) && pythonHasDependency(repoDir, "uvicorn"):
+			return fmt.Sprintf(`sh -lc "python -m uvicorn %s.asgi:application --host 0.0.0.0 --port ${PORT:-8000}"`, project)
+		case project != "" && fileExists(filepath.Join(repoDir, filepath.FromSlash(strings.ReplaceAll(project, ".", "/")), "wsgi.py")) && pythonHasDependency(repoDir, "gunicorn"):
+			return fmt.Sprintf(`sh -lc "python -m gunicorn %s.wsgi:application --bind 0.0.0.0:${PORT:-8000}"`, project)
+		default:
+			return `sh -lc "python manage.py runserver 0.0.0.0:${PORT:-8000}"`
+		}
 	case "fastapi":
 		return fmt.Sprintf(`sh -lc "python -m uvicorn %s:app --host 0.0.0.0 --port ${PORT:-8000}"`, module)
 	case "flask":
@@ -10751,7 +12100,10 @@ func javaDefaultBuild(repoDir string) string {
 	}
 	// gradle
 	if fileExists(filepath.Join(repoDir, "build.gradle")) || fileExists(filepath.Join(repoDir, "build.gradle.kts")) {
-		return `sh -lc "./gradlew -q build -x test && cp build/libs/*.jar app.jar"`
+		if fileExists(filepath.Join(repoDir, "gradlew")) {
+			return `sh -lc "./gradlew -q build -x test && cp build/libs/*.jar app.jar"`
+		}
+		return `sh -lc "gradle -q build -x test && cp build/libs/*.jar app.jar"`
 	}
 	return `sh -lc "echo 'no build tool detected'; exit 1"`
 }
@@ -10785,6 +12137,7 @@ func cCppDefaultBuildCmd(repoDir string) string {
 }
 
 func writeStaticDockerArtifacts(repoDir string, dockerfile string, includeWasmMime bool) error {
+	writeRelayDockerignore(repoDir)
 	if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte(dockerfile), 0644); err != nil {
 		return err
 	}
@@ -10815,6 +12168,7 @@ func writeStaticDockerArtifacts(repoDir string, dockerfile string, includeWasmMi
 }
 
 func cleanupStaticDockerArtifacts(repoDir string, removeNodeArtifacts bool) error {
+	cleanupRelayDockerignore(repoDir)
 	if removeNodeArtifacts {
 		_ = os.RemoveAll(filepath.Join(repoDir, "node_modules"))
 		_ = os.RemoveAll(filepath.Join(repoDir, "dist"))

@@ -213,3 +213,41 @@ func TestHandleEdgeAuthzAllowsIPAllowlist(t *testing.T) {
 		t.Fatalf("expected non-allowlisted IP to be blocked, got %d", blockedRec.Code)
 	}
 }
+
+func TestScopedLaneAccessAllowsOnlyGrantedEnv(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	token := createUserSessionForTest(t, s, "scoped-user", "deployer")
+
+	var userID string
+	if err := s.db.QueryRow(`SELECT id FROM users WHERE username=?`, "scoped-user").Scan(&userID); err != nil {
+		t.Fatalf("lookup user: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO user_permissions (user_id, app, env, role) VALUES (?, ?, ?, ?)`,
+		userID, "demo", "staging", "deployer",
+	); err != nil {
+		t.Fatalf("insert permission: %v", err)
+	}
+
+	if role := s.effectiveLaneRole(&UserSession{UserID: userID, Username: "scoped-user", Role: "deployer"}, "demo", EnvStaging); role != "deployer" {
+		t.Fatalf("expected staging role deployer, got %q", role)
+	}
+	if role := s.effectiveLaneRole(&UserSession{UserID: userID, Username: "scoped-user", Role: "deployer"}, "demo", EnvProd); role != "" {
+		t.Fatalf("expected prod role to be denied, got %q", role)
+	}
+
+	handler := s.authByMethod(nil, []string{"owner", "admin", "deployer"})(func(w http.ResponseWriter, r *http.Request) {
+		_, ok := s.requireLaneAccess(w, r, "demo", EnvStaging, "deployer")
+		if ok {
+			w.WriteHeader(http.StatusNoContent)
+		}
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/apps/restart", strings.NewReader(`{}`))
+	req.AddCookie(&http.Cookie{Name: dashboardSessionCookie, Value: token})
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected staging write to pass, got %d", rec.Code)
+	}
+}

@@ -207,7 +207,7 @@ export function SettingsPage({
   }
 
   async function handleSave() {
-    if (!selectedEnv) return;
+    if (!selectedEnv || !canWrite) return;
     setBusy(true);
     try {
       const payload = toApiPayload(config);
@@ -228,7 +228,7 @@ export function SettingsPage({
   }
 
   async function handleSaveRestart() {
-    if (!selectedEnv) return;
+    if (!selectedEnv || !canWrite) return;
     setBusy(true);
     try {
       const payload = toApiPayload(config);
@@ -250,7 +250,7 @@ export function SettingsPage({
   }
 
   async function handleAddSecret() {
-    if (!selectedEnv || !draftSecret.key || !draftSecret.value) return;
+    if (!selectedEnv || !canWrite || !draftSecret.key || !draftSecret.value) return;
     await setSecret(selectedEnv, draftSecret.key, draftSecret.value);
     const next = await getSecrets(selectedEnv);
     setSecrets(next ?? []);
@@ -258,7 +258,7 @@ export function SettingsPage({
   }
 
   async function handleDeleteSecret(key: string) {
-    if (!selectedEnv) return;
+    if (!selectedEnv || !canWrite) return;
     await deleteSecret(selectedEnv, key);
     const next = await getSecrets(selectedEnv);
     setSecrets(next ?? []);
@@ -284,7 +284,7 @@ export function SettingsPage({
   }
 
   async function handleSaveCompanion() {
-    if (!selectedEnv) return;
+    if (!selectedEnv || !canWrite) return;
     setCompanionBusy(true);
     try {
       const payload = {
@@ -305,7 +305,7 @@ export function SettingsPage({
   }
 
   async function handleDeleteCompanion(name: string) {
-    if (!selectedEnv) return;
+    if (!selectedEnv || !canWrite) return;
     setCompanionBusy(true);
     try {
       await deleteCompanion(selectedEnv, name);
@@ -318,7 +318,7 @@ export function SettingsPage({
   }
 
   async function handleRestartCompanion(name: string) {
-    if (!selectedEnv) return;
+    if (!selectedEnv || !canWrite) return;
     setCompanionBusy(true);
     try {
       await restartCompanion(selectedEnv, name);
@@ -345,7 +345,7 @@ export function SettingsPage({
   }
 
   async function handleGenerateSignedLink() {
-    if (!selectedEnv) return;
+    if (!selectedEnv || !canWrite) return;
     setBusy(true);
     try {
       const result = await generateSignedLink(selectedEnv, signedLinkMinutes);
@@ -365,7 +365,7 @@ export function SettingsPage({
   }
 
   async function handleDeleteLane() {
-    if (!selectedEnv) return;
+    if (!selectedEnv || !canWrite) return;
     const laneLabel = `${selectedEnv.app}/${selectedEnv.env}/${selectedEnv.branch}`;
     const confirmed = window.confirm(
       `Delete lane ${laneLabel}?\n\nThis permanently removes runtime, workspace, deploy data, and lane state for this lane.`,
@@ -403,7 +403,7 @@ export function SettingsPage({
   }
 
   async function handleRequestPromotion() {
-    if (!selectedEnv) return;
+    if (!selectedEnv || !canWrite) return;
     setPromotionBusy(true);
     try {
       await requestPromotion({
@@ -473,6 +473,9 @@ export function SettingsPage({
 
   const draftEngine = normalizeEngineValue(config.engine ?? "docker");
   const isOwner = currentUser?.role === "owner";
+  const canWrite = ["owner", "admin", "deployer"].includes(
+    selectedEnv.access_role ?? currentUser?.role ?? "",
+  );
   const laneExpiresAt = Number(
     config.expires_at ?? selectedEnv.expires_at ?? 0,
   );
@@ -502,6 +505,12 @@ export function SettingsPage({
         </div>
       )}
 
+      {!canWrite && (
+        <div className="rounded-lg px-4 py-3 text-sm border bg-white/[0.03] border-white/[0.08] text-white/65">
+          This lane is read-only for your account. An owner can grant deploy or admin access for {selectedEnv.app}/{selectedEnv.env}.
+        </div>
+      )}
+
       {/* Runtime / Routing */}
       <SectionCard title="Runtime / Routing" eyebrow="Server controls">
         <div className="space-y-4">
@@ -519,7 +528,7 @@ export function SettingsPage({
                 <SegButton
                   key={o.value}
                   active={draftEngine === o.value}
-                  onClick={() => upd({ engine: o.value })}
+                  onClick={() => canWrite && upd({ engine: o.value })}
                 >
                   {o.title}
                 </SegButton>
@@ -538,7 +547,7 @@ export function SettingsPage({
                 <SegButton
                   key={o.value}
                   active={config.mode === o.value}
-                  onClick={() => upd({ mode: o.value })}
+                  onClick={() => canWrite && upd({ mode: o.value })}
                 >
                   {o.title}
                 </SegButton>
@@ -557,7 +566,7 @@ export function SettingsPage({
                 <SegButton
                   key={o.value}
                   active={config.traffic_mode === o.value}
-                  onClick={() => upd({ traffic_mode: o.value })}
+                  onClick={() => canWrite && upd({ traffic_mode: o.value })}
                 >
                   {o.title}
                 </SegButton>
@@ -578,7 +587,7 @@ export function SettingsPage({
                 <SegButton
                   key={o.value}
                   active={config.access_policy === o.value}
-                  onClick={() => upd({ access_policy: o.value })}
+                  onClick={() => canWrite && upd({ access_policy: o.value })}
                 >
                   {o.title}
                 </SegButton>
@@ -592,6 +601,7 @@ export function SettingsPage({
                 value={config.public_host ?? ""}
                 onChange={(e) => upd({ public_host: e.target.value })}
                 placeholder="app.yourdomain.com"
+                disabled={!canWrite}
               />
             </Field>
             <Field label="Host Port">
@@ -600,6 +610,7 @@ export function SettingsPage({
                 className="text-input"
                 value={config.host_port ?? 0}
                 onChange={(e) => upd({ host_port: Number(e.target.value) })}
+                disabled={!canWrite}
               />
             </Field>
             <Field label="Service Port">
@@ -608,6 +619,7 @@ export function SettingsPage({
                 className="text-input"
                 value={config.service_port ?? 0}
                 onChange={(e) => upd({ service_port: Number(e.target.value) })}
+                disabled={!canWrite}
               />
             </Field>
           </div>
@@ -617,8 +629,69 @@ export function SettingsPage({
               value={config.ip_allowlist ?? ""}
               onChange={(e) => upd({ ip_allowlist: e.target.value })}
               placeholder={"203.0.113.10\n198.51.100.0/24"}
+              disabled={!canWrite}
             />
           </Field>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <Field label="New Traffic Share (%)">
+              <input
+                type="number"
+                min={1}
+                max={100}
+                className="text-input"
+                value={config.traffic_split_percent ?? 100}
+                onChange={(e) => upd({ traffic_split_percent: Number(e.target.value) || 100 })}
+                disabled={!canWrite}
+              />
+            </Field>
+            <Field label="Assess After (sec)">
+              <input
+                type="number"
+                min={30}
+                className="text-input"
+                value={config.rollout_assess_seconds ?? 300}
+                onChange={(e) => upd({ rollout_assess_seconds: Number(e.target.value) || 300 })}
+                disabled={!canWrite}
+              />
+            </Field>
+            <Field label="Rollback Above (%)">
+              <input
+                type="number"
+                min={1}
+                max={100}
+                className="text-input"
+                value={config.rollout_error_percent ?? 5}
+                onChange={(e) => upd({ rollout_error_percent: Number(e.target.value) || 5 })}
+                disabled={!canWrite}
+              />
+            </Field>
+          </div>
+          <Field label="Minimum Requests Before Decision">
+            <input
+              type="number"
+              min={1}
+              className="text-input"
+              value={config.rollout_min_requests ?? 25}
+              onChange={(e) => upd({ rollout_min_requests: Number(e.target.value) || 25 })}
+              disabled={!canWrite}
+            />
+          </Field>
+          {(config.rollout_status || selectedEnv.rollout_status) && (
+            <div className="text-xs text-white/35">
+              Rollout status:{" "}
+              <span className="text-white/70">
+                {config.rollout_status ?? selectedEnv.rollout_status}
+              </span>
+              {(config.rollout_started_at ?? selectedEnv.rollout_started_at) ? (
+                <>
+                  {" "}since{" "}
+                  <span className="text-white/70">
+                    {formatDateTime(new Date(Number(config.rollout_started_at ?? selectedEnv.rollout_started_at)).toISOString())}
+                  </span>
+                </>
+              ) : null}
+            </div>
+          )}
           {laneExpiresAt > 0 &&
             (selectedEnv.env === "dev" || selectedEnv.env === "preview") && (
               <div className="text-xs text-white/35">
@@ -658,7 +731,7 @@ export function SettingsPage({
                   <button
                     type="button"
                     onClick={handleGenerateSignedLink}
-                    disabled={busy}
+                    disabled={busy || !canWrite}
                     className="primary-btn"
                   >
                     {busy ? "Generating..." : "Generate Signed Link"}
@@ -684,7 +757,7 @@ export function SettingsPage({
             <button
               type="button"
               onClick={handleSaveRestart}
-              disabled={busy}
+              disabled={busy || !canWrite}
               className="primary-btn"
             >
               {busy ? "Working..." : "Apply & Restart"}
@@ -692,7 +765,7 @@ export function SettingsPage({
             <button
               type="button"
               onClick={handleSave}
-              disabled={busy}
+              disabled={busy || !canWrite}
               className="ghost-btn"
             >
               Save for Later
@@ -707,7 +780,7 @@ export function SettingsPage({
                   onUpdated();
                 });
               }}
-              disabled={busy}
+              disabled={busy || !canWrite}
               className="ghost-btn"
             >
               Stop App
@@ -722,7 +795,7 @@ export function SettingsPage({
                   onUpdated();
                 });
               }}
-              disabled={busy}
+              disabled={busy || !canWrite}
               className="ghost-btn"
             >
               Start App
@@ -730,7 +803,7 @@ export function SettingsPage({
             <button
               type="button"
               onClick={handleDeleteLane}
-              disabled={busy}
+              disabled={busy || !canWrite}
               className="ghost-btn border-red-500/40 text-red-300 hover:bg-red-500/10"
             >
               Delete Lane
@@ -756,7 +829,7 @@ export function SettingsPage({
                 <button
                   type="button"
                   onClick={handleRequestPromotion}
-                  disabled={promotionBusy}
+                  disabled={promotionBusy || !canWrite}
                   className="primary-btn"
                 >
                   {promotionBusy
@@ -855,6 +928,7 @@ export function SettingsPage({
               className="text-input"
               value={config.repo_url ?? ""}
               onChange={(e) => upd({ repo_url: e.target.value })}
+              disabled={!canWrite}
             />
           </Field>
           <Field label="Webhook Secret">
@@ -864,6 +938,16 @@ export function SettingsPage({
               className="text-input"
               value={config.webhook_secret ?? ""}
               onChange={(e) => upd({ webhook_secret: e.target.value })}
+              disabled={!canWrite}
+            />
+          </Field>
+          <Field label="Deploy Notification Webhooks">
+            <textarea
+              className="text-input min-h-[110px] resize-y font-mono text-xs"
+              value={config.notification_webhooks ?? ""}
+              onChange={(e) => upd({ notification_webhooks: e.target.value })}
+              placeholder={"https://hooks.slack.com/services/...\nhttps://discord.com/api/webhooks/..."}
+              disabled={!canWrite}
             />
           </Field>
           <p className="text-xs text-white/35">
@@ -871,12 +955,12 @@ export function SettingsPage({
             <code className="font-mono text-white/50">
               RELAY_GITHUB_WEBHOOK_SECRET
             </code>
-            .
+            . Deploy notifications post JSON payloads to each URL listed above.
           </p>
           <button
             type="button"
             onClick={handleSave}
-            disabled={busy}
+            disabled={busy || !canWrite}
             className="primary-btn"
           >
             {busy ? "Saving..." : "Save GitHub Settings"}

@@ -435,7 +435,7 @@ function CreateProjectModal({ onClose, onCreated }: CreateProjectModalProps) {
     try {
       await saveAppConfig(
         { app: name.trim(), env, branch },
-        { engine, traffic_mode: mode },
+        { engine, mode },
       );
       onCreated(name.trim());
     } catch (err) {

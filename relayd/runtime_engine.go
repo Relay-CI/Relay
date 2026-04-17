@@ -85,7 +85,7 @@ func constrainDeployRequestForEngine(engine string, req *DeployRequest) {
 	}
 	if req.Mode == "" {
 		if req.PublicHost != "" {
-			req.Mode = "traefik"
+			req.Mode = "traefik"											
 		} else {
 			req.Mode = "port"
 		}

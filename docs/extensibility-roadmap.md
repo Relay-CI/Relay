@@ -14,10 +14,13 @@ Buildpacks in the current agent:
 - `node-next`
 - `node-vite`
 - `expo-web`
+- `sprint-ui`
+- `bun`
 - `node-generic`
 - `go`
 - `dotnet`
 - `python`
+- `ruby`
 - `java`
 - `rust`
 - `c-cpp`
@@ -28,6 +31,8 @@ Framework-aware support already included:
 
 - Flask via the Python buildpack
 - FastAPI via the Python buildpack
+- Django via the Python buildpack
+- Rails and Rack via the Ruby buildpack
 - C and C++ via the native `c-cpp` buildpack
 - WebAssembly static sites via `wasm-static`
 

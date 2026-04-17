@@ -43,7 +43,7 @@ var builtInLanePolicies = map[DeployEnv]LanePolicy{
 	},
 	EnvDev: {
 		Env:                 EnvDev,
-		DisplayName:         "dev",
+		DisplayName:         "ddev",
 		DefaultMode:         "port",
 		DefaultTrafficMode:  "edge",
 		DefaultAccessPolicy: "relay-login",
@@ -76,9 +76,15 @@ func normalizeDeployEnv(value string) DeployEnv {
 		return EnvStaging
 	case "dev", "development":
 		return EnvDev
+	case "ddev":
+		return EnvDev
 	default:
 		return ""
 	}
+}
+
+func baselineDeployEnvs() []DeployEnv {
+	return []DeployEnv{EnvProd, EnvStaging, EnvDev}
 }
 
 func isKnownDeployEnv(env DeployEnv) bool {
@@ -273,6 +279,22 @@ func (s *Server) constrainAppState(st *AppState) {
 	st.TrafficMode = firstNonEmpty(normalizeTrafficMode(st.TrafficMode), policy.DefaultTrafficMode)
 	st.AccessPolicy = firstNonEmpty(normalizeAccessPolicy(st.AccessPolicy), policy.DefaultAccessPolicy)
 	st.IPAllowlist = normalizeIPAllowlist(st.IPAllowlist)
+	st.NotificationWebhooks = normalizeNotificationWebhooks(st.NotificationWebhooks)
+	st.TrafficSplitPercent = normalizeTrafficSplitPercent(st.TrafficSplitPercent)
+	st.RolloutMinRequests = normalizeRolloutMinRequests(st.RolloutMinRequests)
+	st.RolloutErrorPercent = normalizeRolloutErrorPercent(st.RolloutErrorPercent)
+	st.RolloutAssessSeconds = normalizeRolloutAssessSeconds(st.RolloutAssessSeconds)
+	st.RolloutStatus = strings.TrimSpace(st.RolloutStatus)
+	if st.TrafficSplitPercent >= 100 || normalizeActiveSlot(st.StandbySlot) == "" {
+		st.TrafficSplitPercent = defaultTrafficSplitPercent()
+		if st.RolloutStatus == "monitoring" {
+			st.RolloutStatus = "graduated"
+		}
+		if normalizeActiveSlot(st.StandbySlot) == "" {
+			st.RolloutStartedAt = 0
+			st.RolloutDeployID = ""
+		}
+	}
 }
 
 func (s *Server) applyLaneDefaultsToDeployRequest(req *DeployRequest) {

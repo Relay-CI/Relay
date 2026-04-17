@@ -9,6 +9,16 @@ function pick(...vals) {
   return undefined;
 }
 
+function normalizeLaneEnv(value) {
+  const raw = String(value ?? "").trim().toLowerCase();
+  if (!raw) return "";
+  if (raw === "prod" || raw === "production") return "prod";
+  if (raw === "staging" || raw === "stage") return "staging";
+  if (raw === "dev" || raw === "development" || raw === "ddev") return "dev";
+  if (raw === "preview") return "preview";
+  return raw;
+}
+
 function resolveDeployArgs(cli = {}) {
   const cfg = loadRelayConfig();
   const socket = pick(cli.socket, process.env.RELAY_SOCKET, cfg.data.socket);
@@ -18,7 +28,7 @@ function resolveDeployArgs(cli = {}) {
     token:  pick(cli.token,  process.env.RELAY_TOKEN,  cfg.data.token),
     socket: socket || null,
     app:    pick(cli.app,    process.env.RELAY_APP,    cfg.data.app),
-    env:    pick(cli.env,    process.env.RELAY_ENV,    cfg.data.env,    "preview"),
+    env:    normalizeLaneEnv(pick(cli.env,    process.env.RELAY_ENV,    cfg.data.env,    "preview")),
     branch: pick(cli.branch, process.env.RELAY_BRANCH, cfg.data.branch, "main"),
     dir:    pick(cli.dir,    cfg.data.dir, "."),
   };
@@ -74,4 +84,4 @@ function resolveTransport(cli = {}) {
   return { kind: "http", baseUrl, token };
 }
 
-module.exports = { resolveDeployArgs, resolveServerArgs, resolveTransport };
+module.exports = { resolveDeployArgs, resolveServerArgs, resolveTransport, normalizeLaneEnv };

@@ -331,6 +331,14 @@ export function buildSettingsConfig(
         service_port?: number;
         public_host?: string;
         webhook_secret?: string;
+        notification_webhooks?: string;
+        traffic_split_percent?: number;
+        rollout_min_requests?: number;
+        rollout_error_percent?: number;
+        rollout_assess_seconds?: number;
+        rollout_started_at?: number;
+        rollout_deploy_id?: string;
+        rollout_status?: string;
       }
     | null,
 ): Record<string, unknown> {
@@ -346,6 +354,14 @@ export function buildSettingsConfig(
     service_port: selectedEnv?.service_port ?? 0,
     public_host: selectedEnv?.public_host ?? "",
     webhook_secret: selectedEnv?.webhook_secret ?? "",
+    notification_webhooks: selectedEnv?.notification_webhooks ?? "",
+    traffic_split_percent: selectedEnv?.traffic_split_percent ?? 100,
+    rollout_min_requests: selectedEnv?.rollout_min_requests ?? 25,
+    rollout_error_percent: selectedEnv?.rollout_error_percent ?? 5,
+    rollout_assess_seconds: selectedEnv?.rollout_assess_seconds ?? 300,
+    rollout_started_at: selectedEnv?.rollout_started_at ?? 0,
+    rollout_deploy_id: selectedEnv?.rollout_deploy_id ?? "",
+    rollout_status: selectedEnv?.rollout_status ?? "",
   });
 }
 
