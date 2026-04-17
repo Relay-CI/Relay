@@ -1,6 +1,6 @@
 {
   "name": "@relay-org/relay-mcp",
-  "version": "0.1.0",
+  "version": "0.1.66",
   "description": "Model Context Protocol server for Relay — deploy, inspect, and control apps from any MCP-aware AI tool",
   "type": "commonjs",
   "bin": {
