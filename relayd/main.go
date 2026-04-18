@@ -2640,31 +2640,50 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 		})
 	case http.MethodPost:
 		var body struct {
-			BaseDomain    string `json:"base_domain"`
-			DashboardHost string `json:"dashboard_host"`
-			ACMEDisabled  string `json:"acme_disabled"`
-			ThemeName     string `json:"theme_name"`
-			ThemeCSS      string `json:"theme_css"`
+			BaseDomain    *string `json:"base_domain"`
+			DashboardHost *string `json:"dashboard_host"`
+			ACMEDisabled  *string `json:"acme_disabled"`
+			ThemeName     *string `json:"theme_name"`
+			ThemeCSS      *string `json:"theme_css"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httpError(w, 400, "invalid JSON")
 			return
 		}
-		baseDomain := strings.TrimSpace(body.BaseDomain)
-		dashboardHost := strings.TrimSpace(body.DashboardHost)
-		acmeDisabled := ""
-		if body.ACMEDisabled == "true" {
-			acmeDisabled = "true"
+		// Only validate and update fields that were actually sent in the request.
+		updates := map[string]string{}
+		proxyChanged := false
+		if body.BaseDomain != nil {
+			v := strings.TrimSpace(*body.BaseDomain)
+			if err := validateProxyHostname(v, "base_domain"); err != nil {
+				httpError(w, 400, err.Error())
+				return
+			}
+			updates["base_domain"] = v
+			proxyChanged = true
 		}
-		themeName := strings.TrimSpace(body.ThemeName)
-		themeCSS := body.ThemeCSS // preserve internal whitespace
-		if err := validateProxyHostname(baseDomain, "base_domain"); err != nil {
-			httpError(w, 400, err.Error())
-			return
+		if body.DashboardHost != nil {
+			v := strings.TrimSpace(*body.DashboardHost)
+			if err := validateProxyHostname(v, "dashboard_host"); err != nil {
+				httpError(w, 400, err.Error())
+				return
+			}
+			updates["dashboard_host"] = v
+			proxyChanged = true
 		}
-		if err := validateProxyHostname(dashboardHost, "dashboard_host"); err != nil {
-			httpError(w, 400, err.Error())
-			return
+		if body.ACMEDisabled != nil {
+			v := ""
+			if *body.ACMEDisabled == "true" {
+				v = "true"
+			}
+			updates["acme_disabled"] = v
+			proxyChanged = true
+		}
+		if body.ThemeName != nil {
+			updates["theme_name"] = strings.TrimSpace(*body.ThemeName)
+		}
+		if body.ThemeCSS != nil {
+			updates["theme_css"] = *body.ThemeCSS
 		}
 		previous := map[string]string{
 			"base_domain":    s.serverConfigGet("base_domain"),
@@ -2676,13 +2695,7 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 500, "db begin failed: "+err.Error())
 			return
 		}
-		for key, value := range map[string]string{
-			"base_domain":    baseDomain,
-			"dashboard_host": dashboardHost,
-			"acme_disabled":  acmeDisabled,
-			"theme_name":     themeName,
-			"theme_css":      themeCSS,
-		} {
+		for key, value := range updates {
 			if _, err := tx.Exec(
 				`INSERT INTO server_config (key, value) VALUES (?, ?)
 				 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
@@ -2697,18 +2710,20 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 500, "db write failed: "+err.Error())
 			return
 		}
-		s.startACMEListener()
-		if err := s.ensureGlobalProxy(); err != nil {
-			_ = s.writeServerConfig(previous)
-			httpError(w, 500, "failed to refresh global proxy: "+err.Error())
-			return
+		if proxyChanged {
+			s.startACMEListener()
+			if err := s.ensureGlobalProxy(); err != nil {
+				_ = s.writeServerConfig(previous)
+				httpError(w, 500, "failed to refresh global proxy: "+err.Error())
+				return
+			}
 		}
 		writeJSON(w, 200, map[string]string{
-			"base_domain":    baseDomain,
-			"dashboard_host": dashboardHost,
-			"acme_disabled":  acmeDisabled,
-			"theme_name":     themeName,
-			"theme_css":      themeCSS,
+			"base_domain":    s.serverConfigGet("base_domain"),
+			"dashboard_host": s.serverConfigGet("dashboard_host"),
+			"acme_disabled":  s.serverConfigGet("acme_disabled"),
+			"theme_name":     s.serverConfigGet("theme_name"),
+			"theme_css":      s.serverConfigGet("theme_css"),
 		})
 	default:
 		httpError(w, 405, "method not allowed")
