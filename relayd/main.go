@@ -2942,7 +2942,7 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT app, env, branch, COALESCE(engine,''), mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), repo_url, COALESCE(stopped,0)
+		`SELECT app, env, branch, COALESCE(engine,''), mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), repo_url, COALESCE(stopped,0), COALESCE(cpu_limit,''), COALESCE(mem_limit,''), COALESCE(resource_mode,'')
 		FROM app_state ORDER BY app, env, branch`,
 	)
 	if err != nil {
@@ -2980,6 +2980,9 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 		RepoURL              string  `json:"repo_url"`
 		Stopped              bool    `json:"stopped,omitempty"`
 		AccessRole           string  `json:"access_role,omitempty"`
+		CPULimit             string  `json:"cpu_limit,omitempty"`
+		MemLimit             string  `json:"mem_limit,omitempty"`
+		ResourceMode         string  `json:"resource_mode,omitempty"`
 	}
 
 	type ProjectInfo struct {
@@ -2992,7 +2995,7 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var pe ProjectEnv
 		if err := rows.Scan(&pe.App, &pe.Env, &pe.Branch, &pe.Engine, &pe.Mode,
-			&pe.HostPort, &pe.HostPortExplicit, &pe.ServicePort, &pe.PublicHost, &pe.ActiveSlot, &pe.StandbySlot, &pe.DrainUntil, &pe.TrafficMode, &pe.AccessPolicy, &pe.IPAllowlist, &pe.ExpiresAt, &pe.WebhookSecret, &pe.NotificationWebhooks, &pe.TrafficSplitPercent, &pe.RolloutMinRequests, &pe.RolloutErrorPercent, &pe.RolloutAssessSeconds, &pe.RolloutStartedAt, &pe.RolloutDeployID, &pe.RolloutStatus, &pe.RepoURL, &pe.Stopped); err != nil {
+			&pe.HostPort, &pe.HostPortExplicit, &pe.ServicePort, &pe.PublicHost, &pe.ActiveSlot, &pe.StandbySlot, &pe.DrainUntil, &pe.TrafficMode, &pe.AccessPolicy, &pe.IPAllowlist, &pe.ExpiresAt, &pe.WebhookSecret, &pe.NotificationWebhooks, &pe.TrafficSplitPercent, &pe.RolloutMinRequests, &pe.RolloutErrorPercent, &pe.RolloutAssessSeconds, &pe.RolloutStartedAt, &pe.RolloutDeployID, &pe.RolloutStatus, &pe.RepoURL, &pe.Stopped, &pe.CPULimit, &pe.MemLimit, &pe.ResourceMode); err != nil {
 			continue
 		}
 		pe.Engine = firstNonEmptyEngine(pe.Engine)
