@@ -19,6 +19,10 @@ interface TopbarProps {
   refreshing: boolean;
   onToggleSidebar?: () => void;
   onCreateProject?: () => void;
+  isOwner?: boolean;
+  onAdminClick?: () => void;
+  onAppearanceClick?: () => void;
+  activeTab?: string;
 }
 
 export function Topbar({
@@ -32,6 +36,10 @@ export function Topbar({
   refreshing,
   onToggleSidebar,
   onCreateProject,
+  isOwner,
+  onAdminClick,
+  onAppearanceClick,
+  activeTab,
 }: TopbarProps) {
   const initials = currentUser?.username
     ? currentUser.username.slice(0, 2).toUpperCase()
@@ -99,6 +107,46 @@ export function Topbar({
       >
         {refreshing ? "Refreshing…" : "Refresh"}
       </button>
+
+      {/* Appearance */}
+      {onAppearanceClick && (
+        <button
+          type="button"
+          onClick={onAppearanceClick}
+          title="Appearance"
+          className={cn(
+            "p-1.5 rounded transition-colors",
+            activeTab === "appearance"
+              ? "text-white bg-relay-accent/20 border border-relay-accent/40"
+              : "text-white/50 hover:text-white hover:bg-white/[0.06]"
+          )}
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+            <line x1="2" y1="12" x2="22" y2="12"/>
+          </svg>
+        </button>
+      )}
+
+      {/* Admin */}
+      {isOwner && onAdminClick && (
+        <button
+          type="button"
+          onClick={onAdminClick}
+          title="Server admin"
+          className={cn(
+            "p-1.5 rounded transition-colors",
+            activeTab === "admin"
+              ? "text-white bg-relay-accent/20 border border-relay-accent/40"
+              : "text-white/50 hover:text-white hover:bg-white/[0.06]"
+          )}
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+        </button>
+      )}
 
       {/* User */}
       {currentUser && (

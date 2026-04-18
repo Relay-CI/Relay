@@ -288,6 +288,9 @@ type AppState struct {
 	RolloutDeployID      string    `json:"rollout_deploy_id,omitempty"`
 	RolloutStatus        string    `json:"rollout_status,omitempty"`
 	Stopped              bool      `json:"stopped,omitempty"`
+	CPULimit             string    `json:"cpu_limit,omitempty"`
+	MemLimit             string    `json:"mem_limit,omitempty"`
+	ResourceMode         string    `json:"resource_mode,omitempty"`
 }
 
 // ---------------------- Multi-service / Project config ----------------------
@@ -489,6 +492,8 @@ type ContainerSpec struct {
 	PortBindings  []string // "hostSpec:containerPort" e.g. "127.0.0.1::3000"
 	HealthArgs    []string // pre-computed --health-* flag pairs (from healthArgs())
 	Command       []string // optional command override
+	CPULimit      string   // docker --cpus value e.g. "0.5"
+	MemLimit      string   // docker --memory value e.g. "512m"
 }
 
 // DockerRuntime implements ContainerRuntime by calling the local Docker CLI.
@@ -513,6 +518,12 @@ func (r *DockerRuntime) RunDetached(spec ContainerSpec) error {
 	}
 	for _, p := range spec.PortBindings {
 		args = append(args, "-p", p)
+	}
+	if spec.CPULimit != "" {
+		args = append(args, "--cpus="+spec.CPULimit)
+	}
+	if spec.MemLimit != "" {
+		args = append(args, "--memory="+spec.MemLimit)
 	}
 	args = append(args, spec.HealthArgs...)
 	args = append(args, spec.Image)
@@ -6369,6 +6380,9 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 			RolloutMinRequests   *int      `json:"rollout_min_requests"`
 			RolloutErrorPercent  *float64  `json:"rollout_error_percent"`
 			RolloutAssessSeconds *int      `json:"rollout_assess_seconds"`
+			CPULimit             *string   `json:"cpu_limit"`
+			MemLimit             *string   `json:"mem_limit"`
+			ResourceMode         *string   `json:"resource_mode"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httpError(w, 400, "invalid json")
@@ -6497,6 +6511,20 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			st.RolloutAssessSeconds = *body.RolloutAssessSeconds
+		}
+		if body.CPULimit != nil {
+			st.CPULimit = strings.TrimSpace(*body.CPULimit)
+		}
+		if body.MemLimit != nil {
+			st.MemLimit = strings.TrimSpace(*body.MemLimit)
+		}
+		if body.ResourceMode != nil {
+			mode := strings.TrimSpace(*body.ResourceMode)
+			if mode != "" && mode != "manual" && mode != "auto" {
+				httpError(w, 400, "resource_mode must be manual or auto")
+				return
+			}
+			st.ResourceMode = mode
 		}
 		if normalizeAccessPolicy(st.AccessPolicy) == AccessPolicyIPAllowlist && strings.TrimSpace(st.IPAllowlist) == "" {
 			httpError(w, 400, "ip_allowlist is required when access_policy is ip-allowlist")
@@ -8344,6 +8372,10 @@ func (s *Server) runSlotContainerWithRuntime(runtime ContainerRuntime, log func(
 		Env:           envPairs,
 		ExtraHosts:    s.serviceHostAliasesForRuntime(runtime, app, env, branch),
 		PortBindings:  []string{fmt.Sprintf("127.0.0.1::%d", firstNonZero(servicePort, 3000))},
+	}
+	if st, err := s.getAppState(app, env, branch); err == nil && st != nil && st.ResourceMode != "auto" {
+		spec.CPULimit = st.CPULimit
+		spec.MemLimit = st.MemLimit
 	}
 	if log != nil {
 		log("runtime run candidate: %s on %s", containerName, networkName)

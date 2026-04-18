@@ -24,7 +24,6 @@ interface SelectedEnvWithMeta extends EnvInfo {
 interface SidebarProps {
   activeTab: string;
   onTabChange: (tab: string) => void;
-  isOwner: boolean;
   isDeployer: boolean;
   selectedProject: NormalizedProject | null;
   selectedEnv: SelectedEnvWithMeta | null;
@@ -58,17 +57,8 @@ const NAV_ITEMS = [
   { id: "analytics", label: "Analytics", icon: (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
   )},
-];
-
-const OWNER_ITEMS = [
-  { id: "server", label: "Server Settings", icon: (
+  { id: "resources", label: "Resources", icon: (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
-  )},
-  { id: "users", label: "Users", icon: (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-  )},
-  { id: "audit", label: "Audit Log", icon: (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
   )},
 ];
 
@@ -153,7 +143,6 @@ function LaneDropdown({ envOptions, selectedEnvKey, onEnvChange }: LaneDropdownP
 export function Sidebar({
   activeTab,
   onTabChange,
-  isOwner,
   isDeployer,
   selectedProject,
   selectedEnv,
@@ -234,25 +223,6 @@ export function Sidebar({
             </button>
           ))}
         </nav>
-        {isOwner && (
-          <>
-            <div className="nav-section-divider" />
-            <div className="text-[10px] uppercase tracking-widest text-white/25 px-2 mb-1 mt-1">Admin</div>
-            <nav className="flex flex-col gap-0.5">
-              {OWNER_ITEMS.map(({ id, label, icon }) => (
-                <button
-                  key={id}
-                  type="button"
-                  onClick={() => { onTabChange(id); onClose(); }}
-                  className={`flex items-center gap-2 px-2 py-1.5 rounded text-sm text-white/60 hover:text-white hover:bg-white/[0.06] transition-colors w-full text-left ${activeTab === id ? "text-white bg-relay-accent/15 border-l-2 border-relay-accent pl-[6px]" : ""}`}
-                >
-                  <span className="shrink-0 text-inherit">{icon}</span>
-                  <span>{label}</span>
-                </button>
-              ))}
-            </nav>
-          </>
-        )}
       </div>
 
       {/* Lane selector */}

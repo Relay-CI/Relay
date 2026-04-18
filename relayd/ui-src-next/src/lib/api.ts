@@ -171,6 +171,9 @@ export interface EnvInfo {
   rollout_deploy_id?: string;
   rollout_status?: string;
   stopped?: boolean;
+  cpu_limit?: string;
+  mem_limit?: string;
+  resource_mode?: "manual" | "auto";
   active_slot?: string;
   standby_slot?: string;
   drain_until?: number;
@@ -314,6 +317,9 @@ export interface AppConfig {
   rollout_started_at?: number;
   rollout_deploy_id?: string;
   rollout_status?: string;
+  cpu_limit?: string;
+  mem_limit?: string;
+  resource_mode?: "manual" | "auto";
 }
 
 export async function getAppConfig(target: AppTarget): Promise<AppConfig> {

@@ -12,9 +12,9 @@ import { BuildLogsPage } from "@/components/pages/build-logs";
 import { RuntimeLogsPage } from "@/components/pages/runtime-logs";
 import { SettingsPage } from "@/components/pages/settings";
 import { AnalyticsPage } from "@/components/pages/analytics";
-import { ServerSettingsPage } from "@/components/pages/server-settings";
-import { UsersPage } from "@/components/pages/users";
-import { AuditPage } from "@/components/pages/audit";
+import { ResourcesPage } from "@/components/pages/resources";
+import { AppearancePage } from "@/components/pages/appearance";
+import { AdminPanel } from "@/components/pages/admin-panel";
 import { LanesPage } from "@/components/pages/lanes";
 import { DeployDetailDialog } from "@/components/deploy-detail-dialog";
 import {
@@ -307,12 +307,18 @@ export default function DashboardShell() {
         );
       case "analytics":
         return <AnalyticsPage selectedEnv={selectedEnv} />;
-      case "server":
-        return isOwner ? <ServerSettingsPage currentUser={auth.user} /> : null;
-      case "users":
-        return isOwner ? <UsersPage currentUser={auth.user} /> : null;
-      case "audit":
-        return isOwner ? <AuditPage /> : null;
+      case "resources":
+        return (
+          <ResourcesPage
+            selectedEnv={selectedEnv}
+            project={selectedProject}
+            onUpdated={refreshDashboard}
+          />
+        );
+      case "appearance":
+        return <AppearancePage currentUser={auth.user} />;
+      case "admin":
+        return isOwner ? <AdminPanel currentUser={auth.user} /> : null;
       default:
         return null;
     }
@@ -344,13 +350,16 @@ export default function DashboardShell() {
         refreshing={refreshing}
         onToggleSidebar={() => setSidebarOpen((v) => !v)}
         onCreateProject={() => setCreateProjectOpen(true)}
+        isOwner={isOwner}
+        onAdminClick={() => setActiveTab("admin")}
+        onAppearanceClick={() => setActiveTab("appearance")}
+        activeTab={activeTab}
       />
 
       <div className="flex flex-1 min-h-0 overflow-hidden">
         <Sidebar
           activeTab={activeTab}
           onTabChange={setActiveTab}
-          isOwner={isOwner}
           isDeployer={isDeployer}
           selectedProject={selectedProject}
           selectedEnv={selectedEnv}
