@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
-import { getServerConfig, saveServerConfig, getVersion, type VersionInfo } from "@/lib/api";
+import { getServerConfig, saveServerConfig, getVersion, type DoctorReport, type VersionInfo } from "@/lib/api";
 
 type CurrentUser = { username: string; role: string } | null;
 
@@ -18,6 +18,7 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
   const [baseDomain, setBaseDomain] = useState("");
   const [dashboardHost, setDashboardHost] = useState("");
   const [acmeDisabled, setAcmeDisabled] = useState(false);
+  const [doctor, setDoctor] = useState<DoctorReport | null>(null);
   const [draft, setDraft] = useState({ baseDomain: "", dashboardHost: "", acmeDisabled: false });
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ tone: "ok" | "danger"; text: string } | null>(null);
@@ -29,6 +30,7 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
         const bd = data?.base_domain ?? "";
         const dh = data?.dashboard_host ?? "";
         const ad = data?.acme_disabled === "true";
+        setDoctor((data?.doctor as DoctorReport | undefined) ?? null);
         setBaseDomain(bd); setDashboardHost(dh); setAcmeDisabled(ad);
         setDraft({ baseDomain: bd, dashboardHost: dh, acmeDisabled: ad });
       }).catch(() => {});
@@ -41,6 +43,7 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
 
   const dirty = draft.baseDomain !== baseDomain || draft.dashboardHost !== dashboardHost || draft.acmeDisabled !== acmeDisabled;
   const exampleHost = draft.baseDomain ? `myapp-main.${draft.baseDomain}` : "myapp-main.example.com";
+  const checks = doctor?.checks ?? {};
 
   async function save() {
     setBusy(true); setNotice(null);
@@ -53,6 +56,7 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
       const bd = saved?.base_domain ?? "";
       const dh = saved?.dashboard_host ?? "";
       const ad = saved?.acme_disabled === "true";
+      setDoctor((saved?.doctor as DoctorReport | undefined) ?? null);
       setBaseDomain(bd); setDashboardHost(dh); setAcmeDisabled(ad);
       setDraft({ baseDomain: bd, dashboardHost: dh, acmeDisabled: ad });
       setNotice({ tone: "ok", text: "Saved. Caddy will route the dashboard host back to Relay, and new deploys without an explicit public host will auto-assign a subdomain." });
@@ -144,6 +148,60 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
         </button>
       </div>
 
+      <div className="bg-white/[0.02] border border-white/[0.06] rounded-xl p-5 space-y-4">
+        <div>
+          <div className="eyebrow mb-0.5">Guided setup</div>
+          <h2 className="text-base font-semibold text-white">DNS / TLS rollout</h2>
+          <p className="text-xs text-white/40 mt-1">
+            Save the host values above, then use these checks to verify DNS, HTTPS, Docker, and the helper listeners.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-[1.15fr_1fr] gap-4">
+          <div className="space-y-3">
+            <GuideStep
+              index="1"
+              title="Choose Relay hostnames"
+              detail={`Use Base Domain for managed app hosts like ${exampleHost}. Use Dashboard Host for Relay itself, for example admin.${draft.baseDomain || "example.com"}.`}
+            />
+            <GuideStep
+              index="2"
+              title="Create DNS records"
+              detail="Point the dashboard host at this server. If you want managed app URLs, point a wildcard record (*.yourdomain.com) at the same machine too."
+            />
+            <GuideStep
+              index="3"
+              title="Allow ACME + TLS traffic"
+              detail="Ports 80 and 443 must reach this machine. Keep the ACME listener enabled unless another proxy or certificate manager already owns port 80."
+            />
+            <GuideStep
+              index="4"
+              title="Wait for the green checks"
+              detail="After saving, Relay refreshes the Caddy proxy and probes the setup again. DNS may lag for a few minutes before HTTPS starts passing."
+            />
+          </div>
+
+          <div className="space-y-2.5">
+            <CheckRow label="Data dir" check={checks.data_dir} />
+            <CheckRow label="Secrets key" check={checks.secret_key} />
+            <CheckRow label="Docker" check={checks.docker} />
+            <CheckRow label="Socket" check={checks.socket} />
+            <CheckRow label="ACME" check={checks.acme} />
+            <CheckRow label="Dashboard host" check={checks.dashboard_host} />
+            <CheckRow label="Managed subdomains" check={checks.base_domain} />
+            <CheckRow label="Caddy proxy" check={checks.caddy_proxy} />
+            <CheckRow label="Webhook URL" check={checks.webhook} />
+          </div>
+        </div>
+
+        {doctor?.managed_example_url && (
+          <div className="bg-white/[0.03] border border-white/[0.06] rounded-lg px-4 py-3">
+            <div className="text-xs text-white/35 mb-1">Managed example URL</div>
+            <div className="text-sm text-white font-mono break-all">{doctor.managed_example_url}</div>
+          </div>
+        )}
+      </div>
+
       {/* How it works */}
       <div className="bg-white/[0.02] border border-white/[0.06] rounded-xl p-5">
         <div className="eyebrow mb-1">How it works</div>
@@ -196,5 +254,47 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <div className="text-xs text-white/40 mb-1.5">{label}</div>
       {children}
     </label>
+  );
+}
+
+function GuideStep({ index, title, detail }: { index: string; title: string; detail: string }) {
+  return (
+    <div className="flex gap-3">
+      <div className="w-6 h-6 shrink-0 rounded-full bg-white/[0.06] border border-white/[0.1] text-xs text-white/60 flex items-center justify-center">
+        {index}
+      </div>
+      <div>
+        <div className="text-sm font-medium text-white">{title}</div>
+        <div className="text-xs text-white/40 mt-0.5 leading-relaxed">{detail}</div>
+      </div>
+    </div>
+  );
+}
+
+function CheckRow({ label, check }: { label: string; check?: DoctorReport["checks"][string] }) {
+  const tone = check?.status ?? "info";
+  const toneClass =
+    tone === "ok"
+      ? "bg-emerald-500/10 border-emerald-500/25 text-emerald-400"
+      : tone === "warn"
+        ? "bg-amber-500/10 border-amber-500/25 text-amber-400"
+        : tone === "error"
+          ? "bg-red-500/10 border-red-500/25 text-red-400"
+          : "bg-white/[0.04] border-white/[0.08] text-white/50";
+
+  return (
+    <div className="border border-white/[0.06] rounded-lg px-3 py-2.5">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-medium text-white">{label}</div>
+          <div className="text-xs text-white/40 mt-0.5">{check?.summary ?? "Waiting for diagnostics"}</div>
+        </div>
+        <span className={cn("text-[10px] uppercase tracking-wider font-semibold px-2 py-0.5 rounded border", toneClass)}>
+          {tone}
+        </span>
+      </div>
+      {check?.detail && <div className="text-[11px] text-white/35 mt-2 break-all">{check.detail}</div>}
+      {check?.hint && <div className="text-[11px] text-white/28 mt-1">{check.hint}</div>}
+    </div>
   );
 }

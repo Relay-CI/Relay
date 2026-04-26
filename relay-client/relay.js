@@ -54,6 +54,8 @@ const {
 const {
   loadRelayConfig,
   saveRelayConfig,
+  loadRelayState,
+  saveRelayState,
   getWorkspaceVersion,
   setWorkspaceVersion,
 } = require("./config");
@@ -338,6 +340,74 @@ async function readJSONIfExists(p) {
   } catch {
     return null;
   }
+}
+
+function normalizeWorkspaceKey(rootDir) {
+  return path.resolve(rootDir);
+}
+
+function workspaceManifestCacheKey(rootDir, ignoreKey) {
+  return `${normalizeWorkspaceKey(rootDir)}|${ignoreKey || "default"}`;
+}
+
+function loadManifestCache(rootDir, ignoreKey) {
+  const state = loadRelayState();
+  const key = workspaceManifestCacheKey(rootDir, ignoreKey);
+  return state.manifest_cache?.[key]?.files || {};
+}
+
+function saveManifestCache(rootDir, ignoreKey, files) {
+  const state = loadRelayState();
+  if (!state.manifest_cache) state.manifest_cache = {};
+  const key = workspaceManifestCacheKey(rootDir, ignoreKey);
+  state.manifest_cache[key] = {
+    saved_at: Date.now(),
+    files,
+  };
+  saveRelayState(state);
+}
+
+function formatDoctorStatus(status) {
+  const normalized = String(status || "info").toLowerCase();
+  if (normalized === "ok") return `${c.green}ok${c.reset}`;
+  if (normalized === "warn") return `${c.yellow}warn${c.reset}`;
+  if (normalized === "error") return `${c.red}error${c.reset}`;
+  return `${c.dim}info${c.reset}`;
+}
+
+function printDoctorCheck(label, check) {
+  const summary = check?.summary || "";
+  console.log(`  ${label.padEnd(18)} ${formatDoctorStatus(check?.status)}  ${summary}`);
+  if (check?.detail) {
+    console.log(`  ${"".padEnd(18)} ${c.dim}${check.detail}${c.reset}`);
+  }
+  if (check?.hint) {
+    console.log(`  ${"".padEnd(18)} ${c.dim}${check.hint}${c.reset}`);
+  }
+}
+
+function isLocalTransport(transport) {
+  if (!transport) return false;
+  if (transport.kind === "socket") return true;
+  try {
+    const u = new URL(transport.baseUrl);
+    const host = String(u.hostname || "").toLowerCase();
+    return host === "127.0.0.1" || host === "localhost" || host === "::1";
+  } catch {
+    return false;
+  }
+}
+
+function commandOutput(bin, args = []) {
+  const out = spawnSync(bin, args, { encoding: "utf8" });
+  if (out.error) return { ok: false, text: out.error.message };
+  if (out.status !== 0) {
+    return {
+      ok: false,
+      text: String(out.stderr || out.stdout || `exit ${out.status}`).trim(),
+    };
+  }
+  return { ok: true, text: String(out.stdout || "").trim() };
 }
 
 // ─── Interactive setup wizard ─────────────────────────────────────────────────
@@ -1172,7 +1242,7 @@ function streamLogsTransport(transport, deployId) {
 
 // â”€â”€â”€ File scanning helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-function shouldIgnore(rel) {
+function defaultIgnore(rel) {
   const top = rel.split("/")[0];
   const base = path.posix.basename(rel);
   const ignoreTop = new Set([
@@ -1193,23 +1263,102 @@ function shouldIgnore(rel) {
   if (base.startsWith(".env.")) {
     const suffix = base.slice(5).toLowerCase();
     const keep = new Set(["example", "sample", "template", "defaults"]);
-    if (!keep.has(suffix) && !suffix.endsWith(".example") && !suffix.endsWith(".sample") && !suffix.endsWith(".template")) {
+    if (
+      !keep.has(suffix) &&
+      !suffix.endsWith(".example") &&
+      !suffix.endsWith(".sample") &&
+      !suffix.endsWith(".template")
+    ) {
       return true;
     }
   }
-  if (rel === ".relay.json" || rel === ".relayrc" || rel === ".relayrc.json")
+  if (rel === ".relay.json" || rel === ".relayrc" || rel === ".relayrc.json") {
     return true;
+  }
   return false;
 }
 
-async function walkFiles(rootDir) {
+function globToRegExp(pattern, { anchored = false, dirOnly = false, basenameOnly = false } = {}) {
+  const normalized = pattern.replace(/\\/g, "/");
+  let out = "";
+  for (let i = 0; i < normalized.length; i++) {
+    const ch = normalized[i];
+    if (ch === "*") {
+      if (normalized[i + 1] === "*") {
+        out += ".*";
+        i++;
+      } else {
+        out += "[^/]*";
+      }
+      continue;
+    }
+    if (ch === "?") {
+      out += "[^/]";
+      continue;
+    }
+    if ("\\.[]{}()+-^$|".includes(ch)) {
+      out += `\\${ch}`;
+      continue;
+    }
+    out += ch;
+  }
+
+  let prefix = anchored ? "^" : basenameOnly ? "(^|.*/)" : "^(?:.*/)?";
+  let suffix = dirOnly ? "(?:/.*)?$" : "$";
+  return new RegExp(`${prefix}${out}${suffix}`);
+}
+
+async function loadRelayIgnore(rootDir) {
+  const ignorePath = path.join(rootDir, ".relayignore");
+  let raw = "";
+  try {
+    raw = await fsp.readFile(ignorePath, "utf8");
+  } catch {
+    return { rules: [], cacheKey: "default" };
+  }
+
+  const rules = [];
+  for (const rawLine of raw.split(/\r?\n/)) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const negated = trimmed.startsWith("!");
+    let pattern = negated ? trimmed.slice(1).trim() : trimmed;
+    if (!pattern) continue;
+    const dirOnly = pattern.endsWith("/");
+    if (dirOnly) pattern = pattern.slice(0, -1);
+    const anchored = pattern.startsWith("/");
+    if (anchored) pattern = pattern.slice(1);
+    const basenameOnly = !pattern.includes("/");
+    rules.push({
+      negated,
+      regex: globToRegExp(pattern, { anchored, dirOnly, basenameOnly }),
+    });
+  }
+
+  const stat = await fsp.stat(ignorePath);
+  return {
+    rules,
+    cacheKey: `${Math.floor(stat.mtimeMs)}:${Buffer.byteLength(raw)}`,
+  };
+}
+
+function shouldIgnore(rel, relayIgnore) {
+  let ignored = defaultIgnore(rel);
+  for (const rule of relayIgnore.rules) {
+    if (!rule.regex.test(rel)) continue;
+    ignored = !rule.negated;
+  }
+  return ignored;
+}
+
+async function walkFiles(rootDir, relayIgnore) {
   const files = [];
   async function walk(dir) {
     const ents = await fsp.readdir(dir, { withFileTypes: true });
     for (const e of ents) {
       const abs = path.join(dir, e.name);
       const rel = path.relative(rootDir, abs).split(path.sep).join("/");
-      if (rel === "" || shouldIgnore(rel)) {
+      if (rel === "" || shouldIgnore(rel, relayIgnore)) {
         if (e.isDirectory()) continue;
         continue;
       }
@@ -1232,30 +1381,46 @@ async function sha256File(absPath) {
 }
 
 async function buildManifest(rootDir) {
-  const list = await walkFiles(rootDir);
-  const out = [];
+  const relayIgnore = await loadRelayIgnore(rootDir);
+  const list = await walkFiles(rootDir, relayIgnore);
+  const cache = loadManifestCache(rootDir, relayIgnore.cacheKey);
+  const nextCache = {};
+  const manifest = [];
+  let reused = 0;
+  let hashed = 0;
   for (const f of list) {
     const st = await fsp.stat(f.abs);
-    const sh = await sha256File(f.abs);
-    out.push({
+    const mtime = st.mtimeMs
+      ? Math.floor(st.mtimeMs)
+      : Math.floor(st.mtime.getTime());
+    let sh = "";
+    const cached = cache[f.rel];
+    if (cached && cached.size === st.size && cached.mtime === mtime && cached.sha) {
+      sh = cached.sha;
+      reused++;
+    } else {
+      sh = await sha256File(f.abs);
+      hashed++;
+    }
+    nextCache[f.rel] = { size: st.size, mtime, sha: sh };
+    manifest.push({
       Path: f.rel,
       Size: st.size,
-      Mtime: st.mtimeMs
-        ? Math.floor(st.mtimeMs)
-        : Math.floor(st.mtime.getTime()),
+      Mtime: mtime,
       Sha256: sh,
       HashAlgo: "sha256",
       Hash: sh,
     });
   }
-  return out;
+  saveManifestCache(rootDir, relayIgnore.cacheKey, nextCache);
+  return { manifest, reused, hashed, ignoreRules: relayIgnore.rules.length };
 }
 
 // â”€â”€â”€ Usage / help â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function printHelp() {
   console.log(`
-${c.bold}relay${c.reset} â€” Relay deploy CLI
+${c.bold}relay${c.reset} - Relay deploy CLI
 
 ${c.bold}USAGE${c.reset}
   relay <command> [flags]
@@ -1306,6 +1471,7 @@ ${c.bold}COMMANDS${c.reset}
   ${c.cyan}plugin remove${c.reset}  <name>        Remove a buildpack plugin
 
   ${c.cyan}version${c.reset}                      Show relay, relayd, and station versions
+  ${c.cyan}doctor${c.reset}                       Check client, agent, Docker, domains, and TLS
 
   ${c.cyan}agent install${c.reset}                Download relayd + station binaries for this platform
     --version <v>            Pin a release version (default: latest)
@@ -1419,6 +1585,201 @@ async function main() {
   }
 
   // â”€â”€ init â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  if (cmd === "doctor") {
+    const installDir = path.resolve(
+      args.dir ||
+        process.env.RELAY_BIN_DIR ||
+        path.join(os.homedir(), ".relay", "bin"),
+    );
+    const ext = process.platform === "win32" ? ".exe" : "";
+    const relaydPath = path.join(installDir, `relayd${ext}`);
+    const stationPath = path.join(installDir, `station${ext}`);
+
+    let transport = null;
+    let transportError = "";
+    try {
+      transport = resolveTransport(args);
+    } catch (e) {
+      transportError = e.message;
+    }
+
+    console.log(`\n${c.bold}Relay Doctor${c.reset}\n`);
+    printDoctorCheck(
+      "relayd binary",
+      fs.existsSync(relaydPath)
+        ? { status: "ok", summary: "installed", detail: relaydPath }
+        : {
+            status: "warn",
+            summary: "not installed",
+            detail: relaydPath,
+            hint: "Run relay agent install on this machine if it should host relayd.",
+          },
+    );
+    printDoctorCheck(
+      "station binary",
+      fs.existsSync(stationPath)
+        ? { status: "ok", summary: "installed", detail: stationPath }
+        : { status: "info", summary: "not installed", detail: stationPath },
+    );
+
+    if (transport?.kind === "socket") {
+      try {
+        fs.accessSync(
+          transport.socketPath,
+          fs.constants.R_OK | fs.constants.W_OK,
+        );
+        printDoctorCheck("local socket", {
+          status: "ok",
+          summary: "read/write access confirmed",
+          detail: transport.socketPath,
+        });
+      } catch (e) {
+        printDoctorCheck("local socket", {
+          status: "error",
+          summary: "socket is not accessible",
+          detail: `${transport.socketPath}: ${e.message}`,
+          hint: "Check RELAY_SOCKET, relayd startup, and filesystem permissions.",
+        });
+      }
+    } else if (transportError) {
+      printDoctorCheck("transport", {
+        status: "warn",
+        summary: "transport is not configured",
+        detail: transportError,
+        hint: "Run relay init or pass --url/--token or --socket before using relay doctor against a server.",
+      });
+    }
+
+    if (transport && isLocalTransport(transport)) {
+      const docker = commandOutput("docker", [
+        "version",
+        "--format",
+        "{{.Server.Version}}",
+      ]);
+      printDoctorCheck(
+        "local docker",
+        docker.ok
+          ? { status: "ok", summary: "daemon reachable", detail: docker.text }
+          : {
+              status: "warn",
+              summary: "daemon unavailable",
+              detail: docker.text,
+              hint: "If this machine runs relayd, start Docker and confirm the current user can access it.",
+            },
+      );
+    }
+
+    if (!transport) {
+      console.log("");
+      process.exit(transportError ? 1 : 0);
+    }
+
+    try {
+      const health = await rawRequest(transport, "GET", "/health");
+      printDoctorCheck(
+        "agent health",
+        health.status < 400
+          ? {
+              status: "ok",
+              summary: "agent responded",
+              detail: `HTTP ${health.status}`,
+            }
+          : {
+              status: "error",
+              summary: "agent health failed",
+              detail: `HTTP ${health.status}`,
+              hint: "Confirm relayd is running and the transport points to the right host or socket.",
+            },
+      );
+    } catch (e) {
+      printDoctorCheck("agent health", {
+        status: "error",
+        summary: "agent is unreachable",
+        detail: e.message,
+        hint: "Confirm relayd is running, the socket exists, or the URL/token are correct.",
+      });
+      console.log("");
+      process.exit(1);
+    }
+
+    try {
+      const version = await apiJSON(transport, "GET", "/api/version");
+      if (version?.version) {
+        printDoctorCheck("server version", {
+          status: "ok",
+          summary: version.version,
+        });
+      }
+    } catch (e) {
+      printDoctorCheck("server version", {
+        status: "warn",
+        summary: "could not load",
+        detail: e.message,
+      });
+    }
+
+    try {
+      const doctor = await apiJSON(transport, "GET", "/api/doctor");
+      if (doctor?.http_addr) {
+        console.log(`\n${c.bold}Server Surface${c.reset}`);
+        console.log(
+          `  http addr           ${c.dim}${doctor.http_addr}${c.reset}`,
+        );
+        if (doctor.socket_path)
+          console.log(
+            `  socket path         ${c.dim}${doctor.socket_path}${c.reset}`,
+          );
+        if (doctor.base_domain)
+          console.log(
+            `  base domain         ${c.dim}${doctor.base_domain}${c.reset}`,
+          );
+        if (doctor.dashboard_host)
+          console.log(
+            `  dashboard host      ${c.dim}${doctor.dashboard_host}${c.reset}`,
+          );
+        if (doctor.managed_example_url)
+          console.log(
+            `  managed URL         ${c.dim}${doctor.managed_example_url}${c.reset}`,
+          );
+        if (doctor.webhook_url)
+          console.log(
+            `  webhook URL         ${c.dim}${doctor.webhook_url}${c.reset}`,
+          );
+      }
+      if (doctor?.checks) {
+        console.log(`\n${c.bold}Server Checks${c.reset}`);
+        for (const key of [
+          "data_dir",
+          "secret_key",
+          "docker",
+          "socket",
+          "acme",
+          "dashboard_host",
+          "base_domain",
+          "caddy_proxy",
+          "webhook",
+        ]) {
+          if (doctor.checks[key]) {
+            printDoctorCheck(
+              key.replaceAll("_", " "),
+              doctor.checks[key],
+            );
+          }
+        }
+      }
+    } catch (e) {
+      printDoctorCheck("server doctor", {
+        status: "warn",
+        summary: "doctor endpoint unavailable",
+        detail: e.message,
+        hint: "Update relayd if this server is older than the new doctor endpoint.",
+      });
+    }
+
+    console.log("");
+    process.exit(0);
+  }
+
   if (cmd === "init") {
     const cfgPath = path.join(process.cwd(), ".relay.json");
     const hasFlags = args.url || args.socket || args.token || args.app;
@@ -2393,8 +2754,12 @@ async function main() {
 
   const manifestSpinner = createSpinner("hashing workspace");
   manifestSpinner.start();
-  const manifest = await buildManifest(rootDir);
-  manifestSpinner.stop(true, `files=${manifest.length}`);
+  const manifestBuild = await buildManifest(rootDir);
+  const manifest = manifestBuild.manifest;
+  manifestSpinner.stop(
+    true,
+    `files=${manifest.length} cached=${manifestBuild.reused} hashed=${manifestBuild.hashed}`,
+  );
 
   const planSpinner = createSpinner("diffing against agent workspace");
   planSpinner.start();

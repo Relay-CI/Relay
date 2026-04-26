@@ -115,12 +115,12 @@ function ResourceCard({
             onClick={() => setMode("auto")}
             className={cn("seg-btn flex-1 text-xs py-1.5", mode === "auto" && "seg-btn--active")}
           >
-            Auto-optimize
+            Automatic
           </button>
         </div>
         {mode === "auto" && (
           <p className="text-xs text-white/35 mt-2 leading-relaxed">
-            Relay monitors request rate and container load. When a lane sustains high CPU or memory pressure it removes the fixed limits, letting Docker allocate resources dynamically. Manual limits are ignored while auto mode is active.
+            Automatic mode currently runs the lane without fixed CPU or memory caps. Relay saves the manual values here, but it does not tune them dynamically yet.
           </p>
         )}
       </div>
@@ -242,7 +242,7 @@ export function ResourcesPage({ selectedEnv, project, onUpdated }: ResourcesPage
         <div className="eyebrow mb-0.5">Infrastructure</div>
         <h1 className="text-xl font-semibold text-white">Resource limits</h1>
         <p className="text-sm text-white/40 mt-1">
-          Configure CPU and memory limits per lane. Set manually or let Relay auto-optimize based on observed load.
+          Configure CPU and memory limits per lane. Use manual caps for predictable limits, or automatic mode to run the lane without fixed caps.
           Limits take effect on the next container start or deploy.
         </p>
       </div>
@@ -259,8 +259,8 @@ export function ResourcesPage({ selectedEnv, project, onUpdated }: ResourcesPage
             },
             {
               icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>,
-              title: "Auto-optimize",
-              detail: "Relay watches load metrics. Under sustained pressure it relaxes limits; at idle it can cap usage to protect co-located apps."
+              title: "Automatic",
+              detail: "Automatic mode currently means no fixed CPU or memory caps. It is useful when you want Docker to manage headroom instead of enforcing a hard ceiling."
             },
             {
               icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>,

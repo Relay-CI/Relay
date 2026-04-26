@@ -54,6 +54,7 @@ relay start / stop / restart       Control a running container
 relay secrets list/add/rm          Manage app secrets
 relay plugin list/install/remove   Manage server-side buildpack plugins
 relay version                      Show relay/relayd/station versions
+relay doctor                       Check agent connectivity, Docker, DNS, TLS, and socket state
 relay agent install [--version v]  Download relayd and the optional station runtime
 relay agent update                 Update relayd + station to latest release
 relay agent status                 Show installed/latest versions and outdated status
@@ -145,6 +146,20 @@ Shows component versions in one place:
 - binary-reported `relayd --version` and `station --version`
 - server-reported versions from `/api/version` when the agent is reachable
 
+### `doctor`
+
+Runs local and server-side checks for the common setup failures:
+
+- local agent binaries
+- local socket access when using `--socket`
+- local Docker reachability on same-machine installs
+- agent health and server version
+- server-side checks for data dir, secrets key, Docker, Caddy, ACME, DNS, TLS, and webhook URL
+
+```bash
+relay doctor
+```
+
 ## Flags
 
 | Flag             | Required | Example                                | Notes                                                   |
@@ -180,6 +195,8 @@ The CLI walks files under `--dir` and ignores common heavy/build output folders 
 - `node_modules`, `.git`, `.next`, `dist`, `.turbo`, `coverage`, `.relay`, `cache`, `bin`, `obj`, `target`
 
 It sends a manifest containing `{path, size, mtime, sha256}` and uploads only the files the agent requests.
+
+Add a project-level `.relayignore` file when you want to exclude extra local files or directories from sync. Relay also reuses cached file hashes when size and mtime are unchanged, so repeat deploys do not re-hash the entire workspace.
 
 ## Security notes
 

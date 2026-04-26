@@ -95,6 +95,7 @@ relay login                        Browser-based login → saves bearer token
 relay logout                       Clear saved session token
 relay plugin list/install/remove   Manage server-side buildpack plugins
 relay version                      Show relay/relayd/station versions
+relay doctor                       Check agent connectivity, Docker, DNS, TLS, and socket state
 relay agent install [--version v]  Download relayd + station binaries
 relay agent update                 Update relayd + station to latest release
 relay agent status                 Show installed/latest versions and outdated status

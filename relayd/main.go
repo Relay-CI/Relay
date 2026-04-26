@@ -679,7 +679,8 @@ type Server struct {
 	allowAllCORS          bool
 	enablePluginMutations bool
 
-	db *sql.DB
+	db          *sql.DB
+	analyticsDB *sql.DB
 
 	apiToken  string
 	secretKey []byte // 32-byte AES-256 key for encrypting secrets at rest; nil = no encryption
@@ -706,6 +707,7 @@ type Server struct {
 	acmeMu       sync.Mutex
 	acmeServer   *http.Server
 	acmeListener net.Listener
+	socketPath   string
 }
 
 // ---------------------- Config ----------------------
@@ -2627,16 +2629,230 @@ func (s *Server) acmeDisabled() bool {
 	return s.serverConfigGet("acme_disabled") == "true"
 }
 
+type doctorCheck struct {
+	Status  string `json:"status"`
+	Summary string `json:"summary"`
+	Detail  string `json:"detail,omitempty"`
+	Hint    string `json:"hint,omitempty"`
+}
+
+type doctorReport struct {
+	GeneratedAt       int64                  `json:"generated_at"`
+	HTTPAddr          string                 `json:"http_addr"`
+	SocketPath        string                 `json:"socket_path,omitempty"`
+	BaseDomain        string                 `json:"base_domain,omitempty"`
+	DashboardHost     string                 `json:"dashboard_host,omitempty"`
+	ManagedExampleURL string                 `json:"managed_example_url,omitempty"`
+	WebhookURL        string                 `json:"webhook_url,omitempty"`
+	Checks            map[string]doctorCheck `json:"checks"`
+}
+
+func doctorOK(summary string, detail ...string) doctorCheck {
+	check := doctorCheck{Status: "ok", Summary: summary}
+	if len(detail) > 0 {
+		check.Detail = detail[0]
+	}
+	return check
+}
+
+func doctorWarn(summary string, detail string, hint string) doctorCheck {
+	return doctorCheck{Status: "warn", Summary: summary, Detail: detail, Hint: hint}
+}
+
+func doctorError(summary string, detail string, hint string) doctorCheck {
+	return doctorCheck{Status: "error", Summary: summary, Detail: detail, Hint: hint}
+}
+
+func doctorInfo(summary string, detail string) doctorCheck {
+	return doctorCheck{Status: "info", Summary: summary, Detail: detail}
+}
+
+func ensureDirWritable(dir string) error {
+	if strings.TrimSpace(dir) == "" {
+		return errors.New("directory path is empty")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	probe := filepath.Join(dir, ".relay-doctor-write-test")
+	if err := os.WriteFile(probe, []byte("ok"), 0o600); err != nil {
+		return err
+	}
+	_ = os.Remove(probe)
+	return nil
+}
+
+func dockerServerVersion() (string, error) {
+	out, err := exec.Command("docker", "version", "--format", "{{.Server.Version}}").CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "", errors.New(msg)
+	}
+	version := strings.TrimSpace(string(out))
+	if version == "" {
+		return "", errors.New("docker returned an empty server version")
+	}
+	return version, nil
+}
+
+func resolveHostIPs(host string) ([]string, error) {
+	if strings.TrimSpace(host) == "" {
+		return nil, errors.New("host is empty")
+	}
+	ips, err := net.LookupHost(host)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		if strings.TrimSpace(ip) != "" {
+			filtered = append(filtered, ip)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil, errors.New("host resolved without IP records")
+	}
+	return filtered, nil
+}
+
+func httpsReachable(host string) error {
+	if strings.TrimSpace(host) == "" {
+		return errors.New("host is empty")
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get("https://" + host + "/health")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("HTTPS /health returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func webhookProbeURL(httpAddr string, dashboardHost string) string {
+	if host := strings.TrimSpace(dashboardHost); host != "" {
+		return "https://" + host + "/api/webhooks/github"
+	}
+	port := listenAddrPort(httpAddr)
+	if port == 0 || port == 80 {
+		return "http://127.0.0.1/api/webhooks/github"
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d/api/webhooks/github", port)
+}
+
+func (s *Server) buildDoctorReport() doctorReport {
+	baseDomain := s.serverBaseDomain()
+	dashboardHost := s.serverDashboardHost()
+	managedExampleURL := ""
+	if baseDomain != "" {
+		managedExampleURL = "https://" + fmt.Sprintf("relay-doctor-main.%s", baseDomain)
+	}
+	report := doctorReport{
+		GeneratedAt:       time.Now().UnixMilli(),
+		HTTPAddr:          s.httpAddr,
+		SocketPath:        s.socketPath,
+		BaseDomain:        baseDomain,
+		DashboardHost:     dashboardHost,
+		ManagedExampleURL: managedExampleURL,
+		WebhookURL:        webhookProbeURL(s.httpAddr, dashboardHost),
+		Checks:            map[string]doctorCheck{},
+	}
+
+	if err := ensureDirWritable(s.dataDir); err != nil {
+		report.Checks["data_dir"] = doctorError("Data directory is not writable", err.Error(), "Check ownership, permissions, and the configured RELAY_DATA_DIR path.")
+	} else {
+		report.Checks["data_dir"] = doctorOK("Data directory is writable", s.dataDir)
+	}
+
+	if s.secretKey == nil {
+		report.Checks["secret_key"] = doctorWarn("Secrets are not encrypted at rest", "RELAY_SECRET_KEY is not configured.", "Set RELAY_SECRET_KEY before production use.")
+	} else {
+		report.Checks["secret_key"] = doctorOK("Secrets encryption is enabled")
+	}
+
+	if version, err := dockerServerVersion(); err != nil {
+		report.Checks["docker"] = doctorError("Docker is unavailable", err.Error(), "Install Docker, start the daemon, and confirm the relayd user can talk to it.")
+	} else {
+		report.Checks["docker"] = doctorOK("Docker daemon is reachable", "server version "+version)
+	}
+
+	if s.socketPath == "" {
+		report.Checks["socket"] = doctorInfo("Unix socket is disabled", "Set RELAY_SOCKET or omit --no-socket to enable the local CLI transport.")
+	} else if fi, err := os.Stat(s.socketPath); err != nil {
+		report.Checks["socket"] = doctorWarn("Unix socket path is configured but not present", err.Error(), "Restart relayd or check RELAY_SOCKET.")
+	} else {
+		report.Checks["socket"] = doctorOK("Unix socket is present", fi.Mode().String())
+	}
+
+	if s.acmeDisabled() {
+		report.Checks["acme"] = doctorWarn("ACME helper listener is disabled", "Relay will not bind port 80 for HTTP-01 challenges.", "Leave it disabled only if another ACME/TLS layer already owns port 80.")
+	} else if s.acmeListener == nil {
+		report.Checks["acme"] = doctorWarn("ACME helper listener is not active", "Relay could not confirm a live port 80 listener.", "Ensure port 80 is open or let the Caddy proxy handle HTTP-01 challenges.")
+	} else {
+		report.Checks["acme"] = doctorOK("ACME helper listener is active", s.acmeListener.Addr().String())
+	}
+
+	if baseDomain == "" {
+		report.Checks["base_domain"] = doctorInfo("Managed base domain is not configured", "Set Base Domain if you want Relay to auto-assign app subdomains.")
+	} else {
+		testHost := "relay-doctor-main." + baseDomain
+		if ips, err := resolveHostIPs(testHost); err != nil {
+			report.Checks["base_domain"] = doctorWarn("Wildcard DNS could not be verified", err.Error(), "Point *.your-domain at this server before relying on managed subdomains.")
+		} else {
+			report.Checks["base_domain"] = doctorOK("Wildcard-style DNS resolves", strings.Join(ips, ", "))
+		}
+	}
+
+	if dashboardHost == "" {
+		report.Checks["dashboard_host"] = doctorInfo("Dashboard host is not configured", "Set Dashboard Host if you want Relay itself behind managed HTTPS.")
+	} else {
+		if ips, err := resolveHostIPs(dashboardHost); err != nil {
+			report.Checks["dashboard_host"] = doctorWarn("Dashboard host does not resolve yet", err.Error(), "Create an A or CNAME record for the dashboard host.")
+		} else if err := httpsReachable(dashboardHost); err != nil {
+			check := doctorWarn("Dashboard DNS resolves but HTTPS is not healthy yet", err.Error(), "Wait for Caddy to issue a certificate or check ports 80/443 and public routing.")
+			check.Detail += " | " + strings.Join(ips, ", ")
+			report.Checks["dashboard_host"] = check
+		} else {
+			report.Checks["dashboard_host"] = doctorOK("Dashboard host resolves and HTTPS is reachable", strings.Join(ips, ", "))
+		}
+	}
+
+	if baseDomain == "" && dashboardHost == "" {
+		report.Checks["caddy_proxy"] = doctorInfo("Global proxy is optional right now", "Set a base domain or dashboard host to make Relay manage HTTPS routes.")
+	} else if s.runtime.IsRunning("relay-global-proxy") {
+		report.Checks["caddy_proxy"] = doctorOK("Global Caddy proxy is running", "relay-global-proxy")
+	} else {
+		report.Checks["caddy_proxy"] = doctorWarn("Global Caddy proxy is not running", "Relay could not find the relay-global-proxy container.", "Check Docker health and re-save the server domain settings.")
+	}
+
+	report.Checks["webhook"] = doctorInfo("GitHub webhook endpoint", report.WebhookURL)
+	return report
+}
+
+func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, 405, "method not allowed")
+		return
+	}
+	writeJSON(w, 200, s.buildDoctorReport())
+}
+
 // handleServerConfig handles GET/POST /api/server/config.
 func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, 200, map[string]string{
+		writeJSON(w, 200, map[string]any{
 			"base_domain":    s.serverBaseDomain(),
 			"dashboard_host": s.serverDashboardHost(),
 			"acme_disabled":  s.serverConfigGet("acme_disabled"),
 			"theme_name":     s.serverConfigGet("theme_name"),
 			"theme_css":      s.serverConfigGet("theme_css"),
+			"doctor":         s.buildDoctorReport(),
 		})
 	case http.MethodPost:
 		var body struct {
@@ -2718,12 +2934,13 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		writeJSON(w, 200, map[string]string{
+		writeJSON(w, 200, map[string]any{
 			"base_domain":    s.serverConfigGet("base_domain"),
 			"dashboard_host": s.serverConfigGet("dashboard_host"),
 			"acme_disabled":  s.serverConfigGet("acme_disabled"),
 			"theme_name":     s.serverConfigGet("theme_name"),
 			"theme_css":      s.serverConfigGet("theme_css"),
+			"doctor":         s.buildDoctorReport(),
 		})
 	default:
 		httpError(w, 405, "method not allowed")
@@ -3907,6 +4124,14 @@ func main() {
 	if err := migrateDB(db); err != nil {
 		panic(err)
 	}
+	analyticsDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		panic(err)
+	}
+	_, _ = analyticsDB.Exec("PRAGMA journal_mode=WAL;")
+	_, _ = analyticsDB.Exec("PRAGMA busy_timeout=10000;")
+	analyticsDB.SetMaxOpenConns(2)
+	analyticsDB.SetMaxIdleConns(2)
 
 	// Derive a 32-byte AES-256 key from RELAY_SECRET_KEY for encrypting secrets at rest.
 	var secretKey []byte
@@ -3930,6 +4155,7 @@ func main() {
 		allowAllCORS:          false,
 		enablePluginMutations: getenvBool("RELAY_ENABLE_PLUGIN_MUTATIONS", false),
 		db:                    db,
+		analyticsDB:           analyticsDB,
 		apiToken:              apiToken,
 		secretKey:             secretKey,
 		buildpacks:            defaultBuildpacks(),
@@ -4045,6 +4271,7 @@ func main() {
 	mux.HandleFunc("/api/webhooks/github", s.handleGithubWebhook)
 	mux.HandleFunc("/api/edge/authz", s.handleEdgeAuthz)
 	mux.HandleFunc("/api/analytics", authAny(s.handleAnalytics))
+	mux.HandleFunc("/api/doctor", authAny(s.handleDoctor))
 
 	// User management (owner only, enforced inside handlers)
 	mux.HandleFunc("/api/users", authOwner(s.handleUsers))
@@ -4064,6 +4291,7 @@ func main() {
 	} else if runCfg.SocketPath != "" {
 		socketPath = runCfg.SocketPath
 	}
+	s.socketPath = socketPath
 	if socketPath != "" {
 		// Remove stale socket from a previous run.
 		_ = os.Remove(socketPath)
@@ -4120,6 +4348,7 @@ func main() {
 			sockMux.HandleFunc("/api/promotions/approve", authOwner(s.handlePromotionApprove))
 			sockMux.HandleFunc("/api/webhooks/github", s.handleGithubWebhook)
 			sockMux.HandleFunc("/api/edge/authz", s.handleEdgeAuthz)
+			sockMux.HandleFunc("/api/doctor", authAny(s.handleDoctor))
 			sockMux.HandleFunc("/api/users", authOwner(s.handleUsers))
 			sockMux.HandleFunc("/api/users/", authOwner(s.handleUserByID))
 			sockMux.HandleFunc("/api/audit", authOwner(s.handleAuditLog))
@@ -8854,10 +9083,18 @@ type caddyLogEntry struct {
 	Size   int64 `json:"size"`
 }
 
+func (s *Server) analyticsStore() *sql.DB {
+	if s.analyticsDB != nil {
+		return s.analyticsDB
+	}
+	return s.db
+}
+
 // startLogTailer reads new lines appended to the Caddy access log, inserts
 // analytics events into SQLite, and resolves country codes in the background.
 func (s *Server) startLogTailer() {
 	logPath := filepath.Join(s.caddyLogsDir, "access.log")
+	adb := s.analyticsStore()
 
 	// Persist the byte offset between restarts so we don't re-process old events.
 	getOffset := func() int64 {
@@ -8914,7 +9151,7 @@ func (s *Server) startLogTailer() {
 		f.Close()
 
 		if len(newEvents) > 0 {
-			s.insertAnalyticsEvents(newEvents)
+			s.insertAnalyticsEvents(adb, newEvents)
 			saveOffset(newOffset)
 			offset = newOffset
 			// Kick off a non-blocking country resolver pass.
@@ -8927,8 +9164,8 @@ func (s *Server) startLogTailer() {
 	}
 }
 
-func (s *Server) insertAnalyticsEvents(entries []caddyLogEntry) {
-	tx, err := s.db.Begin()
+func (s *Server) insertAnalyticsEvents(adb *sql.DB, entries []caddyLogEntry) {
+	tx, err := adb.Begin()
 	if err != nil {
 		return
 	}
@@ -8962,8 +9199,9 @@ type ipAPIBatchResponse struct {
 // resolveAnalyticsCountries batch-resolves remote IPs to country codes using
 // ip-api.com (free, no key, 45 req/min).  Results are cached in ip_country_cache.
 func (s *Server) resolveAnalyticsCountries() {
+	adb := s.analyticsStore()
 	// Collect distinct IPs that have no country assigned yet.
-	rows, err := s.db.Query(`
+	rows, err := adb.Query(`
 		SELECT DISTINCT remote_ip FROM analytics_events
 		WHERE country_code='' AND remote_ip!=''
 		LIMIT 500`)
@@ -8991,7 +9229,7 @@ func (s *Server) resolveAnalyticsCountries() {
 			placeholders[i] = "?"
 			args[i] = ip
 		}
-		cachedRows, err2 := s.db.Query(
+		cachedRows, err2 := adb.Query(
 			`SELECT ip FROM ip_country_cache WHERE ip IN (`+strings.Join(placeholders, ",")+`) AND country_code != ''`,
 			args...)
 		cached := map[string]bool{}
@@ -9042,7 +9280,7 @@ func (s *Server) resolveAnalyticsCountries() {
 			if r.Status != "success" || r.Query == "" {
 				continue
 			}
-			_, _ = s.db.Exec(
+			_, _ = adb.Exec(
 				`INSERT OR REPLACE INTO ip_country_cache(ip,country_code,country_name,updated_at) VALUES(?,?,?,?)`,
 				r.Query, r.CountryCode, r.Country, now)
 		}
@@ -9053,7 +9291,7 @@ func (s *Server) resolveAnalyticsCountries() {
 	}
 
 	// Apply cached countries to analytics_events rows that are still empty.
-	_, _ = s.db.Exec(`
+	_, _ = adb.Exec(`
 		UPDATE analytics_events
 		SET country_code = (SELECT country_code FROM ip_country_cache WHERE ip=remote_ip),
 		    country_name = (SELECT country_name FROM ip_country_cache WHERE ip=remote_ip)
@@ -9088,6 +9326,7 @@ type analyticsHost struct {
 }
 
 func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
+	adb := s.analyticsStore()
 	period := r.URL.Query().Get("period")
 	app := strings.TrimSpace(r.URL.Query().Get("app"))
 	var sess *UserSession
@@ -9142,10 +9381,10 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 
 	// Total requests.
 	var total int64
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM analytics_events WHERE ts>=?`+hostFilter, hostArgs...).Scan(&total)
+	_ = adb.QueryRow(`SELECT COUNT(*) FROM analytics_events WHERE ts>=?`+hostFilter, hostArgs...).Scan(&total)
 
 	// By country.
-	countryRows, _ := s.db.Query(
+	countryRows, _ := adb.Query(
 		`SELECT COALESCE(NULLIF(country_code,''),'??') AS cc,
 		        COALESCE(NULLIF(country_name,''),'Unknown') AS cn,
 		        COUNT(*) AS cnt
@@ -9163,7 +9402,7 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// By status class (group into 2xx, 3xx, 4xx, 5xx).
-	statusRows, _ := s.db.Query(
+	statusRows, _ := adb.Query(
 		`SELECT (status/100)*100 AS sc, COUNT(*) AS cnt
 		 FROM analytics_events WHERE ts>=?`+hostFilter+`
 		 GROUP BY sc ORDER BY sc`,
@@ -9183,7 +9422,7 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	if period == "30d" {
 		bucketSize = 86400 // daily buckets for 30-day view
 	}
-	hourRows, _ := s.db.Query(
+	hourRows, _ := adb.Query(
 		`SELECT (ts/?)*? AS bucket, COUNT(*) AS cnt
 		 FROM analytics_events WHERE ts>=?`+hostFilter+`
 		 GROUP BY bucket ORDER BY bucket`,
@@ -9199,7 +9438,7 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// By host.
-	hostRows, _ := s.db.Query(
+	hostRows, _ := adb.Query(
 		`SELECT host, COUNT(*) AS cnt
 		 FROM analytics_events WHERE ts>=?`+hostFilter+`
 		 GROUP BY host ORDER BY cnt DESC LIMIT 20`,

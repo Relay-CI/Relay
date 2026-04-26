@@ -546,7 +546,26 @@ export interface ServerConfig {
   acme_disabled?: string;
   theme_name?: string;
   theme_css?: string;
+  doctor?: DoctorReport;
   [key: string]: unknown;
+}
+
+export interface DoctorCheck {
+  status: "ok" | "warn" | "error" | "info";
+  summary: string;
+  detail?: string;
+  hint?: string;
+}
+
+export interface DoctorReport {
+  generated_at: number;
+  http_addr: string;
+  socket_path?: string;
+  base_domain?: string;
+  dashboard_host?: string;
+  managed_example_url?: string;
+  webhook_url?: string;
+  checks: Record<string, DoctorCheck>;
 }
 
 export async function getServerConfig(): Promise<ServerConfig> {
@@ -569,6 +588,10 @@ export interface PublicTheme {
 
 export async function getPublicTheme(): Promise<PublicTheme> {
   return apiFetch<PublicTheme>("/api/public/theme");
+}
+
+export async function getDoctor(): Promise<DoctorReport> {
+  return apiFetch<DoctorReport>("/api/doctor");
 }
 
 // ── Build logs ────────────────────────────────────────────────────────────
