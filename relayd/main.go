@@ -7251,6 +7251,7 @@ func (s *Server) runDeploy(job DeployJob) {
 		fmt.Fprintf(logf, format+"\n", args...)
 	}
 	s.assignPreviewHostPort(s.runtimeForEngine(engine), &req, state, log)
+	s.resolvePortConflict(s.runtimeForEngine(engine), &req, log)
 
 	// Resolve workspace path
 	workspace := filepath.Join(s.workspacesDir, fmt.Sprintf("%s__%s__%s", safe(req.App), safe(string(req.Env)), safe(req.Branch)))
@@ -7980,6 +7981,36 @@ func (s *Server) assignPreviewHostPort(runtime ContainerRuntime, req *DeployRequ
 		if chosen != preferred && log != nil {
 			log("preview host port %d unavailable; using %d", preferred, chosen)
 		}
+	}
+}
+
+// resolvePortConflict ensures req.HostPort is not taken by a process or container
+// other than our own edge proxy. If it is, the next free port is chosen and logged.
+// Called for all envs; assignPreviewHostPort handles preview-specific auto-assignment.
+func (s *Server) resolvePortConflict(runtime ContainerRuntime, req *DeployRequest, log func(string, ...any)) {
+	if req == nil || req.HostPortExplicit {
+		return
+	}
+	preferred := firstNonZero(req.HostPort, defaultHostPort(req.Env))
+	if preferred <= 0 {
+		return
+	}
+	// If our own edge proxy already owns this port, no conflict.
+	edgeContainer := appBaseContainerName(req.App, req.Env, req.Branch)
+	if runtime != nil && runtime.IsRunning(edgeContainer) &&
+		runtime.PublishedPort(edgeContainer, 3000) == preferred {
+		return
+	}
+	if hostPortAvailable(preferred) {
+		req.HostPort = preferred
+		return
+	}
+	// Port in use by something else; find nearest free one.
+	if chosen := firstAvailableHostPort(preferred+1, 256); chosen > 0 {
+		if log != nil {
+			log("host port %d already in use; auto-assigned %d", preferred, chosen)
+		}
+		req.HostPort = chosen
 	}
 }
 
@@ -9406,6 +9437,15 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 		return fmt.Errorf("ensure app network: %w", err)
 	}
 
+	// Resolve port conflict for restart/runContainer paths that bypass runDeploy.
+	// (runDeploy calls resolvePortConflict earlier; the second call is a no-op when the port is free.)
+	if !req.HostPortExplicit {
+		conflictReq := req
+		conflictReq.HostPort = hostPort
+		s.resolvePortConflict(s.runtime, &conflictReq, log)
+		hostPort = conflictReq.HostPort
+	}
+
 	state, _ := s.getAppState(req.App, req.Env, req.Branch)
 	activeSlot := s.currentActiveSlot(req.App, req.Env, req.Branch, state)
 	nextSlot := nextActiveSlot(activeSlot)
@@ -9463,6 +9503,8 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 			state.DrainUntil = drainUntil
 			state.TrafficMode = trafficMode
 			state.TrafficSplitPercent = splitPercent
+			state.HostPort = hostPort
+			state.ServicePort = servicePort
 			if canary {
 				state.RolloutStartedAt = time.Now().UnixMilli()
 				state.RolloutDeployID = ""
@@ -9486,6 +9528,8 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 		state.DrainUntil = 0
 		state.TrafficMode = trafficMode
 		state.TrafficSplitPercent = defaultTrafficSplitPercent()
+		state.HostPort = hostPort
+		state.ServicePort = servicePort
 		state.RolloutStartedAt = 0
 		state.RolloutDeployID = ""
 		state.RolloutStatus = ""

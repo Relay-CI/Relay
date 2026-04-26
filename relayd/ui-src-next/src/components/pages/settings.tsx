@@ -650,19 +650,23 @@ export function SettingsPage({
               <input
                 type="number"
                 className="text-input"
-                value={config.host_port ?? 0}
+                value={config.host_port || ""}
                 onChange={(e) => upd({ host_port: Number(e.target.value) })}
+                placeholder="auto"
                 disabled={!canWrite}
               />
+              <p className="text-[11px] text-white/30 mt-1">Leave 0 / blank to auto-assign. Relay resolves conflicts automatically.</p>
             </Field>
             <Field label="Service Port">
               <input
                 type="number"
                 className="text-input"
-                value={config.service_port ?? 0}
+                value={config.service_port || ""}
                 onChange={(e) => upd({ service_port: Number(e.target.value) })}
+                placeholder="auto (3000)"
                 disabled={!canWrite}
               />
+              <p className="text-[11px] text-white/30 mt-1">Port the app listens on inside the container. 0 defaults to 3000. Set <code className="font-mono">PORT</code> env var via app.</p>
             </Field>
           </div>
           <Field label="IP Allowlist">
