@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -308,6 +310,88 @@ func TestSaveAndLoadAppStatePersistsHostPortExplicit(t *testing.T) {
 	}
 }
 
+func TestRepairLegacyAppHostPortsFromRuntime(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	containerName := appBaseContainerName("myhltv", EnvProd, "main")
+	s.runtime = &mockRuntime{
+		running:   map[string]bool{containerName: true},
+		published: map[string]int{containerName: 3002},
+	}
+
+	if err := s.saveAppState(&AppState{
+		App:        "myhltv",
+		Env:        EnvProd,
+		Branch:     "main",
+		Engine:     EngineDocker,
+		Mode:       "traefik",
+		HostPort:   0,
+		PublicHost: "myhltv.example.com",
+		Stopped:    false,
+	}); err != nil {
+		t.Fatalf("save app state: %v", err)
+	}
+
+	repaired, err := s.repairLegacyAppHostPortsFromRuntime()
+	if err != nil {
+		t.Fatalf("repair host ports: %v", err)
+	}
+	if repaired != 1 {
+		t.Fatalf("expected 1 repaired row, got %d", repaired)
+	}
+
+	got, err := s.getAppState("myhltv", EnvProd, "main")
+	if err != nil {
+		t.Fatalf("get repaired app state: %v", err)
+	}
+	if got.HostPort != 3002 {
+		t.Fatalf("expected repaired host port 3002, got %d", got.HostPort)
+	}
+}
+
+func TestEnsureGlobalProxyRepairsLegacyHostPortsBeforeWritingConfig(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	containerName := appBaseContainerName("myhltv", EnvProd, "main")
+	s.runtime = &mockRuntime{
+		running:   map[string]bool{containerName: true},
+		published: map[string]int{containerName: 3002},
+	}
+
+	if err := s.saveAppState(&AppState{
+		App:        "myhltv",
+		Env:        EnvProd,
+		Branch:     "main",
+		Engine:     EngineDocker,
+		Mode:       "traefik",
+		HostPort:   0,
+		PublicHost: "myhltv.example.com",
+		Stopped:    false,
+	}); err != nil {
+		t.Fatalf("save app state: %v", err)
+	}
+
+	if err := s.ensureGlobalProxy(); err != nil {
+		t.Fatalf("ensure global proxy: %v", err)
+	}
+
+	configPath := filepath.Join(s.dataDir, "global-proxy", "Caddyfile")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read caddyfile: %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "myhltv.example.com {\n\treverse_proxy host.docker.internal:3002\n}") {
+		t.Fatalf("expected repaired host route in caddyfile, got:\n%s", text)
+	}
+
+	got, err := s.getAppState("myhltv", EnvProd, "main")
+	if err != nil {
+		t.Fatalf("get repaired app state: %v", err)
+	}
+	if got.HostPort != 3002 {
+		t.Fatalf("expected persisted host port 3002, got %d", got.HostPort)
+	}
+}
+
 type mockRuntime struct {
 	running   map[string]bool
 	published map[string]int
@@ -333,7 +417,8 @@ func (m *mockRuntime) LogStream(context.Context, string, int, string) (io.ReadCl
 
 func newPreviewPortTestServer(t *testing.T) *Server {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "relayd-test.db"))
+	dataDir := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(dataDir, "relayd-test.db"))
 	if err != nil {
 		t.Fatalf("open sqlite db: %v", err)
 	}
@@ -344,8 +429,10 @@ func newPreviewPortTestServer(t *testing.T) *Server {
 		t.Fatalf("init db: %v", err)
 	}
 	return &Server{
-		db:      db,
-		runtime: &mockRuntime{running: map[string]bool{}, published: map[string]int{}},
+		dataDir:      dataDir,
+		caddyLogsDir: filepath.Join(dataDir, "caddy-logs"),
+		db:           db,
+		runtime:      &mockRuntime{running: map[string]bool{}, published: map[string]int{}},
 	}
 }
 

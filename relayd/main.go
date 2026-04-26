@@ -3956,6 +3956,7 @@ func main() {
 	_ = s.loadDeploysFromDB()
 	_ = s.reconcileStaleDeploysOnStartup()
 	_ = s.resumeRolloutWatches()
+	_, _ = s.repairLegacyAppHostPortsFromRuntime()
 
 	// Restore global domain proxy state from DB
 	go func() { _ = s.ensureGlobalProxy() }()
@@ -9312,6 +9313,10 @@ func (s *Server) startACMEListener() {
 }
 
 func (s *Server) ensureGlobalProxy() error {
+	if _, err := s.repairLegacyAppHostPortsFromRuntime(); err != nil {
+		return err
+	}
+
 	rows, err := s.db.Query(`SELECT public_host, COALESCE(host_port, 0) FROM app_state WHERE public_host != '' AND COALESCE(stopped,0)=0`)
 	if err != nil {
 		return err
@@ -9407,6 +9412,82 @@ func (s *Server) ensureGlobalProxy() error {
 		return fmt.Errorf("global proxy reload: %v (%s)", reloadErr, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// repairLegacyAppHostPortsFromRuntime backfills missing persisted host ports for
+// upgraded installs by reading the live edge-proxy container port binding.
+func (s *Server) repairLegacyAppHostPortsFromRuntime() (int, error) {
+	if s == nil || s.db == nil {
+		return 0, nil
+	}
+
+	type candidate struct {
+		app    string
+		env    DeployEnv
+		branch string
+		engine string
+	}
+
+	rows, err := s.db.Query(`
+		SELECT app, env, branch, COALESCE(engine,'')
+		FROM app_state
+		WHERE COALESCE(stopped,0)=0 AND COALESCE(host_port,0)=0`)
+	if err != nil {
+		return 0, err
+	}
+
+	var candidates []candidate
+	for rows.Next() {
+		var app string
+		var envS string
+		var branch string
+		var engine string
+		if err := rows.Scan(&app, &envS, &branch, &engine); err != nil {
+			continue
+		}
+
+		candidates = append(candidates, candidate{
+			app:    app,
+			env:    normalizeDeployEnv(envS),
+			branch: branch,
+			engine: engine,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+
+	repaired := 0
+	for _, candidate := range candidates {
+		runtime := s.runtimeForEngine(candidate.engine)
+		if runtime == nil {
+			continue
+		}
+
+		containerName := appBaseContainerName(candidate.app, candidate.env, candidate.branch)
+		if !runtime.IsRunning(containerName) {
+			continue
+		}
+		published := runtime.PublishedPort(containerName, 3000)
+		if published <= 0 {
+			continue
+		}
+
+		if _, err := s.db.Exec(
+			`UPDATE app_state
+			 SET host_port=?, updated_at=?
+			 WHERE app=? AND env=? AND branch=? AND COALESCE(host_port,0)=0`,
+			published, time.Now().UnixMilli(), candidate.app, string(candidate.env), candidate.branch,
+		); err != nil {
+			return repaired, err
+		}
+		repaired++
+	}
+	return repaired, nil
 }
 
 func (s *Server) currentActiveSlotWithRuntime(runtime ContainerRuntime, app string, env DeployEnv, branch string, state *AppState) string {
