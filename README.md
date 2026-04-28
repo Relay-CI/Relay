@@ -93,7 +93,9 @@ relay start / stop / restart       Control a running container
 relay secrets list/add/rm          Manage app secrets
 relay login                        Browser-based login → saves bearer token
 relay logout                       Clear saved session token
-relay plugin list/install/remove   Manage server-side buildpack plugins
+relay plugin list/search           Inspect the server-side plugin catalog
+relay plugin install/remove        Install or remove local plugin JSON
+relay plugin install-url           Install a remote plugin over HTTPS with optional SHA256 pin
 relay version                      Show relay/relayd/station versions
 relay doctor                       Check agent connectivity, Docker, DNS, TLS, and socket state
 relay agent install [--version v]  Download relayd + station binaries
@@ -123,6 +125,31 @@ Add more without rebuilding `relayd` — see [Server-Side Buildpack Plugins](#se
 Common flags (all commands): `--url` `--token` `--app` `--env` `--branch` `--dir` `--host-port` `--mode port|traefik` `--public-host`
 
 Supported lanes: `preview`, `dev`, `staging`, `prod`
+
+---
+
+`relay.config.json` also supports `project_root`, `build_context`, and `dockerfile` for monorepos and custom Docker builds.
+
+## Monorepos And Dockerfiles
+
+Relay now supports monorepo app roots and custom build contexts directly in `relay.config.json`:
+
+```json
+{
+  "project_root": "apps/api",
+  "build_context": "apps/api",
+  "dockerfile": "apps/api/Dockerfile",
+  "service_port": 3000
+}
+```
+
+- `project_root` selects the app root inside the repo for detection and generated artifacts.
+- `build_context` selects the Docker build context when it differs from the app root.
+- `dockerfile` points to a repo-relative Dockerfile or Containerfile.
+
+If you do not set `dockerfile`, Relay auto-detects root and nested `Dockerfile`, `dockerfile`, `Containerfile`, or `containerfile` files under the selected roots before falling back to buildpack detection.
+
+These same fields are editable in the dashboard under **Settings -> Build layout**.
 
 ---
 
@@ -180,6 +207,23 @@ Every deploy is assigned a sequential **build number** per app (`#1`, `#2`, …)
 
 ---
 
+The dashboard also exposes a manual deploy flow with a target lane picker. You can redeploy from the saved server workspace for another lane, or trigger from the saved `repo_url` and branch without opening a shell.
+
+---
+
+## Admin Operations
+
+Owner accounts now get an **Operations** tab in the admin UI. It aggregates:
+
+- live CPU and memory usage
+- runtime storage usage
+- per-app and per-lane container breakdowns
+- latest deploy versus previous deploy deltas for build duration, request volume, bandwidth, and server error rate
+
+Current limitation: live usage metrics are available for Docker-backed lanes. Station lanes show state, but not fake resource telemetry.
+
+---
+
 ## Secrets Encryption at Rest
 
 Set `RELAY_SECRET_KEY` to enable AES-256-GCM encryption for all secrets stored in `relay.db`:
@@ -218,10 +262,21 @@ RELAY_ENABLE_PLUGIN_MUTATIONS=true relayd
 
 # Install a plugin from any client:
 relay plugin install plugins/astro-static.json
+relay plugin search astro
+relay plugin install-url https://example.com/plugins/astro-static.json --sha256 <hex>
 
 relay plugin list
 relay plugin remove astro-static
 ```
+
+Remote plugin install is intentionally narrower now:
+
+- HTTPS only
+- optional SHA256 pin for downloaded plugin JSON
+- owner-only mutation endpoints
+- plugin mutations can stay disabled outside admin windows
+
+Owners can also browse, install, and remove plugins from the dashboard admin UI, including install-from-file, install-from-URL, paste-JSON, and catalog search.
 
 Sample: [`plugins/astro-static.json`](plugins/astro-static.json)
 

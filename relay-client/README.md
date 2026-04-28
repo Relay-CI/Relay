@@ -52,7 +52,9 @@ relay projects                     All projects and environments
 relay rollback                     Roll back to previous image
 relay start / stop / restart       Control a running container
 relay secrets list/add/rm          Manage app secrets
-relay plugin list/install/remove   Manage server-side buildpack plugins
+relay plugin list/search           Inspect the server-side plugin catalog
+relay plugin install/remove        Install or remove local plugin JSON
+relay plugin install-url           Install a remote plugin over HTTPS with optional SHA256 pin
 relay version                      Show relay/relayd/station versions
 relay doctor                       Check agent connectivity, Docker, DNS, TLS, and socket state
 relay agent install [--version v]  Download relayd and the optional station runtime
@@ -108,15 +110,17 @@ relay init --url http://127.0.0.1:8080 --token YOURTOKEN --app myapp --env previ
 relay restart --app myapp --env preview --branch main
 ```
 
-### `plugin list / install / remove`
+### `plugin list / search / install / install-url / remove`
 
 ```bash
 relay plugin list
+relay plugin search astro
 relay plugin install ./plugins/astro-static.json
+relay plugin install-url https://example.com/plugins/astro-static.json --sha256 <hex>
 relay plugin remove astro-static
 ```
 
-> Plugin install/remove requires `RELAY_ENABLE_PLUGIN_MUTATIONS=true` on the agent.
+> Plugin install and remove require `RELAY_ENABLE_PLUGIN_MUTATIONS=true` on the agent. Remote installs are HTTPS-only, and `--sha256` lets you pin the exact plugin JSON you expect.
 
 ### `agent install`
 
@@ -182,11 +186,29 @@ The CLI merges settings in this order (highest priority first):
 
 1. CLI flags (`--token`, `--app`, etc.)
 2. Local `.relay.json` (created by `init`)
-3. `relay.config.json` (build/install/start overrides only)
+3. `relay.config.json` (build hints and optional monorepo layout: `install_cmd`, `build_cmd`, `start_cmd`, `service_port`, `project_root`, `build_context`, `dockerfile`)
 4. Environment variables (`RELAY_URL`, `RELAY_TOKEN`, `RELAY_APP`, `RELAY_ENV`, `RELAY_BRANCH`)
 5. Fallback defaults (`url=http://127.0.0.1:8080`, `env=preview`, `branch=main`, `dir=.`)
 
 `relay.json` is not part of CLI connection resolution. It is reserved for project companion services such as Postgres and Redis.
+
+### Monorepo build layout
+
+`relay.config.json` can also steer where Relay builds from inside a larger repo:
+
+```json
+{
+  "project_root": "apps/web",
+  "build_context": "apps/web",
+  "dockerfile": "apps/web/Dockerfile"
+}
+```
+
+- `project_root` selects the repo-relative app root for detection and generated assets.
+- `build_context` selects the Docker build context when it differs from the app root.
+- `dockerfile` points to a repo-relative Dockerfile or Containerfile.
+
+If `dockerfile` is omitted, Relay can auto-detect root or nested Dockerfiles under the selected roots before it falls back to buildpack detection.
 
 ## What gets uploaded
 
@@ -197,6 +219,8 @@ The CLI walks files under `--dir` and ignores common heavy/build output folders 
 It sends a manifest containing `{path, size, mtime, sha256}` and uploads only the files the agent requests.
 
 Add a project-level `.relayignore` file when you want to exclude extra local files or directories from sync. Relay also reuses cached file hashes when size and mtime are unchanged, so repeat deploys do not re-hash the entire workspace.
+
+The CLI also stores a local workspace fingerprint. If the server workspace changed but your local repo changed too, Relay can proceed with the newer local content instead of immediately forcing a `relay pull` or `--force` retry.
 
 ## Security notes
 

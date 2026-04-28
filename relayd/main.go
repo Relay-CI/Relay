@@ -3546,10 +3546,16 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rows, err := s.db.Query(
-		`SELECT app, env, branch, COALESCE(engine,''), mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), repo_url, COALESCE(stopped,0), COALESCE(cpu_limit,''), COALESCE(mem_limit,''), COALESCE(resource_mode,'')
-		FROM app_state ORDER BY app, env, branch`,
-	)
+	const projectsQueryWithResources = `SELECT app, env, branch, COALESCE(engine,''), mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), repo_url, COALESCE(stopped,0), COALESCE(cpu_limit,''), COALESCE(mem_limit,''), COALESCE(resource_mode,'')
+		FROM app_state ORDER BY app, env, branch`
+	const projectsQueryLegacy = `SELECT app, env, branch, COALESCE(engine,''), mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), repo_url, COALESCE(stopped,0)
+		FROM app_state ORDER BY app, env, branch`
+	rows, err := s.db.Query(projectsQueryWithResources)
+	hasResourceColumns := true
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "no such column") {
+		rows, err = s.db.Query(projectsQueryLegacy)
+		hasResourceColumns = false
+	}
 	if err != nil {
 		httpError(w, 500, err.Error())
 		return
@@ -3599,9 +3605,16 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	byApp := map[string]*ProjectInfo{}
 	for rows.Next() {
 		var pe ProjectEnv
-		if err := rows.Scan(&pe.App, &pe.Env, &pe.Branch, &pe.Engine, &pe.Mode,
-			&pe.HostPort, &pe.HostPortExplicit, &pe.ServicePort, &pe.PublicHost, &pe.ActiveSlot, &pe.StandbySlot, &pe.DrainUntil, &pe.TrafficMode, &pe.AccessPolicy, &pe.IPAllowlist, &pe.ExpiresAt, &pe.WebhookSecret, &pe.NotificationWebhooks, &pe.TrafficSplitPercent, &pe.RolloutMinRequests, &pe.RolloutErrorPercent, &pe.RolloutAssessSeconds, &pe.RolloutStartedAt, &pe.RolloutDeployID, &pe.RolloutStatus, &pe.RepoURL, &pe.Stopped, &pe.CPULimit, &pe.MemLimit, &pe.ResourceMode); err != nil {
-			continue
+		if hasResourceColumns {
+			if err := rows.Scan(&pe.App, &pe.Env, &pe.Branch, &pe.Engine, &pe.Mode,
+				&pe.HostPort, &pe.HostPortExplicit, &pe.ServicePort, &pe.PublicHost, &pe.ActiveSlot, &pe.StandbySlot, &pe.DrainUntil, &pe.TrafficMode, &pe.AccessPolicy, &pe.IPAllowlist, &pe.ExpiresAt, &pe.WebhookSecret, &pe.NotificationWebhooks, &pe.TrafficSplitPercent, &pe.RolloutMinRequests, &pe.RolloutErrorPercent, &pe.RolloutAssessSeconds, &pe.RolloutStartedAt, &pe.RolloutDeployID, &pe.RolloutStatus, &pe.RepoURL, &pe.Stopped, &pe.CPULimit, &pe.MemLimit, &pe.ResourceMode); err != nil {
+				continue
+			}
+		} else {
+			if err := rows.Scan(&pe.App, &pe.Env, &pe.Branch, &pe.Engine, &pe.Mode,
+				&pe.HostPort, &pe.HostPortExplicit, &pe.ServicePort, &pe.PublicHost, &pe.ActiveSlot, &pe.StandbySlot, &pe.DrainUntil, &pe.TrafficMode, &pe.AccessPolicy, &pe.IPAllowlist, &pe.ExpiresAt, &pe.WebhookSecret, &pe.NotificationWebhooks, &pe.TrafficSplitPercent, &pe.RolloutMinRequests, &pe.RolloutErrorPercent, &pe.RolloutAssessSeconds, &pe.RolloutStartedAt, &pe.RolloutDeployID, &pe.RolloutStatus, &pe.RepoURL, &pe.Stopped); err != nil {
+				continue
+			}
 		}
 		pe.Engine = firstNonEmptyEngine(pe.Engine)
 		pe.TrafficMode = firstNonEmpty(normalizeTrafficMode(pe.TrafficMode), s.lanePolicy(DeployEnv(pe.Env)).DefaultTrafficMode)
@@ -12117,6 +12130,9 @@ func migrateDB(db *sql.DB) error {
 			rollout_deploy_id TEXT DEFAULT '',
 			rollout_status TEXT DEFAULT '',
 			stopped INTEGER DEFAULT 0,
+			cpu_limit TEXT DEFAULT '',
+			mem_limit TEXT DEFAULT '',
+			resource_mode TEXT DEFAULT '',
 			updated_at INTEGER,
 			PRIMARY KEY (app, env, branch)
 		);`,
@@ -12201,6 +12217,9 @@ func migrateDB(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN project_root TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN build_context TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN dockerfile TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN cpu_limit TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN mem_limit TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN resource_mode TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN image TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN port INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN host_port INTEGER DEFAULT 0`)
@@ -12858,21 +12877,21 @@ func (s *Server) reconcileStaleDeploysOnStartup() error {
 func (s *Server) saveAppState(st *AppState) error {
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO app_state
-		(app, env, branch, repo_url, project_root, build_context, dockerfile, engine, current_image, previous_image, mode, host_port, host_port_explicit, service_port, public_host, active_slot, standby_slot, drain_until, traffic_mode, access_policy, ip_allowlist, repo_hash, expires_at, webhook_secret, notification_webhooks, traffic_split_percent, rollout_min_requests, rollout_error_percent, rollout_assess_seconds, rollout_started_at, rollout_deploy_id, rollout_status, stopped, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(app, env, branch, repo_url, project_root, build_context, dockerfile, engine, current_image, previous_image, mode, host_port, host_port_explicit, service_port, public_host, active_slot, standby_slot, drain_until, traffic_mode, access_policy, ip_allowlist, repo_hash, expires_at, webhook_secret, notification_webhooks, traffic_split_percent, rollout_min_requests, rollout_error_percent, rollout_assess_seconds, rollout_started_at, rollout_deploy_id, rollout_status, stopped, cpu_limit, mem_limit, resource_mode, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		st.App, string(st.Env), st.Branch, st.RepoURL, st.ProjectRoot, st.BuildContext, st.Dockerfile, firstNonEmptyEngine(st.Engine), st.CurrentImage, st.PreviousImage, st.Mode,
-		st.HostPort, st.HostPortExplicit, st.ServicePort, st.PublicHost, normalizeActiveSlot(st.ActiveSlot), normalizeActiveSlot(st.StandbySlot), st.DrainUntil, firstNonEmpty(normalizeTrafficMode(st.TrafficMode), "edge"), firstNonEmpty(normalizeAccessPolicy(st.AccessPolicy), s.lanePolicy(st.Env).DefaultAccessPolicy), normalizeIPAllowlist(st.IPAllowlist), st.RepoHash, st.ExpiresAt, st.WebhookSecret, st.NotificationWebhooks, st.TrafficSplitPercent, st.RolloutMinRequests, st.RolloutErrorPercent, st.RolloutAssessSeconds, st.RolloutStartedAt, st.RolloutDeployID, st.RolloutStatus, st.Stopped, time.Now().UnixMilli(),
+		st.HostPort, st.HostPortExplicit, st.ServicePort, st.PublicHost, normalizeActiveSlot(st.ActiveSlot), normalizeActiveSlot(st.StandbySlot), st.DrainUntil, firstNonEmpty(normalizeTrafficMode(st.TrafficMode), "edge"), firstNonEmpty(normalizeAccessPolicy(st.AccessPolicy), s.lanePolicy(st.Env).DefaultAccessPolicy), normalizeIPAllowlist(st.IPAllowlist), st.RepoHash, st.ExpiresAt, st.WebhookSecret, st.NotificationWebhooks, st.TrafficSplitPercent, st.RolloutMinRequests, st.RolloutErrorPercent, st.RolloutAssessSeconds, st.RolloutStartedAt, st.RolloutDeployID, st.RolloutStatus, st.Stopped, strings.TrimSpace(st.CPULimit), strings.TrimSpace(st.MemLimit), strings.TrimSpace(st.ResourceMode), time.Now().UnixMilli(),
 	)
 	return err
 }
 
 func (s *Server) getAppState(app string, env DeployEnv, branch string) (*AppState, error) {
-	row := s.db.QueryRow(`SELECT app, env, branch, repo_url, COALESCE(project_root,''), COALESCE(build_context,''), COALESCE(dockerfile,''), COALESCE(engine,''), current_image, previous_image, mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(repo_hash,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), COALESCE(stopped,0)
+	row := s.db.QueryRow(`SELECT app, env, branch, repo_url, COALESCE(project_root,''), COALESCE(build_context,''), COALESCE(dockerfile,''), COALESCE(engine,''), current_image, previous_image, mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(repo_hash,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), COALESCE(stopped,0), COALESCE(cpu_limit,''), COALESCE(mem_limit,''), COALESCE(resource_mode,'')
 		FROM app_state WHERE app=? AND env=? AND branch=?`, app, string(env), branch)
 
 	var st AppState
 	var envS string
-	if err := row.Scan(&st.App, &envS, &st.Branch, &st.RepoURL, &st.ProjectRoot, &st.BuildContext, &st.Dockerfile, &st.Engine, &st.CurrentImage, &st.PreviousImage, &st.Mode, &st.HostPort, &st.HostPortExplicit, &st.ServicePort, &st.PublicHost, &st.ActiveSlot, &st.StandbySlot, &st.DrainUntil, &st.TrafficMode, &st.AccessPolicy, &st.IPAllowlist, &st.RepoHash, &st.ExpiresAt, &st.WebhookSecret, &st.NotificationWebhooks, &st.TrafficSplitPercent, &st.RolloutMinRequests, &st.RolloutErrorPercent, &st.RolloutAssessSeconds, &st.RolloutStartedAt, &st.RolloutDeployID, &st.RolloutStatus, &st.Stopped); err != nil {
+	if err := row.Scan(&st.App, &envS, &st.Branch, &st.RepoURL, &st.ProjectRoot, &st.BuildContext, &st.Dockerfile, &st.Engine, &st.CurrentImage, &st.PreviousImage, &st.Mode, &st.HostPort, &st.HostPortExplicit, &st.ServicePort, &st.PublicHost, &st.ActiveSlot, &st.StandbySlot, &st.DrainUntil, &st.TrafficMode, &st.AccessPolicy, &st.IPAllowlist, &st.RepoHash, &st.ExpiresAt, &st.WebhookSecret, &st.NotificationWebhooks, &st.TrafficSplitPercent, &st.RolloutMinRequests, &st.RolloutErrorPercent, &st.RolloutAssessSeconds, &st.RolloutStartedAt, &st.RolloutDeployID, &st.RolloutStatus, &st.Stopped, &st.CPULimit, &st.MemLimit, &st.ResourceMode); err != nil {
 		return nil, err
 	}
 	st.Env = DeployEnv(envS)

@@ -62,6 +62,12 @@ Shape:
 
 Current form:
 - server-installed JSON plugin with detect rules and Dockerfile template
+- installable from the CLI, owner dashboard UI, local file, pasted JSON, or verified HTTPS URL
+
+Current operator safety:
+- plugin mutation must be enabled intentionally on the server
+- remote install is HTTPS-only
+- optional SHA256 pin can verify downloaded plugin JSON before install
 
 Likely future forms:
 - local executable plugin
@@ -85,14 +91,20 @@ Typical chain:
 Purpose:
 - Install reusable plugins from a shared catalog
 
-Proposed CLI:
+Implemented now:
 
 ```bash
 relay plugin search wasm
-relay plugin install org/plugin-name
+relay plugin install-url https://example.com/plugins/wasm.json --sha256 <hex>
 relay plugin list
-relay plugin upgrade
 ```
+
+Still missing:
+
+- versioned plugin packages
+- signed catalog entries
+- plugin upgrade workflow
+- allowlists or trust policy beyond transport and checksum verification
 
 ## Cross-Compile Direction
 
