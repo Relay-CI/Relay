@@ -5,6 +5,8 @@ import { cn } from "@/lib/utils";
 import { ServerSettingsPage } from "@/components/pages/server-settings";
 import { UsersPage } from "@/components/pages/users";
 import { AuditPage } from "@/components/pages/audit";
+import { PluginsPage } from "@/components/pages/plugins";
+import { OperationsPage } from "@/components/pages/operations";
 
 type CurrentUser = { username: string; role: string } | null;
 
@@ -22,6 +24,19 @@ const ADMIN_TABS = [
         <rect x="2" y="14" width="20" height="8" rx="2"/>
         <line x1="6" y1="6" x2="6.01" y2="6"/>
         <line x1="6" y1="18" x2="6.01" y2="18"/>
+      </svg>
+    ),
+  },
+  {
+    id: "operations",
+    label: "Operations",
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M4 19h16"/>
+        <path d="M6 15l3-4 3 2 5-7 1 1"/>
+        <circle cx="6" cy="15" r="1"/>
+        <circle cx="12" cy="13" r="1"/>
+        <circle cx="17" cy="6" r="1"/>
       </svg>
     ),
   },
@@ -47,6 +62,17 @@ const ADMIN_TABS = [
         <line x1="16" y1="13" x2="8" y2="13"/>
         <line x1="16" y1="17" x2="8" y2="17"/>
         <polyline points="10 9 9 9 8 9"/>
+      </svg>
+    ),
+  },
+  {
+    id: "plugins",
+    label: "Plugins",
+    icon: (
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M12 2l3 3-2 2 2 2-3 3-2-2-2 2-3-3 2-2-2-2 3-3 2 2 2-2z"/>
+        <path d="M14 14l8 8"/>
+        <path d="M17 21l4-4"/>
       </svg>
     ),
   },
@@ -97,8 +123,10 @@ export function AdminPanel({ currentUser }: AdminPanelProps) {
       {/* Sub-page content */}
       <div>
         {subTab === "server" && <ServerSettingsPage currentUser={currentUser} />}
+        {subTab === "operations" && <OperationsPage />}
         {subTab === "users" && <UsersPage currentUser={currentUser} />}
         {subTab === "audit" && <AuditPage />}
+        {subTab === "plugins" && <PluginsPage />}
       </div>
     </div>
   );

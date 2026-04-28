@@ -224,12 +224,15 @@ func wslSaveSnapshot(distro, snapshotName, wslBuildDir string, logw io.Writer) e
 		"rm -rf /tmp/relay-native/snapshots/"+shqSimple(snapshotName))
 	setCmdHideWindow(rmCmd)
 	_ = rmCmd.Run()
-	cmd := exec.Command("wsl.exe", "-d", distro, "--",
-		"/usr/local/bin/station", "snapshot", "save", snapshotName, wslBuildDir)
-	setCmdHideWindow(cmd)
-	cmd.Stdout = logw
-	cmd.Stderr = logw
-	return cmd.Run()
+	return runLoggedCommandWithTimeout(
+		"",
+		logw,
+		stationBuildStepTimeout(),
+		"station snapshot save",
+		"wsl.exe",
+		"-d", distro, "--",
+		"/usr/local/bin/station", "snapshot", "save", snapshotName, wslBuildDir,
+	)
 }
 
 // wslWriteWindowsManifestStub creates a minimal Windows-side snapshot
@@ -258,12 +261,15 @@ func syncSnapshotToWSL2(distro, snapshotName string, logw io.Writer) {
 	wslSrc := winToWSLPath(winSnapDir)
 	wslDst := "/tmp/relay-native/snapshots/" + snapshotName
 	fmt.Fprintf(logw, "[station] syncing snapshot to WSL2 filesystem...\n")
-	cmd := exec.Command("wsl.exe", "-d", distro, "--", "sh", "-c",
-		"rm -rf "+shqSimple(wslDst)+" && mkdir -p /tmp/relay-native/snapshots && cp -a "+shqSimple(wslSrc)+" "+shqSimple(wslDst))
-	setCmdHideWindow(cmd)
-	cmd.Stdout = logw
-	cmd.Stderr = logw
-	if err := cmd.Run(); err != nil {
+	shellCmd := "rm -rf " + shqSimple(wslDst) + " && mkdir -p /tmp/relay-native/snapshots && cp -a " + shqSimple(wslSrc) + " " + shqSimple(wslDst)
+	if err := runLoggedCommandWithTimeout(
+		"",
+		logw,
+		stationBuildStepTimeout(),
+		"WSL2 snapshot sync",
+		"wsl.exe",
+		"-d", distro, "--", "sh", "-c", shellCmd,
+	); err != nil {
 		fmt.Fprintf(logw, "[station] warn: WSL2 snapshot sync failed: %v\n", err)
 	}
 }
@@ -468,7 +474,9 @@ func ensurestationBinary() (string, error) {
 		stationBuildMu.Lock()
 		defer stationBuildMu.Unlock()
 		if stationSourceNewerThanBinary(sourceDir, binaryPath) && stationSourceNewerThanBinary(sourceDir, legacyBinaryPath) {
-			cmd := exec.Command("go", "build", "-o", binaryPath, ".")
+			buildCtx, buildCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer buildCancel()
+			cmd := exec.CommandContext(buildCtx, "go", "build", "-o", binaryPath, ".")
 			cmd.Dir = sourceDir
 			setCmdHideWindow(cmd)
 			out, err := cmd.CombinedOutput()
@@ -762,7 +770,9 @@ func stationWSLDistro() string {
 	if runtime.GOOS != "windows" {
 		return ""
 	}
-	wslListCmd := exec.Command("wsl.exe", "--list", "--quiet")
+	wslCtx, wslCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer wslCancel()
+	wslListCmd := exec.CommandContext(wslCtx, "wsl.exe", "--list", "--quiet")
 	setCmdHideWindow(wslListCmd)
 	out, err := wslListCmd.CombinedOutput()
 	if err != nil {
@@ -1294,7 +1304,7 @@ func (s *Server) buildStationSnapshot(ctx context.Context, repoDir, dockerfilePa
 	if runtime.GOOS == "windows" {
 		if agent, err := getStationAgent(); err == nil && agent != nil {
 			fmt.Fprintf(logw, "[build] delegating to station daemon (WSL2)\n")
-			m, agentErr := agent.BuildDockerfile(dockerfilePath, repoDir, snapshotName, logw)
+			m, agentErr := agent.BuildDockerfile(ctx, dockerfilePath, repoDir, snapshotName, logw)
 			if agentErr == nil {
 				return m, nil
 			}

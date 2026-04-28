@@ -6,7 +6,10 @@ package main
 // agent-gated paths in runtime_vessel.go are guarded by runtime.GOOS ==
 // "windows", so these stubs satisfy the compiler but are never called.
 
-import "io"
+import (
+	"context"
+	"io"
+)
 
 func getStationAgent() (*stationAgent, error) { return nil, nil }
 func resetStationAgent()                     { /* no-op: Windows-only */ }
@@ -16,7 +19,7 @@ func startStationAgentBackground()           { /* no-op: Windows-only */ }
 
 type stationAgent struct{}
 
-func (a *stationAgent) BuildDockerfile(_, _, _ string, _ io.Writer) (*stationManifest, error) {
+func (a *stationAgent) BuildDockerfile(_ context.Context, _, _, _ string, _ io.Writer) (*stationManifest, error) {
 	return nil, nil
 }
 func (a *stationAgent) GetManifest(_ string) (*stationManifest, error) { return nil, nil }

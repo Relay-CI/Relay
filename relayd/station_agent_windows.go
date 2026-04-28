@@ -66,7 +66,14 @@ var (
 // getStationAgent returns the initialized singleton, starting the daemon when
 // needed.  Returns (nil, err) if the agent cannot be initialised; the caller
 // should fall back to the legacy wsl.exe path in that case.
+//
+// agentMu is held across agentOnce.Do to prevent a data race with
+// resetStationAgent, which replaces agentOnce under the same lock.  Callers
+// that race during a 30 s init simply block on the mutex — the same behaviour
+// they'd see blocking inside sync.Once — so there is no throughput regression.
 func getStationAgent() (*stationAgent, error) {
+	agentMu.Lock()
+	defer agentMu.Unlock()
 	agentOnce.Do(func() {
 		distro := vesselWSLDistro()
 		if distro == "" {
@@ -166,13 +173,15 @@ func (a *stationAgent) healthy() bool {
 // startDaemon launches vessel daemon inside WSL2 and waits for /health.
 func (a *stationAgent) startDaemon() error {
 	// Remove stale port file so we can detect when the new daemon writes its port.
-	_, _ = agentWSLRun(a.distro, "rm -f "+stationAgentPortFile)
+	_, _ = agentWSLRunRoot(a.distro, "rm -f "+stationAgentPortFile)
 
+	// Must run as root: daemon calls chroot + CLONE_NEWNS for each build step,
+	// both of which require CAP_SYS_ADMIN.
 	launchCmd := fmt.Sprintf(
 		"nohup %s daemon --port-file=%s >> /tmp/relay-station-agent.log 2>&1 &",
 		wslStationBin, stationAgentPortFile,
 	)
-	if _, err := agentWSLRun(a.distro, launchCmd); err != nil {
+	if _, err := agentWSLRunRoot(a.distro, launchCmd); err != nil {
 		return fmt.Errorf("launch vessel daemon in WSL2: %w", err)
 	}
 
@@ -213,14 +222,17 @@ type agentBuildReq struct {
 // are streamed to logw as they arrive; the manifest is returned on success.
 // The daemon saves the snapshot in WSL2-native storage (ext4) — no Windows-side
 // rootfs copy or manifest stub is needed.
-func (a *stationAgent) BuildDockerfile(dockerfile, contextDir, snapshotName string, logw io.Writer) (*stationManifest, error) {
+// callerCtx is combined with an internal build timeout so HTTP client
+// disconnects cancel the in-progress build.
+func (a *stationAgent) BuildDockerfile(callerCtx context.Context, dockerfile, contextDir, snapshotName string, logw io.Writer) (*stationManifest, error) {
 	body, _ := json.Marshal(agentBuildReq{
 		Dockerfile:   toWSLPath(dockerfile),
 		ContextDir:   toWSLPath(contextDir),
 		SnapshotName: snapshotName,
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), stationAgentBuildTimeout())
+	timeoutCtx, cancel := context.WithTimeout(callerCtx, stationAgentBuildTimeout())
 	defer cancel()
+	ctx := timeoutCtx
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.url("/build-dockerfile"), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -506,11 +518,27 @@ func (a *stationAgent) ProxyStop(name string) {
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
-// agentWSLRun executes a short shell command inside the WSL2 distro.
-// It is a local copy of the wslRun pattern so vessel_agent_windows.go does not
-// depend on runtime_vessel.go being compiled (avoids a circular init order).
+// agentWSLRun executes a short shell command inside the WSL2 distro as the
+// default user.
 func agentWSLRun(distro, cmd string) (string, error) {
-	c := exec.Command("wsl.exe", "-d", distro, "--", "sh", "-c", cmd)
+	return agentWSLRunAs(distro, "", cmd)
+}
+
+// agentWSLRunRoot executes a short shell command inside the WSL2 distro as
+// root (uid=0).  Required for operations that need CAP_SYS_ADMIN: daemon
+// launch (chroot/unshare), bridge networking, etc.
+func agentWSLRunRoot(distro, cmd string) (string, error) {
+	return agentWSLRunAs(distro, "root", cmd)
+}
+
+// agentWSLRunAs is the underlying helper.  user="" uses the WSL default user.
+func agentWSLRunAs(distro, user, cmd string) (string, error) {
+	args := []string{"-d", distro}
+	if user != "" {
+		args = append(args, "-u", user)
+	}
+	args = append(args, "--", "sh", "-c", cmd)
+	c := exec.Command("wsl.exe", args...)
 	setCmdHideWindow(c)
 	out, err := c.Output()
 	if err != nil {

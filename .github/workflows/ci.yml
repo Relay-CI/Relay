@@ -29,6 +29,10 @@ jobs:
         working-directory: relayd/ui-src-next
         run: npm ci && npm run build
 
+      - name: Lint dashboard
+        working-directory: relayd/ui-src-next
+        run: npm run lint
+
       - name: Build relayd (linux/amd64)
         working-directory: relayd
         env:

@@ -321,6 +321,9 @@ export function buildSettingsConfig(
     | EnvInfo
     | {
         repo_url?: string;
+        project_root?: string;
+        build_context?: string;
+        dockerfile?: string;
         engine?: string;
         mode?: string;
         traffic_mode?: string;
@@ -344,6 +347,9 @@ export function buildSettingsConfig(
 ): Record<string, unknown> {
   return applyEngineConstraints({
     repo_url: selectedEnv?.repo_url ?? "",
+    project_root: selectedEnv?.project_root ?? "",
+    build_context: selectedEnv?.build_context ?? "",
+    dockerfile: selectedEnv?.dockerfile ?? "",
     engine: normalizeEngineValue(selectedEnv?.engine),
     mode: apiModeToUi(selectedEnv?.mode ?? "port"),
     traffic_mode: apiTrafficModeToUi(selectedEnv?.traffic_mode ?? "edge"),

@@ -26,8 +26,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
+
+// ociPullMu serialises concurrent pulls of the same image so two builds
+// starting at the same time don't corrupt the shared rootfs cache.
+// A single mutex is sufficient: pulls are I/O-bound and infrequent.
+var ociPullMu sync.Mutex
 
 // ─── types ────────────────────────────────────────────────────────────────────
 
@@ -199,8 +205,17 @@ func (c *ociClient) get(path string, accepts ...string) (*http.Response, error) 
 // PullImage downloads the image and extracts it to the cache. Returns the rootfs
 // directory and a BuildManifest with CMD/env/port from the image config.
 // If the image is already cached, it returns immediately.
+//
+// Pull is serialised by ociPullMu to prevent two concurrent builds from
+// corrupting the shared cache when they both pull the same base image.
+// On failure the partial rootfs is removed so subsequent calls retry cleanly.
 func PullImage(image string, logf func(string, ...any)) (rootfs string, manifest *BuildManifest, err error) {
 	rootfs = ociRootfsDir(image)
+
+	ociPullMu.Lock()
+	defer ociPullMu.Unlock()
+
+	// Re-check inside the lock: another goroutine may have completed the pull.
 	if ociImageCached(image) {
 		logf("image %s: cached", image)
 		manifest, err = loadManifest(rootfs)
@@ -211,6 +226,14 @@ func PullImage(image string, logf func(string, ...any)) (rootfs string, manifest
 	}
 
 	logf("pulling %s ...", image)
+
+	// Remove partial rootfs on failure so the next call retries.
+	var pullOK bool
+	defer func() {
+		if !pullOK {
+			_ = os.RemoveAll(rootfs)
+		}
+	}()
 
 	client, err := newOCIClient(image)
 	if err != nil {
@@ -261,6 +284,7 @@ func PullImage(image string, logf func(string, ...any)) (rootfs string, manifest
 		_ = os.WriteFile(ociManifestCacheFile(image), raw, 0644)
 	}
 
+	pullOK = true
 	logf("image %s: ready at %s", image, rootfs)
 	return rootfs, manifest, nil
 }

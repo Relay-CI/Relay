@@ -164,6 +164,7 @@ func doSpawn(rec *ContainerRecord, foreground bool, logWriter io.Writer) (int, e
 			_, _ = netSyncWrite.Write([]byte{0}) // unblock child so it exits cleanly
 			netSyncWrite.Close()
 			_ = child.Process.Kill()
+			go child.Wait() // reap zombie; child was started but never waited
 			return 0, fmt.Errorf("network setup: %w", err)
 		}
 		_, _ = netSyncWrite.Write([]byte{1})

@@ -75,6 +75,12 @@ function getWorkspaceVersion(baseUrl, app, env, branch) {
   return (state.workspace_versions || {})[key] || "";
 }
 
+function getWorkspaceLocalFingerprint(baseUrl, app, env, branch) {
+  const state = loadRelayState();
+  const key = `${baseUrl}|${app}|${env}|${branch}`;
+  return (state.workspace_local_fingerprints || {})[key] || "";
+}
+
 /**
  * Persist the workspace version returned by the server after a successful deploy.
  */
@@ -86,6 +92,14 @@ function setWorkspaceVersion(baseUrl, app, env, branch, version) {
   saveRelayState(state);
 }
 
+function setWorkspaceLocalFingerprint(baseUrl, app, env, branch, fingerprint) {
+  const state = loadRelayState();
+  if (!state.workspace_local_fingerprints) state.workspace_local_fingerprints = {};
+  const key = `${baseUrl}|${app}|${env}|${branch}`;
+  state.workspace_local_fingerprints[key] = fingerprint;
+  saveRelayState(state);
+}
+
 module.exports = {
   findRelayConfig,
   loadRelayConfig,
@@ -94,4 +108,6 @@ module.exports = {
   saveRelayState,
   getWorkspaceVersion,
   setWorkspaceVersion,
+  getWorkspaceLocalFingerprint,
+  setWorkspaceLocalFingerprint,
 };

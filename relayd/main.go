@@ -201,11 +201,13 @@ func isActiveDeployStatus(status DeployStatus) bool {
 }
 
 type DeployRequest struct {
-	App       string    `json:"app"`
-	RepoURL   string    `json:"repo_url"`
-	Branch    string    `json:"branch"`
-	CommitSHA string    `json:"commit_sha"`
-	Env       DeployEnv `json:"env"`
+	App             string    `json:"app"`
+	RepoURL         string    `json:"repo_url"`
+	Branch          string    `json:"branch"`
+	CommitSHA       string    `json:"commit_sha"`
+	Env             DeployEnv `json:"env"`
+	WorkspaceEnv    DeployEnv `json:"workspace_env,omitempty"`
+	WorkspaceBranch string    `json:"workspace_branch,omitempty"`
 
 	// Optional overrides; otherwise resolved from detected plan / relay.config.json
 	InstallCmd string `json:"install_cmd"`
@@ -262,6 +264,9 @@ type AppState struct {
 	Env                  DeployEnv `json:"env"`
 	Branch               string    `json:"branch"`
 	RepoURL              string    `json:"repo_url"`
+	ProjectRoot          string    `json:"project_root,omitempty"`
+	BuildContext         string    `json:"build_context,omitempty"`
+	Dockerfile           string    `json:"dockerfile,omitempty"`
 	Engine               string    `json:"engine,omitempty"`
 	CurrentImage         string    `json:"current_image,omitempty"`
 	PreviousImage        string    `json:"previous_image,omitempty"`
@@ -365,10 +370,11 @@ type AppSecret struct {
 }
 
 type SyncStartRequest struct {
-	App         string    `json:"app"`
-	Branch      string    `json:"branch"`
-	Env         DeployEnv `json:"env"`
-	BaseVersion string    `json:"base_version,omitempty"`
+	App          string    `json:"app"`
+	Branch       string    `json:"branch"`
+	Env          DeployEnv `json:"env"`
+	BaseVersion  string    `json:"base_version,omitempty"`
+	LocalChanged bool      `json:"local_changed,omitempty"`
 }
 
 type SyncStartResponse struct {
@@ -713,14 +719,143 @@ type Server struct {
 // ---------------------- Config ----------------------
 
 type RelayConfig struct {
-	Kind        string `json:"kind"`         // optional hint; else auto-detect
-	BuildImage  string `json:"build_image"`  // docker image to run install/build
-	RunImage    string `json:"run_image"`    // runtime image; if empty, defaults per pack
-	ServicePort int    `json:"service_port"` // container port
-	InstallCmd  string `json:"install_cmd"`
-	BuildCmd    string `json:"build_cmd"`
-	StartCmd    string `json:"start_cmd"`
-	Dockerfile  string `json:"dockerfile"` // if set, agent uses this dockerfile as-is
+	Kind         string `json:"kind"`         // optional hint; else auto-detect
+	BuildImage   string `json:"build_image"`  // docker image to run install/build
+	RunImage     string `json:"run_image"`    // runtime image; if empty, defaults per pack
+	ServicePort  int    `json:"service_port"` // container port
+	InstallCmd   string `json:"install_cmd"`
+	BuildCmd     string `json:"build_cmd"`
+	StartCmd     string `json:"start_cmd"`
+	ProjectRoot  string `json:"project_root"`  // repo-relative app root for monorepos
+	BuildContext string `json:"build_context"` // repo-relative docker build context
+	Dockerfile   string `json:"dockerfile"`    // repo-relative dockerfile path
+}
+
+func cleanRepoRelativePath(value string) (string, error) {
+	trimmed := filepath.ToSlash(strings.TrimSpace(value))
+	trimmed = strings.TrimPrefix(trimmed, "./")
+	trimmed = strings.TrimPrefix(trimmed, "/")
+	if trimmed == "" {
+		return "", nil
+	}
+	if strings.Contains(trimmed, "\x00") {
+		return "", fmt.Errorf("path contains invalid null byte")
+	}
+	cleaned := path.Clean(trimmed)
+	if cleaned == "." {
+		return "", nil
+	}
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", fmt.Errorf("path must stay inside the repository")
+	}
+	return cleaned, nil
+}
+
+func resolveRepoRelativePath(repoDir string, value string) (string, string, error) {
+	rel, err := cleanRepoRelativePath(value)
+	if err != nil {
+		return "", "", err
+	}
+	if rel == "" {
+		return repoDir, "", nil
+	}
+	abs := filepath.Join(repoDir, filepath.FromSlash(rel))
+	return abs, rel, nil
+}
+
+func candidateDockerfiles(root string) []string {
+	candidates := []string{
+		"Dockerfile",
+		"dockerfile",
+		"Containerfile",
+		"containerfile",
+	}
+	out := make([]string, 0, len(candidates))
+	for _, name := range candidates {
+		p := filepath.Join(root, name)
+		info, err := os.Stat(p)
+		if err == nil && info != nil && !info.IsDir() {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func findDockerfileRecursive(root string, maxDepth int) string {
+	type item struct {
+		dir   string
+		depth int
+	}
+	if root == "" || maxDepth < 0 {
+		return ""
+	}
+	queue := []item{{dir: root, depth: 0}}
+	skipDirs := map[string]bool{
+		".git":         true,
+		".next":        true,
+		".turbo":       true,
+		"bin":          true,
+		"build":        true,
+		"coverage":     true,
+		"dist":         true,
+		"node_modules": true,
+		"obj":          true,
+		"out":          true,
+		"target":       true,
+		"vendor":       true,
+	}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		if matches := candidateDockerfiles(current.dir); len(matches) > 0 {
+			return matches[0]
+		}
+		if current.depth >= maxDepth {
+			continue
+		}
+		entries, err := os.ReadDir(current.dir)
+		if err != nil {
+			continue
+		}
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			if skipDirs[strings.ToLower(strings.TrimSpace(entry.Name()))] {
+				continue
+			}
+			queue = append(queue, item{dir: filepath.Join(current.dir, entry.Name()), depth: current.depth + 1})
+		}
+	}
+	return ""
+}
+
+func detectUserDockerfile(repoDir string, projectRoot string, buildContext string) string {
+	searchRoots := []string{projectRoot, buildContext, repoDir}
+	seen := map[string]bool{}
+	for _, root := range searchRoots {
+		if root == "" || seen[root] {
+			continue
+		}
+		seen[root] = true
+		if matches := candidateDockerfiles(root); len(matches) > 0 {
+			if rel, err := filepath.Rel(repoDir, matches[0]); err == nil {
+				return filepath.ToSlash(rel)
+			}
+		}
+	}
+	for _, root := range searchRoots {
+		if root == "" {
+			continue
+		}
+		if match := findDockerfileRecursive(root, 4); match != "" {
+			if rel, err := filepath.Rel(repoDir, match); err == nil {
+				return filepath.ToSlash(rel)
+			}
+		}
+	}
+	return ""
 }
 
 func readRelayConfig(repoDir string) (*RelayConfig, error) {
@@ -2847,12 +2982,13 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		writeJSON(w, 200, map[string]any{
-			"base_domain":    s.serverBaseDomain(),
-			"dashboard_host": s.serverDashboardHost(),
-			"acme_disabled":  s.serverConfigGet("acme_disabled"),
-			"theme_name":     s.serverConfigGet("theme_name"),
-			"theme_css":      s.serverConfigGet("theme_css"),
-			"doctor":         s.buildDoctorReport(),
+			"base_domain":              s.serverBaseDomain(),
+			"dashboard_host":           s.serverDashboardHost(),
+			"acme_disabled":            s.serverConfigGet("acme_disabled"),
+			"theme_name":               s.serverConfigGet("theme_name"),
+			"theme_css":                s.serverConfigGet("theme_css"),
+			"plugin_mutations_enabled": s.pluginMutationsEnabled(),
+			"doctor":                   s.buildDoctorReport(),
 		})
 	case http.MethodPost:
 		var body struct {
@@ -2935,12 +3071,13 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		writeJSON(w, 200, map[string]any{
-			"base_domain":    s.serverConfigGet("base_domain"),
-			"dashboard_host": s.serverConfigGet("dashboard_host"),
-			"acme_disabled":  s.serverConfigGet("acme_disabled"),
-			"theme_name":     s.serverConfigGet("theme_name"),
-			"theme_css":      s.serverConfigGet("theme_css"),
-			"doctor":         s.buildDoctorReport(),
+			"base_domain":              s.serverConfigGet("base_domain"),
+			"dashboard_host":           s.serverConfigGet("dashboard_host"),
+			"acme_disabled":            s.serverConfigGet("acme_disabled"),
+			"theme_name":               s.serverConfigGet("theme_name"),
+			"theme_css":                s.serverConfigGet("theme_css"),
+			"plugin_mutations_enabled": s.pluginMutationsEnabled(),
+			"doctor":                   s.buildDoctorReport(),
 		})
 	default:
 		httpError(w, 405, "method not allowed")
@@ -3072,6 +3209,267 @@ func validateBuildpackPlugin(plugin *BuildpackPlugin) error {
 	return nil
 }
 
+type pluginCatalogSource struct {
+	Name        string
+	Description string
+	Tags        []string
+	Homepage    string
+	SourceURL   string
+	Plugin      BuildpackPlugin
+}
+
+type PluginCatalogEntry struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Homepage    string   `json:"homepage,omitempty"`
+	SourceURL   string   `json:"source_url,omitempty"`
+	Installed   bool     `json:"installed"`
+}
+
+var builtInPluginCatalog = []pluginCatalogSource{
+	{
+		Name:        "astro-static",
+		Description: "Build and serve Astro static sites with nginx.",
+		Tags:        []string{"astro", "static-site", "frontend"},
+		Homepage:    "https://astro.build",
+		SourceURL:   "https://raw.githubusercontent.com/babymonie/relay/main/plugins/astro-static.json",
+		Plugin: BuildpackPlugin{
+			Name:        "astro-static",
+			Description: "Astro static site buildpack plugin",
+			Priority:    900,
+			DetectRules: PluginDetectRules{
+				FilesAny:       []string{"astro.config.mjs", "astro.config.js", "astro.config.ts"},
+				PackageDepsAny: []string{"astro"},
+			},
+			PlanSpec: PluginPlanSpec{
+				Kind:               "astro-static",
+				ServicePort:        80,
+				BuildImage:         "node:22",
+				RunImage:           "nginx:alpine",
+				InstallCmd:         "npm install",
+				BuildCmd:           "npm run build",
+				DockerfileTemplate: "FROM {{ .BuildImage }} AS builder\nWORKDIR /app\nCOPY package.json ./\nCOPY package-lock.json* pnpm-lock.yaml* yarn.lock* ./\nRUN {{ .InstallCmd }}\nCOPY . .\nRUN {{ .BuildCmd }}\n\nFROM {{ .RunImage }}\nCOPY --from=builder /app/dist /usr/share/nginx/html\nCOPY default.conf /etc/nginx/conf.d/default.conf\nEXPOSE {{ .ServicePort }}\n",
+				WriteDefaultConf:   true,
+				CleanupPaths:       []string{"node_modules", "dist"},
+			},
+		},
+	},
+	{
+		Name:        "docusaurus-static",
+		Description: "Build Docusaurus docs sites and serve the generated static output.",
+		Tags:        []string{"docusaurus", "docs", "static-site"},
+		Homepage:    "https://docusaurus.io",
+		Plugin: BuildpackPlugin{
+			Name:        "docusaurus-static",
+			Description: "Docusaurus static site buildpack plugin",
+			Priority:    880,
+			DetectRules: PluginDetectRules{
+				FilesAny:       []string{"docusaurus.config.js", "docusaurus.config.ts", "docusaurus.config.mjs"},
+				PackageDepsAny: []string{"@docusaurus/core"},
+			},
+			PlanSpec: PluginPlanSpec{
+				Kind:               "docusaurus-static",
+				ServicePort:        80,
+				BuildImage:         "node:22",
+				RunImage:           "nginx:alpine",
+				InstallCmd:         "npm install",
+				BuildCmd:           "npm run build",
+				DockerfileTemplate: "FROM {{ .BuildImage }} AS builder\nWORKDIR /app\nCOPY package.json ./\nCOPY package-lock.json* pnpm-lock.yaml* yarn.lock* ./\nRUN {{ .InstallCmd }}\nCOPY . .\nRUN {{ .BuildCmd }}\n\nFROM {{ .RunImage }}\nCOPY --from=builder /app/build /usr/share/nginx/html\nCOPY default.conf /etc/nginx/conf.d/default.conf\nEXPOSE {{ .ServicePort }}\n",
+				WriteDefaultConf:   true,
+				CleanupPaths:       []string{"node_modules", "build"},
+			},
+		},
+	},
+	{
+		Name:        "eleventy-static",
+		Description: "Build Eleventy projects into a static nginx site.",
+		Tags:        []string{"11ty", "eleventy", "static-site"},
+		Homepage:    "https://www.11ty.dev",
+		Plugin: BuildpackPlugin{
+			Name:        "eleventy-static",
+			Description: "Eleventy static site buildpack plugin",
+			Priority:    860,
+			DetectRules: PluginDetectRules{
+				FilesAny:       []string{".eleventy.js", ".eleventy.cjs", ".eleventy.mjs"},
+				PackageDepsAny: []string{"@11ty/eleventy"},
+			},
+			PlanSpec: PluginPlanSpec{
+				Kind:               "eleventy-static",
+				ServicePort:        80,
+				BuildImage:         "node:22",
+				RunImage:           "nginx:alpine",
+				InstallCmd:         "npm install",
+				BuildCmd:           "npx @11ty/eleventy",
+				DockerfileTemplate: "FROM {{ .BuildImage }} AS builder\nWORKDIR /app\nCOPY package.json ./\nCOPY package-lock.json* pnpm-lock.yaml* yarn.lock* ./\nRUN {{ .InstallCmd }}\nCOPY . .\nRUN {{ .BuildCmd }}\n\nFROM {{ .RunImage }}\nCOPY --from=builder /app/_site /usr/share/nginx/html\nCOPY default.conf /etc/nginx/conf.d/default.conf\nEXPOSE {{ .ServicePort }}\n",
+				WriteDefaultConf:   true,
+				CleanupPaths:       []string{"node_modules", "_site"},
+			},
+		},
+	},
+}
+
+func cloneBuildpackPlugin(plugin BuildpackPlugin) BuildpackPlugin {
+	return plugin
+}
+
+func (s *Server) pluginCatalogEntries() ([]PluginCatalogEntry, error) {
+	plugins, err := s.loadPluginBuildpacks()
+	if err != nil {
+		return nil, err
+	}
+	installed := map[string]bool{}
+	for _, plugin := range plugins {
+		installed[plugin.Name] = true
+	}
+	out := make([]PluginCatalogEntry, 0, len(builtInPluginCatalog))
+	for _, item := range builtInPluginCatalog {
+		out = append(out, PluginCatalogEntry{
+			Name:        item.Name,
+			Description: item.Description,
+			Tags:        append([]string(nil), item.Tags...),
+			Homepage:    item.Homepage,
+			SourceURL:   item.SourceURL,
+			Installed:   installed[item.Name],
+		})
+	}
+	return out, nil
+}
+
+func buildpackPluginFromCatalog(name string) (*BuildpackPlugin, error) {
+	target := safe(strings.TrimSpace(name))
+	if target == "" || target == "x" {
+		return nil, fmt.Errorf("plugin name required")
+	}
+	for _, item := range builtInPluginCatalog {
+		if item.Name == target {
+			plugin := cloneBuildpackPlugin(item.Plugin)
+			if err := validateBuildpackPlugin(&plugin); err != nil {
+				return nil, err
+			}
+			return &plugin, nil
+		}
+	}
+	return nil, fmt.Errorf("catalog plugin not found")
+}
+
+func fetchBuildpackPluginFromURL(rawURL string, expectedSHA256 string) (*BuildpackPlugin, error) {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return nil, fmt.Errorf("invalid url: %w", err)
+	}
+	if parsed.Scheme != "https" {
+		return nil, fmt.Errorf("plugin URL must use https")
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch plugin: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetch plugin: remote returned %s", resp.Status)
+	}
+	rawBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read plugin JSON: %w", err)
+	}
+	if checksum := strings.ToLower(strings.TrimSpace(expectedSHA256)); checksum != "" {
+		sum := sha256.Sum256(rawBody)
+		if hex.EncodeToString(sum[:]) != checksum {
+			return nil, fmt.Errorf("plugin checksum mismatch")
+		}
+	}
+	var plugin BuildpackPlugin
+	if err := json.Unmarshal(rawBody, &plugin); err != nil {
+		return nil, fmt.Errorf("decode plugin JSON: %w", err)
+	}
+	if err := validateBuildpackPlugin(&plugin); err != nil {
+		return nil, err
+	}
+	return &plugin, nil
+}
+
+func (s *Server) installBuildpackPlugin(plugin *BuildpackPlugin) error {
+	if err := validateBuildpackPlugin(plugin); err != nil {
+		return err
+	}
+	path := filepath.Join(s.pluginBuildpacksDir(), safe(plugin.Name)+".json")
+	body, _ := json.MarshalIndent(plugin, "", "  ")
+	if err := os.WriteFile(path, body, 0644); err != nil {
+		return err
+	}
+	return s.reloadBuildpacks()
+}
+
+func (s *Server) handleBuildpackPluginCatalog(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		entries, err := s.pluginCatalogEntries()
+		if err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, 200, entries)
+	case http.MethodPost:
+		if !s.pluginMutationsEnabled() {
+			httpError(w, 403, "plugin mutations are disabled on this server")
+			return
+		}
+		var body struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpError(w, 400, "invalid json")
+			return
+		}
+		plugin, err := buildpackPluginFromCatalog(body.Name)
+		if err != nil {
+			httpError(w, 400, err.Error())
+			return
+		}
+		if err := s.installBuildpackPlugin(plugin); err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, 201, plugin)
+	default:
+		httpError(w, 405, "method not allowed")
+	}
+}
+
+func (s *Server) handleBuildpackPluginInstallURL(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpError(w, 405, "method not allowed")
+		return
+	}
+	if !s.pluginMutationsEnabled() {
+		httpError(w, 403, "plugin mutations are disabled on this server")
+		return
+	}
+	var body struct {
+		URL    string `json:"url"`
+		SHA256 string `json:"sha256"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpError(w, 400, "invalid json")
+		return
+	}
+	plugin, err := fetchBuildpackPluginFromURL(body.URL, body.SHA256)
+	if err != nil {
+		httpError(w, 400, err.Error())
+		return
+	}
+	if err := s.installBuildpackPlugin(plugin); err != nil {
+		httpError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 201, plugin)
+}
+
 func (s *Server) handleBuildpackPlugins(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -3091,17 +3489,7 @@ func (s *Server) handleBuildpackPlugins(w http.ResponseWriter, r *http.Request) 
 			httpError(w, 400, "invalid json")
 			return
 		}
-		if err := validateBuildpackPlugin(&plugin); err != nil {
-			httpError(w, 400, err.Error())
-			return
-		}
-		path := filepath.Join(s.pluginBuildpacksDir(), safe(plugin.Name)+".json")
-		body, _ := json.MarshalIndent(plugin, "", "  ")
-		if err := os.WriteFile(path, body, 0644); err != nil {
-			httpError(w, 500, err.Error())
-			return
-		}
-		if err := s.reloadBuildpacks(); err != nil {
+		if err := s.installBuildpackPlugin(&plugin); err != nil {
 			httpError(w, 500, err.Error())
 			return
 		}
@@ -4245,6 +4633,9 @@ func main() {
 	mux.HandleFunc("/api/apps/secrets", authDeployer(s.handleAppSecrets))
 	mux.HandleFunc("/api/plugins/buildpacks", authOwner(s.handleBuildpackPlugins))
 	mux.HandleFunc("/api/plugins/buildpacks/", authOwner(s.handleBuildpackPluginByName))
+	mux.HandleFunc("/api/plugins/buildpacks/install-url", authOwner(s.handleBuildpackPluginInstallURL))
+	mux.HandleFunc("/api/plugins/catalog", authOwner(s.handleBuildpackPluginCatalog))
+	mux.HandleFunc("/api/admin/ops", authOwner(s.handleAdminOps))
 
 	mux.HandleFunc("/api/logs/", authAny(s.handleLogsByID))
 	mux.HandleFunc("/api/logs/stream/", authAny(s.handleLogsStream))
@@ -4330,6 +4721,9 @@ func main() {
 			sockMux.HandleFunc("/api/apps/secrets", authDeployer(s.handleAppSecrets))
 			sockMux.HandleFunc("/api/plugins/buildpacks", authOwner(s.handleBuildpackPlugins))
 			sockMux.HandleFunc("/api/plugins/buildpacks/", authOwner(s.handleBuildpackPluginByName))
+			sockMux.HandleFunc("/api/plugins/buildpacks/install-url", authOwner(s.handleBuildpackPluginInstallURL))
+			sockMux.HandleFunc("/api/plugins/catalog", authOwner(s.handleBuildpackPluginCatalog))
+			sockMux.HandleFunc("/api/admin/ops", authOwner(s.handleAdminOps))
 			sockMux.HandleFunc("/api/logs/", authAny(s.handleLogsByID))
 			sockMux.HandleFunc("/api/logs/stream/", authAny(s.handleLogsStream))
 			sockMux.HandleFunc("/api/runtime/logs/targets", authAny(s.handleRuntimeLogTargets))
@@ -4607,8 +5001,23 @@ func (s *Server) handleDeploys(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.Env = normalizeDeployEnv(string(req.Env))
+		req.WorkspaceEnv = normalizeDeployEnv(string(req.WorkspaceEnv))
+		req.WorkspaceBranch = strings.TrimSpace(req.WorkspaceBranch)
+		req.Source = strings.TrimSpace(req.Source)
+		if req.Source == "" {
+			req.Source = "git"
+		}
+		if req.Source == "git" && strings.TrimSpace(req.RepoURL) == "" {
+			if st, err := s.getAppState(req.App, req.Env, req.Branch); err == nil && st != nil {
+				req.RepoURL = strings.TrimSpace(st.RepoURL)
+			}
+		}
 		if err := validateDeployRequest(req); err != nil {
 			httpError(w, 400, err.Error())
+			return
+		}
+		if req.Source == "git" && strings.TrimSpace(req.RepoURL) == "" {
+			httpError(w, 400, "repo_url required for git deploys")
 			return
 		}
 		if _, ok := s.requireLaneAccess(w, r, req.App, req.Env, "deployer"); !ok {
@@ -5517,14 +5926,19 @@ func (s *Server) handleSyncStart(w http.ResponseWriter, r *http.Request) {
 	if req.BaseVersion != "" {
 		if st, err := s.getAppState(req.App, req.Env, req.Branch); err == nil && st != nil && st.RepoHash != "" {
 			if req.BaseVersion != st.RepoHash {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusConflict)
-				_ = json.NewEncoder(w).Encode(map[string]any{
-					"error":          "workspace behind server",
-					"server_version": st.RepoHash,
-					"hint":           "run: relay pull",
-				})
-				return
+				// If the caller has changed its local workspace since the last saved
+				// base version, treat the local tree as the source of truth and allow
+				// the sync to proceed without forcing a separate retry.
+				if !req.LocalChanged {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusConflict)
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"error":          "workspace behind server",
+						"server_version": st.RepoHash,
+						"hint":           "run: relay pull",
+					})
+					return
+				}
 			}
 		}
 	}
@@ -6614,6 +7028,9 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 			Env                  DeployEnv `json:"env"`
 			Branch               string    `json:"branch"`
 			RepoURL              *string   `json:"repo_url"`
+			ProjectRoot          *string   `json:"project_root"`
+			BuildContext         *string   `json:"build_context"`
+			Dockerfile           *string   `json:"dockerfile"`
 			Engine               *string   `json:"engine"`
 			Mode                 *string   `json:"mode"`
 			TrafficMode          *string   `json:"traffic_mode"`
@@ -6663,6 +7080,30 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 
 		if body.RepoURL != nil {
 			st.RepoURL = strings.TrimSpace(*body.RepoURL)
+		}
+		if body.ProjectRoot != nil {
+			value, err := cleanRepoRelativePath(*body.ProjectRoot)
+			if err != nil {
+				httpError(w, 400, "project_root "+err.Error())
+				return
+			}
+			st.ProjectRoot = value
+		}
+		if body.BuildContext != nil {
+			value, err := cleanRepoRelativePath(*body.BuildContext)
+			if err != nil {
+				httpError(w, 400, "build_context "+err.Error())
+				return
+			}
+			st.BuildContext = value
+		}
+		if body.Dockerfile != nil {
+			value, err := cleanRepoRelativePath(*body.Dockerfile)
+			if err != nil {
+				httpError(w, 400, "dockerfile "+err.Error())
+				return
+			}
+			st.Dockerfile = value
 		}
 		if body.Engine != nil {
 			engine := normalizeEngine(*body.Engine)
@@ -7483,13 +7924,27 @@ func (s *Server) runDeploy(job DeployJob) {
 	s.assignPreviewHostPort(s.runtimeForEngine(engine), &req, state, log)
 	s.resolvePortConflict(s.runtimeForEngine(engine), &req, log)
 
-	// Resolve workspace path
+	// Resolve workspace path.
+	workspaceEnv := normalizeDeployEnv(string(req.WorkspaceEnv))
+	workspaceBranch := strings.TrimSpace(req.WorkspaceBranch)
+	if workspaceBranch == "" {
+		workspaceEnv = req.Env
+		workspaceBranch = req.Branch
+	}
 	workspace := filepath.Join(s.workspacesDir, fmt.Sprintf("%s__%s__%s", safe(req.App), safe(string(req.Env)), safe(req.Branch)))
-	repoDir := filepath.Join(workspace, "repo")
-	mustMkdir(repoDir)
+	repoDir := s.workspaceRepoDir(req.App, workspaceEnv, workspaceBranch)
+	if req.Source == "workspace" && !fileExists(repoDir) {
+		failDeploy(s, d, fmt.Errorf("workspace not found"), fmt.Sprintf("workspace source %s/%s is not available on this server", workspaceEnv, workspaceBranch))
+		return
+	}
+	if req.Source != "workspace" {
+		mustMkdir(repoDir)
+	}
 
 	// If source is git, ensure repo is up to date
 	if (req.Source == "git" || strings.TrimSpace(job.PromoteImage) != "") && req.RepoURL != "" {
+		repoDir = filepath.Join(workspace, "repo")
+		mustMkdir(repoDir)
 		log("source is git: preparing repo from %s [%s]", req.RepoURL, req.Branch)
 		if !fileExists(filepath.Join(repoDir, ".git")) {
 			log("cloning repository...")
@@ -7577,6 +8032,24 @@ func (s *Server) runDeploy(job DeployJob) {
 				}
 				return req.RepoURL
 			}(),
+			ProjectRoot: func() string {
+				if state != nil {
+					return state.ProjectRoot
+				}
+				return ""
+			}(),
+			BuildContext: func() string {
+				if state != nil {
+					return state.BuildContext
+				}
+				return ""
+			}(),
+			Dockerfile: func() string {
+				if state != nil {
+					return state.Dockerfile
+				}
+				return ""
+			}(),
 			Engine:        rollbackEngine,
 			CurrentImage:  job.RollbackImage,
 			PreviousImage: prevCurrent,
@@ -7652,11 +8125,73 @@ func (s *Server) runDeploy(job DeployJob) {
 		cfg = c
 	}
 
-	// If user supplied a Dockerfile in cfg, validate and bypass buildpack detection.
+	effectiveProjectRoot := ""
+	effectiveBuildContext := ""
+	effectiveDockerfile := ""
+	if state != nil {
+		effectiveProjectRoot = strings.TrimSpace(state.ProjectRoot)
+		effectiveBuildContext = strings.TrimSpace(state.BuildContext)
+		effectiveDockerfile = strings.TrimSpace(state.Dockerfile)
+	}
+	if effectiveProjectRoot == "" && cfg != nil {
+		effectiveProjectRoot = strings.TrimSpace(cfg.ProjectRoot)
+	}
+	if effectiveBuildContext == "" && cfg != nil {
+		effectiveBuildContext = strings.TrimSpace(cfg.BuildContext)
+	}
+	if effectiveDockerfile == "" && cfg != nil {
+		effectiveDockerfile = strings.TrimSpace(cfg.Dockerfile)
+	}
+
+	projectRootDir, _, err := resolveRepoRelativePath(repoDir, effectiveProjectRoot)
+	if err != nil {
+		end := time.Now()
+		d.Status = StatusFailed
+		d.EndedAt = &end
+		d.Error = "invalid project_root: " + err.Error()
+		_ = s.updateDeployStatus(d.ID, d.Status, d.Error, d.StartedAt, d.EndedAt, "", "")
+		return
+	}
+	buildContextDir := projectRootDir
+	if effectiveBuildContext != "" {
+		buildContextDir, _, err = resolveRepoRelativePath(repoDir, effectiveBuildContext)
+		if err != nil {
+			end := time.Now()
+			d.Status = StatusFailed
+			d.EndedAt = &end
+			d.Error = "invalid build_context: " + err.Error()
+			_ = s.updateDeployStatus(d.ID, d.Status, d.Error, d.StartedAt, d.EndedAt, "", "")
+			return
+		}
+	}
+
+	// If the repo supplies a Dockerfile (explicitly in relay.config.json or
+	// directly in the selected app root/build context), treat it as the source of truth and bypass
+	// buildpack detection.
 	var plan BuildPlan
-	if cfg != nil && strings.TrimSpace(cfg.Dockerfile) != "" {
+	customDockerfile := ""
+	if effectiveDockerfile != "" {
+		customDockerfile = effectiveDockerfile
+	} else {
+		customDockerfile = detectUserDockerfile(repoDir, projectRootDir, buildContextDir)
+	}
+	if customDockerfile != "" {
+		cfgServicePort := 0
+		cfgBuildImage := ""
+		cfgRunImage := ""
+		cfgInstallCmd := ""
+		cfgBuildCmd := ""
+		cfgStartCmd := ""
+		if cfg != nil {
+			cfgServicePort = cfg.ServicePort
+			cfgBuildImage = cfgStr(cfg, "BuildImage")
+			cfgRunImage = cfgStr(cfg, "RunImage")
+			cfgInstallCmd = cfg.InstallCmd
+			cfgBuildCmd = cfg.BuildCmd
+			cfgStartCmd = cfg.StartCmd
+		}
 		// Resolve dockerfile path and ensure it's inside repoDir
-		df := cfg.Dockerfile
+		df := customDockerfile
 		if !filepath.IsAbs(df) {
 			df = filepath.Join(repoDir, df)
 		}
@@ -7681,13 +8216,13 @@ func (s *Server) runDeploy(job DeployJob) {
 		}
 		// Create a minimal plan using cfg values; we will not write Dockerfile (user provided it)
 		plan = BuildPlan{
-			Kind:            "custom",
-			ServicePort:     firstNonZero(req.ServicePort, cfg.ServicePort),
-			BuildImage:      firstNonEmpty(cfgStr(cfg, "BuildImage"), ""),
-			RunImage:        firstNonEmpty(cfgStr(cfg, "RunImage"), ""),
-			InstallCmd:      firstNonEmpty(cfg.InstallCmd, req.InstallCmd),
-			BuildCmd:        firstNonEmpty(cfg.BuildCmd, req.BuildCmd),
-			StartCmd:        firstNonEmpty(cfg.StartCmd, req.StartCmd),
+			Kind:            "custom-dockerfile",
+			ServicePort:     firstNonZero(req.ServicePort, cfgServicePort),
+			BuildImage:      firstNonEmpty(cfgBuildImage, ""),
+			RunImage:        firstNonEmpty(cfgRunImage, ""),
+			InstallCmd:      firstNonEmpty(cfgInstallCmd, req.InstallCmd),
+			BuildCmd:        firstNonEmpty(cfgBuildCmd, req.BuildCmd),
+			StartCmd:        firstNonEmpty(cfgStartCmd, req.StartCmd),
 			WriteDockerfile: nil,
 			Verify:          nil,
 		}
@@ -7695,7 +8230,7 @@ func (s *Server) runDeploy(job DeployJob) {
 		// Select buildpack (ConfigBuildpack has priority if cfg exists)
 		var pack Buildpack
 		for _, bp := range s.buildpacks {
-			ok := bp.Detect(repoDir, cfg)
+			ok := bp.Detect(projectRootDir, cfg)
 			log("buildpack detect: %s -> %v", bp.Name(), ok)
 			if ok {
 				pack = bp
@@ -7714,7 +8249,7 @@ func (s *Server) runDeploy(job DeployJob) {
 		log("selected buildpack: %s", pack.Name())
 
 		var err error
-		plan, err = pack.Plan(req, repoDir, cfg)
+		plan, err = pack.Plan(req, projectRootDir, cfg)
 		if err != nil {
 			end := time.Now()
 			d.Status = StatusFailed
@@ -7737,7 +8272,7 @@ func (s *Server) runDeploy(job DeployJob) {
 
 	// Generate dockerfile (unless plan says not to)
 	if plan.WriteDockerfile != nil {
-		if err := plan.WriteDockerfile(repoDir); err != nil {
+		if err := plan.WriteDockerfile(projectRootDir); err != nil {
 			end := time.Now()
 			d.Status = StatusFailed
 			d.EndedAt = &end
@@ -7747,15 +8282,15 @@ func (s *Server) runDeploy(job DeployJob) {
 		}
 	}
 
-	dockerfilePath := filepath.Join(repoDir, "Dockerfile")
-	if cfg != nil && strings.TrimSpace(cfg.Dockerfile) != "" {
-		dockerfilePath = cfg.Dockerfile
+	dockerfilePath := filepath.Join(projectRootDir, "Dockerfile")
+	if customDockerfile != "" {
+		dockerfilePath = customDockerfile
 		if !filepath.IsAbs(dockerfilePath) {
 			dockerfilePath = filepath.Join(repoDir, dockerfilePath)
 		}
 	}
 
-	repoHash := repoFingerprint(repoDir)
+	repoHash := repoFingerprint(buildContextDir)
 	artifactRef := ""
 	reusedArtifact := false
 	if strings.TrimSpace(job.PromoteImage) != "" {
@@ -7769,7 +8304,7 @@ func (s *Server) runDeploy(job DeployJob) {
 	} else if engine == EngineStation {
 		artifactRef = stationSnapshotName(req.App, req.Env, req.Branch, d.ID)
 		log("station build starting...")
-		if _, err := s.buildStationSnapshot(buildCtx, repoDir, dockerfilePath, artifactRef, logf); err != nil {
+		if _, err := s.buildStationSnapshot(buildCtx, buildContextDir, dockerfilePath, artifactRef, logf); err != nil {
 			end := time.Now()
 			d.Status = StatusFailed
 			d.EndedAt = &end
@@ -7790,10 +8325,10 @@ func (s *Server) runDeploy(job DeployJob) {
 		)
 
 		buildDockerfilePath := ""
-		if cfg != nil && strings.TrimSpace(cfg.Dockerfile) != "" {
+		if customDockerfile != "" {
 			buildDockerfilePath = dockerfilePath
 		}
-		if err := s.runtime.Build(buildCtx, artifactRef, repoDir, buildDockerfilePath, logf); err != nil {
+		if err := s.runtime.Build(buildCtx, artifactRef, buildContextDir, buildDockerfilePath, logf); err != nil {
 			end := time.Now()
 			d.Status = StatusFailed
 			d.EndedAt = &end
@@ -7919,10 +8454,48 @@ func (s *Server) runDeploy(job DeployJob) {
 	prevImg := previousDeployImage(prev, artifactRef, reusedArtifact)
 	currentState, _ := s.getAppState(req.App, req.Env, req.Branch)
 	nextState := &AppState{
-		App:           req.App,
-		Env:           req.Env,
-		Branch:        req.Branch,
-		RepoURL:       req.RepoURL,
+		App:    req.App,
+		Env:    req.Env,
+		Branch: req.Branch,
+		RepoURL: func() string {
+			if strings.TrimSpace(req.RepoURL) != "" {
+				return req.RepoURL
+			}
+			if currentState != nil {
+				return currentState.RepoURL
+			}
+			if prev != nil {
+				return prev.RepoURL
+			}
+			return ""
+		}(),
+		ProjectRoot: func() string {
+			if currentState != nil {
+				return currentState.ProjectRoot
+			}
+			if prev != nil {
+				return prev.ProjectRoot
+			}
+			return ""
+		}(),
+		BuildContext: func() string {
+			if currentState != nil {
+				return currentState.BuildContext
+			}
+			if prev != nil {
+				return prev.BuildContext
+			}
+			return ""
+		}(),
+		Dockerfile: func() string {
+			if currentState != nil {
+				return currentState.Dockerfile
+			}
+			if prev != nil {
+				return prev.Dockerfile
+			}
+			return ""
+		}(),
 		Engine:        engine,
 		CurrentImage:  artifactRef,
 		PreviousImage: prevImg,
@@ -8087,7 +8660,7 @@ func (s *Server) runDeploy(job DeployJob) {
 
 	// Cleanup hook
 	if plan.Cleanup != nil {
-		_ = plan.Cleanup(repoDir)
+		_ = plan.Cleanup(projectRootDir)
 	}
 
 	// Refresh global domain proxy after every successful deploy
@@ -9325,6 +9898,122 @@ type analyticsHost struct {
 	Count int64  `json:"count"`
 }
 
+type adminOpsComparisonWindow struct {
+	Seconds int64 `json:"seconds"`
+}
+
+type adminOpsTrafficWindow struct {
+	Requests      int64   `json:"requests"`
+	ServerErrors  int64   `json:"server_errors"`
+	ClientErrors  int64   `json:"client_errors"`
+	Bandwidth     int64   `json:"bandwidth_bytes"`
+	ServerErrRate float64 `json:"server_error_rate"`
+}
+
+type adminOpsDeploySummary struct {
+	ID               string `json:"id"`
+	Status           string `json:"status"`
+	Source           string `json:"source,omitempty"`
+	CreatedAt        string `json:"created_at"`
+	StartedAt        string `json:"started_at,omitempty"`
+	EndedAt          string `json:"ended_at,omitempty"`
+	BuildNumber      int    `json:"build_number,omitempty"`
+	BuildDurationMS  int64  `json:"build_duration_ms,omitempty"`
+	CommitSHA        string `json:"commit_sha,omitempty"`
+	CommitMessage    string `json:"commit_message,omitempty"`
+	DeployedBy       string `json:"deployed_by,omitempty"`
+	ImageTag         string `json:"image_tag,omitempty"`
+	PreviousImageTag string `json:"previous_image_tag,omitempty"`
+}
+
+type adminOpsDeployDelta struct {
+	Current              adminOpsDeploySummary    `json:"current"`
+	Previous             *adminOpsDeploySummary   `json:"previous,omitempty"`
+	Window               adminOpsComparisonWindow `json:"window"`
+	CurrentTraffic       *adminOpsTrafficWindow   `json:"current_traffic,omitempty"`
+	PreviousTraffic      *adminOpsTrafficWindow   `json:"previous_traffic,omitempty"`
+	BuildDurationDeltaMS int64                    `json:"build_duration_delta_ms,omitempty"`
+	ServerErrRateDelta   float64                  `json:"server_error_rate_delta,omitempty"`
+	RequestDelta         int64                    `json:"request_delta,omitempty"`
+	BandwidthDelta       int64                    `json:"bandwidth_delta_bytes,omitempty"`
+	AnalyticsAvailable   bool                     `json:"analytics_available"`
+	AnalyticsNote        string                   `json:"analytics_note,omitempty"`
+}
+
+type adminOpsContainerUsage struct {
+	ID            string  `json:"id"`
+	Label         string  `json:"label"`
+	Kind          string  `json:"kind"`
+	Container     string  `json:"container"`
+	Running       bool    `json:"running"`
+	CPUPercent    float64 `json:"cpu_percent"`
+	MemUsageBytes int64   `json:"mem_usage_bytes"`
+	MemLimitBytes int64   `json:"mem_limit_bytes"`
+	MemPercent    float64 `json:"mem_percent"`
+	StorageBytes  int64   `json:"storage_bytes"`
+	NetRxBytes    int64   `json:"net_rx_bytes"`
+	NetTxBytes    int64   `json:"net_tx_bytes"`
+	BlockRead     int64   `json:"block_read_bytes"`
+	BlockWrite    int64   `json:"block_write_bytes"`
+}
+
+type adminOpsLaneUsage struct {
+	CPUPercent        float64                  `json:"cpu_percent"`
+	MemUsageBytes     int64                    `json:"mem_usage_bytes"`
+	MemLimitBytes     int64                    `json:"mem_limit_bytes"`
+	MemPercent        float64                  `json:"mem_percent"`
+	StorageBytes      int64                    `json:"storage_bytes"`
+	NetRxBytes        int64                    `json:"net_rx_bytes"`
+	NetTxBytes        int64                    `json:"net_tx_bytes"`
+	BlockReadBytes    int64                    `json:"block_read_bytes"`
+	BlockWriteBytes   int64                    `json:"block_write_bytes"`
+	RunningContainers int                      `json:"running_containers"`
+	ContainerCount    int                      `json:"container_count"`
+	Measured          bool                     `json:"measured"`
+	Note              string                   `json:"note,omitempty"`
+	Targets           []adminOpsContainerUsage `json:"targets"`
+}
+
+type adminOpsLane struct {
+	App           string               `json:"app"`
+	Env           string               `json:"env"`
+	Branch        string               `json:"branch"`
+	Engine        string               `json:"engine"`
+	PublicHost    string               `json:"public_host,omitempty"`
+	HostPort      int                  `json:"host_port,omitempty"`
+	RepoURL       string               `json:"repo_url,omitempty"`
+	Stopped       bool                 `json:"stopped"`
+	CurrentImage  string               `json:"current_image,omitempty"`
+	PreviousImage string               `json:"previous_image,omitempty"`
+	Usage         adminOpsLaneUsage    `json:"usage"`
+	Latest        *adminOpsDeployDelta `json:"latest,omitempty"`
+}
+
+type adminOpsApp struct {
+	App         string            `json:"app"`
+	LaneCount   int               `json:"lane_count"`
+	OnlineLanes int               `json:"online_lanes"`
+	Usage       adminOpsLaneUsage `json:"usage"`
+	Lanes       []adminOpsLane    `json:"lanes"`
+}
+
+type adminOpsSummary struct {
+	AppCount      int     `json:"app_count"`
+	LaneCount     int     `json:"lane_count"`
+	OnlineLanes   int     `json:"online_lanes"`
+	CPUPercent    float64 `json:"cpu_percent"`
+	MemUsageBytes int64   `json:"mem_usage_bytes"`
+	MemLimitBytes int64   `json:"mem_limit_bytes"`
+	MemPercent    float64 `json:"mem_percent"`
+	StorageBytes  int64   `json:"storage_bytes"`
+}
+
+type adminOpsResponse struct {
+	GeneratedAt int64           `json:"generated_at"`
+	Summary     adminOpsSummary `json:"summary"`
+	Apps        []adminOpsApp   `json:"apps"`
+}
+
 func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	adb := s.analyticsStore()
 	period := r.URL.Query().Get("period")
@@ -9475,6 +10164,526 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+type dockerStatsRow struct {
+	CPUPercent float64
+	MemUsage   int64
+	MemLimit   int64
+	MemPercent float64
+	NetRx      int64
+	NetTx      int64
+	BlockRead  int64
+	BlockWrite int64
+}
+
+type dockerStorageRow struct {
+	Running    bool
+	SizeRW     int64
+	SizeRootFS int64
+}
+
+func parseDockerPercent(raw string) float64 {
+	value := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(raw), "%"))
+	if value == "" {
+		return 0
+	}
+	f, _ := strconv.ParseFloat(value, 64)
+	return f
+}
+
+func parseDockerBytes(raw string) int64 {
+	value := strings.TrimSpace(raw)
+	if value == "" || value == "--" || value == "0" || value == "0B" {
+		return 0
+	}
+	value = strings.ReplaceAll(value, " ", "")
+	splitAt := -1
+	for i, r := range value {
+		if !(r == '.' || r == '-' || (r >= '0' && r <= '9')) {
+			splitAt = i
+			break
+		}
+	}
+	if splitAt <= 0 {
+		n, _ := strconv.ParseFloat(value, 64)
+		return int64(n)
+	}
+	numPart := value[:splitAt]
+	unitPart := strings.ToUpper(strings.TrimSpace(value[splitAt:]))
+	num, err := strconv.ParseFloat(numPart, 64)
+	if err != nil {
+		return 0
+	}
+	units := map[string]float64{
+		"B":  1,
+		"KB": 1000, "MB": 1000 * 1000, "GB": 1000 * 1000 * 1000, "TB": 1000 * 1000 * 1000 * 1000,
+		"KIB": 1024, "MIB": 1024 * 1024, "GIB": 1024 * 1024 * 1024, "TIB": 1024 * 1024 * 1024 * 1024,
+	}
+	multiplier, ok := units[unitPart]
+	if !ok {
+		multiplier = 1
+	}
+	return int64(num * multiplier)
+}
+
+func parseDockerIOPair(raw string) (int64, int64) {
+	parts := strings.Split(raw, "/")
+	if len(parts) != 2 {
+		return 0, 0
+	}
+	return parseDockerBytes(parts[0]), parseDockerBytes(parts[1])
+}
+
+func collectDockerStats(containers []string) map[string]dockerStatsRow {
+	out := map[string]dockerStatsRow{}
+	if len(containers) == 0 {
+		return out
+	}
+	args := []string{
+		"stats", "--no-stream",
+		"--format", "{{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}\t{{.BlockIO}}",
+	}
+	args = append(args, containers...)
+	cmd := exec.Command("docker", args...)
+	data, err := cmd.Output()
+	if err != nil {
+		return out
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) < 6 {
+			continue
+		}
+		memParts := strings.Split(fields[2], "/")
+		memUsage := int64(0)
+		memLimit := int64(0)
+		if len(memParts) == 2 {
+			memUsage = parseDockerBytes(memParts[0])
+			memLimit = parseDockerBytes(memParts[1])
+		}
+		netRx, netTx := parseDockerIOPair(fields[4])
+		blockRead, blockWrite := parseDockerIOPair(fields[5])
+		out[strings.TrimSpace(fields[0])] = dockerStatsRow{
+			CPUPercent: parseDockerPercent(fields[1]),
+			MemUsage:   memUsage,
+			MemLimit:   memLimit,
+			MemPercent: parseDockerPercent(fields[3]),
+			NetRx:      netRx,
+			NetTx:      netTx,
+			BlockRead:  blockRead,
+			BlockWrite: blockWrite,
+		}
+	}
+	return out
+}
+
+func collectDockerStorage(containers []string) map[string]dockerStorageRow {
+	out := map[string]dockerStorageRow{}
+	if len(containers) == 0 {
+		return out
+	}
+	args := []string{
+		"inspect", "--size",
+		"--format", "{{.Name}}\t{{.State.Running}}\t{{.SizeRw}}\t{{.SizeRootFs}}",
+	}
+	args = append(args, containers...)
+	cmd := exec.Command("docker", args...)
+	data, err := cmd.Output()
+	if err != nil {
+		return out
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) < 4 {
+			continue
+		}
+		name := strings.TrimPrefix(strings.TrimSpace(fields[0]), "/")
+		sizeRW, _ := strconv.ParseInt(strings.TrimSpace(fields[2]), 10, 64)
+		sizeRootFS, _ := strconv.ParseInt(strings.TrimSpace(fields[3]), 10, 64)
+		out[name] = dockerStorageRow{
+			Running:    strings.EqualFold(strings.TrimSpace(fields[1]), "true"),
+			SizeRW:     sizeRW,
+			SizeRootFS: sizeRootFS,
+		}
+	}
+	return out
+}
+
+func deployBuildDurationMS(d *Deploy) int64 {
+	if d == nil || d.StartedAt == nil || d.EndedAt == nil {
+		return 0
+	}
+	return d.EndedAt.Sub(*d.StartedAt).Milliseconds()
+}
+
+func toAdminDeploySummary(d *Deploy) adminOpsDeploySummary {
+	if d == nil {
+		return adminOpsDeploySummary{}
+	}
+	return adminOpsDeploySummary{
+		ID:        d.ID,
+		Status:    string(d.Status),
+		Source:    d.Source,
+		CreatedAt: d.CreatedAt.Format(time.RFC3339),
+		StartedAt: func() string {
+			if d.StartedAt != nil {
+				return d.StartedAt.Format(time.RFC3339)
+			}
+			return ""
+		}(),
+		EndedAt: func() string {
+			if d.EndedAt != nil {
+				return d.EndedAt.Format(time.RFC3339)
+			}
+			return ""
+		}(),
+		BuildNumber:      d.BuildNumber,
+		BuildDurationMS:  deployBuildDurationMS(d),
+		CommitSHA:        d.CommitSHA,
+		CommitMessage:    d.CommitMessage,
+		DeployedBy:       d.DeployedBy,
+		ImageTag:         d.ImageTag,
+		PreviousImageTag: d.PrevImage,
+	}
+}
+
+func analyticsWindowHost(host string, hostPort int) []string {
+	candidates := []string{}
+	appendIf := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		for _, existing := range candidates {
+			if strings.EqualFold(existing, v) {
+				return
+			}
+		}
+		candidates = append(candidates, v)
+	}
+	appendIf(host)
+	if hostPort > 0 {
+		appendIf(fmt.Sprintf("127.0.0.1:%d", hostPort))
+		appendIf(fmt.Sprintf("localhost:%d", hostPort))
+	}
+	return candidates
+}
+
+func analyticsWindowStats(adb *sql.DB, hosts []string, from int64, to int64) (*adminOpsTrafficWindow, bool) {
+	if adb == nil || len(hosts) == 0 || to <= from {
+		return nil, false
+	}
+	placeholders := make([]string, len(hosts))
+	args := make([]any, 0, len(hosts)+2)
+	args = append(args, from, to)
+	for i, host := range hosts {
+		placeholders[i] = "?"
+		args = append(args, host)
+	}
+	row := adb.QueryRow(
+		`SELECT COUNT(*),
+		        COALESCE(SUM(CASE WHEN status>=500 THEN 1 ELSE 0 END),0),
+		        COALESCE(SUM(CASE WHEN status>=400 AND status<500 THEN 1 ELSE 0 END),0),
+		        COALESCE(SUM(bytes),0)
+		   FROM analytics_events
+		  WHERE ts>=? AND ts<? AND host IN (`+strings.Join(placeholders, ",")+`)`,
+		args...,
+	)
+	var reqs, serverErrors, clientErrors, bytesSent int64
+	if err := row.Scan(&reqs, &serverErrors, &clientErrors, &bytesSent); err != nil {
+		return nil, false
+	}
+	window := &adminOpsTrafficWindow{
+		Requests:      reqs,
+		ServerErrors:  serverErrors,
+		ClientErrors:  clientErrors,
+		Bandwidth:     bytesSent,
+		ServerErrRate: 0,
+	}
+	if reqs > 0 {
+		window.ServerErrRate = float64(serverErrors) / float64(reqs) * 100
+	}
+	return window, true
+}
+
+func (s *Server) latestSuccessfulDeployPair(app string, env DeployEnv, branch string) (*Deploy, *Deploy, error) {
+	rows, err := s.db.Query(
+		`SELECT d.id, d.app, d.repo_url, d.branch, d.commit_sha, d.env, d.status, d.created_at, d.started_at, d.ended_at, d.error, d.log_path, d.image_tag, d.previous_image_tag, COALESCE(d.preview_url,''), COALESCE(r.source,''), COALESCE(d.build_number,0), COALESCE(d.deployed_by,''), COALESCE(d.commit_message,'')
+		   FROM deploys d
+		   LEFT JOIN deploy_requests r ON r.id=d.id
+		  WHERE d.app=? AND d.env=? AND d.branch=? AND d.status=?
+		  ORDER BY d.created_at DESC
+		  LIMIT 2`,
+		app, string(env), branch, string(StatusSuccess),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	items := []*Deploy{}
+	for rows.Next() {
+		d, scanErr := scanDeployRow(rows)
+		if scanErr == nil {
+			items = append(items, d)
+		}
+	}
+	if len(items) == 0 {
+		return nil, nil, nil
+	}
+	if len(items) == 1 {
+		return items[0], nil, nil
+	}
+	return items[0], items[1], nil
+}
+
+func (s *Server) buildAdminOpsResponse() adminOpsResponse {
+	resp := adminOpsResponse{
+		GeneratedAt: time.Now().UnixMilli(),
+		Apps:        []adminOpsApp{},
+	}
+	rows, err := s.db.Query(`SELECT app, env, branch FROM app_state ORDER BY app, env, branch`)
+	if err != nil {
+		return resp
+	}
+	defer rows.Close()
+
+	type laneRef struct {
+		App    string
+		Env    DeployEnv
+		Branch string
+	}
+	laneRefs := []laneRef{}
+	for rows.Next() {
+		var lane laneRef
+		var env string
+		if scanErr := rows.Scan(&lane.App, &env, &lane.Branch); scanErr == nil {
+			lane.Env = DeployEnv(env)
+			laneRefs = append(laneRefs, lane)
+		}
+	}
+
+	type laneBundle struct {
+		state    *AppState
+		targets  []RuntimeLogTarget
+		laneData RuntimeLogLaneState
+		services []ProjectService
+	}
+	bundles := map[string]laneBundle{}
+	containerNames := []string{}
+	seenContainers := map[string]struct{}{}
+	for _, ref := range laneRefs {
+		st, err := s.getAppState(ref.App, ref.Env, ref.Branch)
+		if err != nil || st == nil {
+			continue
+		}
+		targets, laneData, _ := s.runtimeLogTargets(ref.App, ref.Env, ref.Branch)
+		services, _ := s.getProjectServices(ref.App, string(ref.Env), ref.Branch)
+		key := ref.App + "__" + string(ref.Env) + "__" + ref.Branch
+		bundles[key] = laneBundle{state: st, targets: targets, laneData: laneData, services: services}
+		for _, target := range targets {
+			if target.Container == "" {
+				continue
+			}
+			if _, ok := seenContainers[target.Container]; ok {
+				continue
+			}
+			seenContainers[target.Container] = struct{}{}
+			containerNames = append(containerNames, target.Container)
+		}
+	}
+
+	statsByContainer := collectDockerStats(containerNames)
+	storageByContainer := collectDockerStorage(containerNames)
+
+	apps := map[string]*adminOpsApp{}
+	adb := s.analyticsStore()
+	nowSec := time.Now().Unix()
+	for _, ref := range laneRefs {
+		key := ref.App + "__" + string(ref.Env) + "__" + ref.Branch
+		bundle, ok := bundles[key]
+		if !ok || bundle.state == nil {
+			continue
+		}
+		if _, ok := apps[ref.App]; !ok {
+			apps[ref.App] = &adminOpsApp{
+				App:   ref.App,
+				Usage: adminOpsLaneUsage{Targets: []adminOpsContainerUsage{}},
+				Lanes: []adminOpsLane{},
+			}
+		}
+		appEntry := apps[ref.App]
+
+		laneUsage := adminOpsLaneUsage{Targets: []adminOpsContainerUsage{}}
+		if firstNonEmptyEngine(bundle.state.Engine) != EngineDocker {
+			laneUsage.Note = "Live resource sampling currently supports Docker lanes."
+		}
+		for _, target := range bundle.targets {
+			stat := statsByContainer[target.Container]
+			size := storageByContainer[target.Container]
+			targetUsage := adminOpsContainerUsage{
+				ID:            target.ID,
+				Label:         target.Label,
+				Kind:          target.Kind,
+				Container:     target.Container,
+				Running:       target.Running,
+				CPUPercent:    stat.CPUPercent,
+				MemUsageBytes: stat.MemUsage,
+				MemLimitBytes: stat.MemLimit,
+				MemPercent:    stat.MemPercent,
+				StorageBytes:  size.SizeRW + size.SizeRootFS,
+				NetRxBytes:    stat.NetRx,
+				NetTxBytes:    stat.NetTx,
+				BlockRead:     stat.BlockRead,
+				BlockWrite:    stat.BlockWrite,
+			}
+			laneUsage.Targets = append(laneUsage.Targets, targetUsage)
+			laneUsage.ContainerCount++
+			if target.Running {
+				laneUsage.RunningContainers++
+			}
+			laneUsage.CPUPercent += targetUsage.CPUPercent
+			laneUsage.MemUsageBytes += targetUsage.MemUsageBytes
+			laneUsage.MemLimitBytes += targetUsage.MemLimitBytes
+			laneUsage.StorageBytes += targetUsage.StorageBytes
+			laneUsage.NetRxBytes += targetUsage.NetRxBytes
+			laneUsage.NetTxBytes += targetUsage.NetTxBytes
+			laneUsage.BlockReadBytes += targetUsage.BlockRead
+			laneUsage.BlockWriteBytes += targetUsage.BlockWrite
+			if target.Running && (targetUsage.CPUPercent > 0 || targetUsage.MemUsageBytes > 0 || targetUsage.StorageBytes > 0) {
+				laneUsage.Measured = true
+			}
+		}
+		if laneUsage.MemLimitBytes > 0 {
+			laneUsage.MemPercent = float64(laneUsage.MemUsageBytes) / float64(laneUsage.MemLimitBytes) * 100
+		}
+
+		var latestDelta *adminOpsDeployDelta
+		latest, previous, _ := s.latestSuccessfulDeployPair(ref.App, ref.Env, ref.Branch)
+		if latest != nil {
+			delta := &adminOpsDeployDelta{
+				Current:            toAdminDeploySummary(latest),
+				AnalyticsAvailable: false,
+			}
+			if previous != nil {
+				prevSummary := toAdminDeploySummary(previous)
+				delta.Previous = &prevSummary
+				delta.BuildDurationDeltaMS = delta.Current.BuildDurationMS - prevSummary.BuildDurationMS
+				latestAnchor := latest.CreatedAt.Unix()
+				if latest.EndedAt != nil {
+					latestAnchor = latest.EndedAt.Unix()
+				}
+				prevAnchor := previous.CreatedAt.Unix()
+				if previous.EndedAt != nil {
+					prevAnchor = previous.EndedAt.Unix()
+				}
+				windowSec := int64(0)
+				if latestAnchor > prevAnchor {
+					windowSec = latestAnchor - prevAnchor
+				}
+				if live := nowSec - latestAnchor; live > 0 && (windowSec == 0 || live < windowSec) {
+					windowSec = live
+				}
+				if windowSec > 7*24*3600 {
+					windowSec = 7 * 24 * 3600
+				}
+				if windowSec >= 300 {
+					delta.Window.Seconds = windowSec
+					hosts := analyticsWindowHost(bundle.state.PublicHost, bundle.state.HostPort)
+					currentTraffic, currentOK := analyticsWindowStats(adb, hosts, latestAnchor, latestAnchor+windowSec)
+					previousTraffic, prevOK := analyticsWindowStats(adb, hosts, prevAnchor, prevAnchor+windowSec)
+					if currentOK && prevOK {
+						delta.CurrentTraffic = currentTraffic
+						delta.PreviousTraffic = previousTraffic
+						delta.ServerErrRateDelta = currentTraffic.ServerErrRate - previousTraffic.ServerErrRate
+						delta.RequestDelta = currentTraffic.Requests - previousTraffic.Requests
+						delta.BandwidthDelta = currentTraffic.Bandwidth - previousTraffic.Bandwidth
+						delta.AnalyticsAvailable = true
+					} else {
+						delta.AnalyticsNote = "Traffic comparison is only available for lanes with proxy analytics history."
+					}
+				} else {
+					delta.AnalyticsNote = "Relay needs more post-deploy traffic time before it can compare this lane."
+				}
+			} else {
+				delta.AnalyticsNote = "No previous successful deploy exists for this lane yet."
+			}
+			latestDelta = delta
+		}
+
+		lane := adminOpsLane{
+			App:           ref.App,
+			Env:           string(ref.Env),
+			Branch:        ref.Branch,
+			Engine:        firstNonEmptyEngine(bundle.state.Engine),
+			PublicHost:    bundle.state.PublicHost,
+			HostPort:      bundle.state.HostPort,
+			RepoURL:       bundle.state.RepoURL,
+			Stopped:       bundle.state.Stopped,
+			CurrentImage:  bundle.state.CurrentImage,
+			PreviousImage: bundle.state.PreviousImage,
+			Usage:         laneUsage,
+			Latest:        latestDelta,
+		}
+		appEntry.Lanes = append(appEntry.Lanes, lane)
+		appEntry.LaneCount++
+		if laneUsage.RunningContainers > 0 && !lane.Stopped {
+			appEntry.OnlineLanes++
+		}
+		appEntry.Usage.CPUPercent += laneUsage.CPUPercent
+		appEntry.Usage.MemUsageBytes += laneUsage.MemUsageBytes
+		appEntry.Usage.MemLimitBytes += laneUsage.MemLimitBytes
+		appEntry.Usage.StorageBytes += laneUsage.StorageBytes
+		appEntry.Usage.RunningContainers += laneUsage.RunningContainers
+		appEntry.Usage.ContainerCount += laneUsage.ContainerCount
+		if laneUsage.Measured {
+			appEntry.Usage.Measured = true
+		}
+	}
+
+	appNames := make([]string, 0, len(apps))
+	for name := range apps {
+		appNames = append(appNames, name)
+	}
+	sort.Strings(appNames)
+	for _, name := range appNames {
+		app := apps[name]
+		sort.Slice(app.Lanes, func(i, j int) bool {
+			if app.Lanes[i].Env == app.Lanes[j].Env {
+				return app.Lanes[i].Branch < app.Lanes[j].Branch
+			}
+			return app.Lanes[i].Env < app.Lanes[j].Env
+		})
+		if app.Usage.MemLimitBytes > 0 {
+			app.Usage.MemPercent = float64(app.Usage.MemUsageBytes) / float64(app.Usage.MemLimitBytes) * 100
+		}
+		resp.Apps = append(resp.Apps, *app)
+		resp.Summary.AppCount++
+		resp.Summary.LaneCount += app.LaneCount
+		resp.Summary.OnlineLanes += app.OnlineLanes
+		resp.Summary.CPUPercent += app.Usage.CPUPercent
+		resp.Summary.MemUsageBytes += app.Usage.MemUsageBytes
+		resp.Summary.MemLimitBytes += app.Usage.MemLimitBytes
+		resp.Summary.StorageBytes += app.Usage.StorageBytes
+	}
+	if resp.Summary.MemLimitBytes > 0 {
+		resp.Summary.MemPercent = float64(resp.Summary.MemUsageBytes) / float64(resp.Summary.MemLimitBytes) * 100
+	}
+	return resp
+}
+
+func (s *Server) handleAdminOps(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, 405, "method not allowed")
+		return
+	}
+	writeJSON(w, 200, s.buildAdminOpsResponse())
 }
 
 func (s *Server) startACMEListener() {
@@ -10879,6 +12088,9 @@ func migrateDB(db *sql.DB) error {
 			env TEXT,
 			branch TEXT,
 			repo_url TEXT,
+			project_root TEXT DEFAULT '',
+			build_context TEXT DEFAULT '',
+			dockerfile TEXT DEFAULT '',
 			engine TEXT DEFAULT 'docker',
 			current_image TEXT,
 			previous_image TEXT,
@@ -10986,6 +12198,9 @@ func migrateDB(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN rollout_status TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN stopped INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN host_port_explicit INTEGER DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN project_root TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN build_context TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN dockerfile TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN image TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN port INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN host_port INTEGER DEFAULT 0`)
@@ -11523,74 +12738,22 @@ func failDeploy(s *Server, d *Deploy, err error, msg string) {
 	_ = s.updateDeployStatus(d.ID, d.Status, d.Error, d.StartedAt, d.EndedAt, "", "")
 }
 
-func (s *Server) listDeploysFromDB() ([]*Deploy, error) {
-	rows, err := s.db.Query(`SELECT d.id, d.app, d.repo_url, d.branch, d.commit_sha, d.env, d.status, d.created_at, d.started_at, d.ended_at, d.error, d.log_path, d.image_tag, d.previous_image_tag, COALESCE(d.preview_url,''), COALESCE(r.source,''), COALESCE(d.build_number,0), COALESCE(d.deployed_by,''), COALESCE(d.commit_message,'')
-		FROM deploys d
-		LEFT JOIN deploy_requests r ON r.id = d.id
-		ORDER BY d.created_at DESC LIMIT 200`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := []*Deploy{}
-	for rows.Next() {
-		var d Deploy
-		var env, st string
-		var created, started, ended sql.NullInt64
-		var errTxt sql.NullString
-		var img, prev sql.NullString
-
-		var purl string
-		if err := rows.Scan(&d.ID, &d.App, &d.RepoURL, &d.Branch, &d.CommitSHA, &env, &st, &created, &started, &ended, &errTxt, &d.LogPath, &img, &prev, &purl, &d.Source, &d.BuildNumber, &d.DeployedBy, &d.CommitMessage); err != nil {
-			continue
-		}
-		d.Env = DeployEnv(env)
-		d.Status = DeployStatus(st)
-		d.CreatedAt = millisToTime(created.Int64)
-		d.PreviewURL = purl
-
-		if started.Valid {
-			t := millisToTime(started.Int64)
-			d.StartedAt = &t
-		}
-		if ended.Valid {
-			t := millisToTime(ended.Int64)
-			d.EndedAt = &t
-		}
-		if errTxt.Valid {
-			d.Error = errTxt.String
-		}
-		if img.Valid {
-			d.ImageTag = img.String
-		}
-		if prev.Valid {
-			d.PrevImage = prev.String
-		}
-		out = append(out, &d)
-	}
-	return out, nil
-}
-
-func (s *Server) getDeployFromDB(id string) (*Deploy, error) {
-	row := s.db.QueryRow(`SELECT d.id, d.app, d.repo_url, d.branch, d.commit_sha, d.env, d.status, d.created_at, d.started_at, d.ended_at, d.error, d.log_path, d.image_tag, d.previous_image_tag, COALESCE(d.preview_url,''), COALESCE(r.source,''), COALESCE(d.build_number,0), COALESCE(d.deployed_by,''), COALESCE(d.commit_message,'')
-		FROM deploys d
-		LEFT JOIN deploy_requests r ON r.id = d.id
-		WHERE d.id=?`, id)
-
+func scanDeployRow(scanner interface {
+	Scan(dest ...any) error
+}) (*Deploy, error) {
 	var d Deploy
-	var env, st, purl string
+	var env, st string
 	var created, started, ended sql.NullInt64
 	var errTxt sql.NullString
 	var img, prev sql.NullString
-
-	if err := row.Scan(&d.ID, &d.App, &d.RepoURL, &d.Branch, &d.CommitSHA, &env, &st, &created, &started, &ended, &errTxt, &d.LogPath, &img, &prev, &purl, &d.Source, &d.BuildNumber, &d.DeployedBy, &d.CommitMessage); err != nil {
+	var purl string
+	if err := scanner.Scan(&d.ID, &d.App, &d.RepoURL, &d.Branch, &d.CommitSHA, &env, &st, &created, &started, &ended, &errTxt, &d.LogPath, &img, &prev, &purl, &d.Source, &d.BuildNumber, &d.DeployedBy, &d.CommitMessage); err != nil {
 		return nil, err
 	}
-	d.PreviewURL = purl
 	d.Env = DeployEnv(env)
 	d.Status = DeployStatus(st)
 	d.CreatedAt = millisToTime(created.Int64)
+	d.PreviewURL = purl
 	if started.Valid {
 		t := millisToTime(started.Int64)
 		d.StartedAt = &t
@@ -11609,6 +12772,40 @@ func (s *Server) getDeployFromDB(id string) (*Deploy, error) {
 		d.PrevImage = prev.String
 	}
 	return &d, nil
+}
+
+func (s *Server) listDeploysFromDB() ([]*Deploy, error) {
+	rows, err := s.db.Query(`SELECT d.id, d.app, d.repo_url, d.branch, d.commit_sha, d.env, d.status, d.created_at, d.started_at, d.ended_at, d.error, d.log_path, d.image_tag, d.previous_image_tag, COALESCE(d.preview_url,''), COALESCE(r.source,''), COALESCE(d.build_number,0), COALESCE(d.deployed_by,''), COALESCE(d.commit_message,'')
+		FROM deploys d
+		LEFT JOIN deploy_requests r ON r.id = d.id
+		ORDER BY d.created_at DESC LIMIT 200`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []*Deploy{}
+	for rows.Next() {
+		d, err := scanDeployRow(rows)
+		if err != nil {
+			continue
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
+func (s *Server) getDeployFromDB(id string) (*Deploy, error) {
+	row := s.db.QueryRow(`SELECT d.id, d.app, d.repo_url, d.branch, d.commit_sha, d.env, d.status, d.created_at, d.started_at, d.ended_at, d.error, d.log_path, d.image_tag, d.previous_image_tag, COALESCE(d.preview_url,''), COALESCE(r.source,''), COALESCE(d.build_number,0), COALESCE(d.deployed_by,''), COALESCE(d.commit_message,'')
+		FROM deploys d
+		LEFT JOIN deploy_requests r ON r.id = d.id
+		WHERE d.id=?`, id)
+
+	d, err := scanDeployRow(row)
+	if err != nil {
+		return nil, err
+	}
+	return d, nil
 }
 
 func (s *Server) loadDeploysFromDB() error {
@@ -11661,21 +12858,21 @@ func (s *Server) reconcileStaleDeploysOnStartup() error {
 func (s *Server) saveAppState(st *AppState) error {
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO app_state
-		(app, env, branch, repo_url, engine, current_image, previous_image, mode, host_port, host_port_explicit, service_port, public_host, active_slot, standby_slot, drain_until, traffic_mode, access_policy, ip_allowlist, repo_hash, expires_at, webhook_secret, notification_webhooks, traffic_split_percent, rollout_min_requests, rollout_error_percent, rollout_assess_seconds, rollout_started_at, rollout_deploy_id, rollout_status, stopped, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		st.App, string(st.Env), st.Branch, st.RepoURL, firstNonEmptyEngine(st.Engine), st.CurrentImage, st.PreviousImage, st.Mode,
+		(app, env, branch, repo_url, project_root, build_context, dockerfile, engine, current_image, previous_image, mode, host_port, host_port_explicit, service_port, public_host, active_slot, standby_slot, drain_until, traffic_mode, access_policy, ip_allowlist, repo_hash, expires_at, webhook_secret, notification_webhooks, traffic_split_percent, rollout_min_requests, rollout_error_percent, rollout_assess_seconds, rollout_started_at, rollout_deploy_id, rollout_status, stopped, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		st.App, string(st.Env), st.Branch, st.RepoURL, st.ProjectRoot, st.BuildContext, st.Dockerfile, firstNonEmptyEngine(st.Engine), st.CurrentImage, st.PreviousImage, st.Mode,
 		st.HostPort, st.HostPortExplicit, st.ServicePort, st.PublicHost, normalizeActiveSlot(st.ActiveSlot), normalizeActiveSlot(st.StandbySlot), st.DrainUntil, firstNonEmpty(normalizeTrafficMode(st.TrafficMode), "edge"), firstNonEmpty(normalizeAccessPolicy(st.AccessPolicy), s.lanePolicy(st.Env).DefaultAccessPolicy), normalizeIPAllowlist(st.IPAllowlist), st.RepoHash, st.ExpiresAt, st.WebhookSecret, st.NotificationWebhooks, st.TrafficSplitPercent, st.RolloutMinRequests, st.RolloutErrorPercent, st.RolloutAssessSeconds, st.RolloutStartedAt, st.RolloutDeployID, st.RolloutStatus, st.Stopped, time.Now().UnixMilli(),
 	)
 	return err
 }
 
 func (s *Server) getAppState(app string, env DeployEnv, branch string) (*AppState, error) {
-	row := s.db.QueryRow(`SELECT app, env, branch, repo_url, COALESCE(engine,''), current_image, previous_image, mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(repo_hash,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), COALESCE(stopped,0)
+	row := s.db.QueryRow(`SELECT app, env, branch, repo_url, COALESCE(project_root,''), COALESCE(build_context,''), COALESCE(dockerfile,''), COALESCE(engine,''), current_image, previous_image, mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(repo_hash,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), COALESCE(stopped,0)
 		FROM app_state WHERE app=? AND env=? AND branch=?`, app, string(env), branch)
 
 	var st AppState
 	var envS string
-	if err := row.Scan(&st.App, &envS, &st.Branch, &st.RepoURL, &st.Engine, &st.CurrentImage, &st.PreviousImage, &st.Mode, &st.HostPort, &st.HostPortExplicit, &st.ServicePort, &st.PublicHost, &st.ActiveSlot, &st.StandbySlot, &st.DrainUntil, &st.TrafficMode, &st.AccessPolicy, &st.IPAllowlist, &st.RepoHash, &st.ExpiresAt, &st.WebhookSecret, &st.NotificationWebhooks, &st.TrafficSplitPercent, &st.RolloutMinRequests, &st.RolloutErrorPercent, &st.RolloutAssessSeconds, &st.RolloutStartedAt, &st.RolloutDeployID, &st.RolloutStatus, &st.Stopped); err != nil {
+	if err := row.Scan(&st.App, &envS, &st.Branch, &st.RepoURL, &st.ProjectRoot, &st.BuildContext, &st.Dockerfile, &st.Engine, &st.CurrentImage, &st.PreviousImage, &st.Mode, &st.HostPort, &st.HostPortExplicit, &st.ServicePort, &st.PublicHost, &st.ActiveSlot, &st.StandbySlot, &st.DrainUntil, &st.TrafficMode, &st.AccessPolicy, &st.IPAllowlist, &st.RepoHash, &st.ExpiresAt, &st.WebhookSecret, &st.NotificationWebhooks, &st.TrafficSplitPercent, &st.RolloutMinRequests, &st.RolloutErrorPercent, &st.RolloutAssessSeconds, &st.RolloutStartedAt, &st.RolloutDeployID, &st.RolloutStatus, &st.Stopped); err != nil {
 		return nil, err
 	}
 	st.Env = DeployEnv(envS)
@@ -11760,6 +12957,9 @@ func validateDeployRequest(req DeployRequest) error {
 	}
 	if req.ServicePort < 0 {
 		return fmt.Errorf("service_port must be >= 0")
+	}
+	if req.WorkspaceBranch != "" && !isKnownDeployEnv(normalizeDeployEnv(string(req.WorkspaceEnv))) {
+		return fmt.Errorf("workspace_env required when workspace_branch is set")
 	}
 	return nil
 }

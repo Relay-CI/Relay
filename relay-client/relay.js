@@ -30,7 +30,9 @@ if (process.platform === "win32") {
  *   secrets add     add or update a secret
  *   secrets rm      remove a secret
  *   plugin list     list installed buildpack plugins
+ *   plugin search   search the plugin catalog
  *   plugin install  install a buildpack plugin from a JSON file
+ *   plugin install-url  install a buildpack plugin from a verified HTTPS URL
  *   plugin remove   remove a buildpack plugin by name
  */
 
@@ -58,6 +60,8 @@ const {
   saveRelayState,
   getWorkspaceVersion,
   setWorkspaceVersion,
+  getWorkspaceLocalFingerprint,
+  setWorkspaceLocalFingerprint,
 } = require("./config");
 
 const CLI_VERSION = (() => {
@@ -1383,6 +1387,7 @@ async function sha256File(absPath) {
 async function buildManifest(rootDir) {
   const relayIgnore = await loadRelayIgnore(rootDir);
   const list = await walkFiles(rootDir, relayIgnore);
+  list.sort((a, b) => a.rel.localeCompare(b.rel));
   const cache = loadManifestCache(rootDir, relayIgnore.cacheKey);
   const nextCache = {};
   const manifest = [];
@@ -1414,6 +1419,20 @@ async function buildManifest(rootDir) {
   }
   saveManifestCache(rootDir, relayIgnore.cacheKey, nextCache);
   return { manifest, reused, hashed, ignoreRules: relayIgnore.rules.length };
+}
+
+function workspaceFingerprintFromManifest(manifest) {
+  const h = crypto.createHash("sha256");
+  const sorted = [...manifest].sort((a, b) =>
+    String(a.Path || "").localeCompare(String(b.Path || "")),
+  );
+  for (const file of sorted) {
+    h.update(String(file.Path || ""));
+    h.update("\0");
+    h.update(String(file.Hash || file.Sha256 || ""));
+    h.update("\0");
+  }
+  return h.digest("hex").slice(0, 16);
 }
 
 // â”€â”€â”€ Usage / help â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1466,9 +1485,12 @@ ${c.bold}COMMANDS${c.reset}
   ${c.cyan}secrets add${c.reset}  --key K --value V   Add / update a secret
   ${c.cyan}secrets rm${c.reset}   --key K             Remove a secret
 
-  ${c.cyan}plugin list${c.reset}                  List installed buildpack plugins
-  ${c.cyan}plugin install${c.reset} <file.json>   Install a buildpack plugin
-  ${c.cyan}plugin remove${c.reset}  <name>        Remove a buildpack plugin
+  ${c.cyan}plugin list${c.reset}                         List installed buildpack plugins
+  ${c.cyan}plugin search${c.reset} [query]               Search the plugin catalog
+  ${c.cyan}plugin install${c.reset} <file.json>          Install a buildpack plugin
+  ${c.cyan}plugin install-url${c.reset} <https-url>      Install a remote buildpack plugin
+    --sha256 <hex>               Verify the downloaded plugin JSON before install
+  ${c.cyan}plugin remove${c.reset}  <name>               Remove a buildpack plugin
 
   ${c.cyan}version${c.reset}                      Show relay, relayd, and station versions
   ${c.cyan}doctor${c.reset}                       Check client, agent, Docker, domains, and TLS
@@ -1999,6 +2021,14 @@ async function main() {
           });
       });
       if (wsVersion) setWorkspaceVersion(baseUrl, app, env, branch, wsVersion);
+      const pulledManifest = await buildManifest(rootDir);
+      setWorkspaceLocalFingerprint(
+        baseUrl,
+        app,
+        env,
+        branch,
+        workspaceFingerprintFromManifest(pulledManifest.manifest),
+      );
       ok(`Workspace up to date  (version ${wsVersion || "unknown"})`);
     } catch (e) {
       die(e.message);
@@ -2298,6 +2328,46 @@ async function main() {
       process.exit(0);
     }
 
+    if (sub === "search") {
+      const query = String(args._[2] || "").trim().toLowerCase();
+      try {
+        const catalog = await apiJSON(transport, "GET", "/api/plugins/catalog");
+        const rows = (catalog || []).filter((item) => {
+          if (!query) return true;
+          const haystack = [
+            item.name,
+            item.description || "",
+            ...((item.tags || []).map((tag) => String(tag))),
+          ]
+            .join(" ")
+            .toLowerCase();
+          return haystack.includes(query);
+        });
+        if (!rows.length) {
+          info(query ? `No plugins matched "${query}"` : "No catalog plugins found");
+          process.exit(0);
+        }
+        for (const item of rows) {
+          const installed = item.installed
+            ? ` ${c.green}[installed]${c.reset}`
+            : "";
+          const tags = Array.isArray(item.tags) && item.tags.length
+            ? ` ${c.dim}${item.tags.join(", ")}${c.reset}`
+            : "";
+          console.log(`  ${c.cyan}${item.name}${c.reset}${installed}${tags}`);
+          if (item.description) {
+            console.log(`    ${c.dim}${item.description}${c.reset}`);
+          }
+          if (item.source_url) {
+            console.log(`    ${c.dim}${item.source_url}${c.reset}`);
+          }
+        }
+      } catch (e) {
+        die(e.message);
+      }
+      process.exit(0);
+    }
+
     if (sub === "install") {
       const ref = args.file || args._[2];
       if (!ref) die("Usage: relay plugin install <plugin.json>");
@@ -2321,6 +2391,26 @@ async function main() {
       process.exit(0);
     }
 
+    if (sub === "install-url") {
+      const sourceURL = String(args.url || args._[2] || "").trim();
+      const sha256 = String(args.sha256 || "").trim().toLowerCase();
+      if (!sourceURL) {
+        die("Usage: relay plugin install-url <https-url> [--sha256 <hex>]");
+      }
+      try {
+        const res = await apiJSON(
+          transport,
+          "POST",
+          "/api/plugins/buildpacks/install-url",
+          { url: sourceURL, sha256 },
+        );
+        ok(`Installed remote buildpack plugin: ${res.name}`);
+      } catch (e) {
+        die(e.message);
+      }
+      process.exit(0);
+    }
+
     if (sub === "remove" || sub === "uninstall") {
       const name = args._[2];
       if (!name) die("Usage: relay plugin remove <name>");
@@ -2338,7 +2428,7 @@ async function main() {
     }
 
     die(
-      "Unknown plugin sub-command. Supported: list, install <file>, remove <name>",
+      "Unknown plugin sub-command. Supported: list, search [query], install <file>, install-url <https-url>, remove <name>",
     );
   }
   // ── agent ──────────────────────────────────────────────────────────────────
@@ -2712,6 +2802,15 @@ async function main() {
   );
 
   const totalStartedAt = nowMs();
+  const manifestSpinner = createSpinner("hashing workspace");
+  manifestSpinner.start();
+  const manifestBuild = await buildManifest(rootDir);
+  const manifest = manifestBuild.manifest;
+  const localFingerprint = workspaceFingerprintFromManifest(manifest);
+  manifestSpinner.stop(
+    true,
+    `files=${manifest.length} cached=${manifestBuild.reused} hashed=${manifestBuild.hashed}`,
+  );
 
   // Read the locally-saved workspace version so the server can detect
   // whether someone else deployed since our last sync.
@@ -2719,19 +2818,36 @@ async function main() {
   const baseVersion = args.force
     ? ""
     : getWorkspaceVersion(baseUrl, app, env, branch);
+  const savedLocalFingerprint = getWorkspaceLocalFingerprint(
+    baseUrl,
+    app,
+    env,
+    branch,
+  );
+  const localChanged = Boolean(
+    savedLocalFingerprint && savedLocalFingerprint !== localFingerprint,
+  );
+
+  const startSyncSession = async (baseVersionOverride) =>
+    apiJSON(transport, "POST", "/api/sync/start", {
+      app,
+      branch,
+      env,
+      base_version: baseVersionOverride,
+      local_changed: localChanged,
+    });
 
   const syncStartSpinner = createSpinner(`sync start`);
   syncStartSpinner.start();
   let startResp;
+  let syncStartCompleted = false;
+  let syncStartSpinnerClosed = false;
   try {
-    startResp = await apiJSON(transport, "POST", "/api/sync/start", {
-      app,
-      branch,
-      env,
-      base_version: baseVersion,
-    });
+    startResp = await startSyncSession(baseVersion);
+    syncStartCompleted = true;
   } catch (e) {
     syncStartSpinner.stop(false);
+    syncStartSpinnerClosed = true;
     // 409 = someone else deployed since our last pull
     if (
       e.status === 409 ||
@@ -2742,24 +2858,39 @@ async function main() {
       err(
         `Run:  ${c.bold}relay pull${c.reset}  to pull the latest files, then re-deploy.`,
       );
-      err(`      (or use ${c.dim}--force${c.reset} to overwrite anyway)`);
-      process.exit(1);
+      if (process.stdin.isTTY && !args.force) {
+        const confirm = await prompt(
+          "Overwrite the server workspace with your local files anyway? (yes/no)",
+          "no",
+        );
+        if (confirm.toLowerCase().startsWith("y")) {
+          const retrySpinner = createSpinner("sync start (overwrite)");
+          retrySpinner.start();
+          try {
+            startResp = await startSyncSession("");
+            syncStartCompleted = true;
+            retrySpinner.stop(true, `session=${startResp.session_id?.slice(0, 8)}`);
+          } catch (retryErr) {
+            retrySpinner.stop(false);
+            die(retryErr.message);
+          }
+        } else {
+          process.exit(1);
+        }
+      } else {
+        err(`      (or use ${c.dim}--force${c.reset} to overwrite anyway)`);
+        process.exit(1);
+      }
+    } else {
+      die(e.message);
     }
-    die(e.message);
   }
-  syncStartSpinner.stop(true, `session=${startResp.session_id?.slice(0, 8)}`);
+  if (syncStartCompleted && !syncStartSpinnerClosed) {
+    syncStartSpinner.stop(true, `session=${startResp.session_id?.slice(0, 8)}`);
+  }
 
   const sessionId = startResp.session_id;
   if (!sessionId) die("sync start failed: no session_id returned");
-
-  const manifestSpinner = createSpinner("hashing workspace");
-  manifestSpinner.start();
-  const manifestBuild = await buildManifest(rootDir);
-  const manifest = manifestBuild.manifest;
-  manifestSpinner.stop(
-    true,
-    `files=${manifest.length} cached=${manifestBuild.reused} hashed=${manifestBuild.hashed}`,
-  );
 
   const planSpinner = createSpinner("diffing against agent workspace");
   planSpinner.start();
@@ -2823,6 +2954,7 @@ async function main() {
   if (deploy.workspace_version) {
     setWorkspaceVersion(baseUrl, app, env, branch, deploy.workspace_version);
   }
+  setWorkspaceLocalFingerprint(baseUrl, app, env, branch, localFingerprint);
 
   const noStream = (args["no-stream"] === "true" || args["no-stream"] === true) && args["stream"] !== "true" && args["stream"] !== true;
   if (!noStream) {

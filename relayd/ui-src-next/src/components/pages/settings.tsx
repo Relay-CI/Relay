@@ -31,9 +31,11 @@ import {
   restartCompanion,
   deleteProject,
   generateSignedLink,
+  createDeploy,
   getPromotions,
   requestPromotion,
   approvePromotion,
+  rollback,
   type AppConfig,
   type Secret,
   type Companion,
@@ -142,6 +144,7 @@ export function SettingsPage({
     buildSettingsConfig() as AppConfig,
   );
   const [busy, setBusy] = useState(false);
+  const [rolloutBusy, setRolloutBusy] = useState("");
   const [notice, setNotice] = useState<{
     tone: "ok" | "warn";
     text: string;
@@ -150,6 +153,10 @@ export function SettingsPage({
   const [signedLink, setSignedLink] = useState<SignedLinkResponse | null>(null);
   const [promotionBusy, setPromotionBusy] = useState(false);
   const [promotions, setPromotions] = useState<PromotionRecord[]>([]);
+  const [promotionTargetKey, setPromotionTargetKey] = useState("");
+  const [manualDeployBusy, setManualDeployBusy] = useState(false);
+  const [manualDeploySource, setManualDeploySource] = useState<"workspace" | "git">("workspace");
+  const [manualDeployTargetKey, setManualDeployTargetKey] = useState("");
 
   const [secrets, setSecrets] = useState<Secret[]>([]);
   const [draftSecret, setDraftSecret] = useState({ key: "", value: "" });
@@ -195,6 +202,54 @@ export function SettingsPage({
   useEffect(() => {
     load();
   }, [load]);
+
+  const promotionTargets = (project?.envs ?? [])
+    .filter((envInfo) => {
+      if (!selectedEnv) return false;
+      return !(envInfo.env === selectedEnv.env && envInfo.branch === selectedEnv.branch);
+    })
+    .map((envInfo) => ({
+      key: `${envInfo.env}::${envInfo.branch}`,
+      env: envInfo.env,
+      branch: envInfo.branch,
+      label: `${envInfo.env}/${envInfo.branch}`,
+    }));
+
+  useEffect(() => {
+    if (!selectedEnv) {
+      setPromotionTargetKey("");
+      setManualDeployTargetKey("");
+      return;
+    }
+    if (promotionTargets.find((item) => item.key === promotionTargetKey)) {
+      return;
+    }
+    const preferred =
+      promotionTargets.find(
+        (item) => item.env === "prod" && item.branch === selectedEnv.branch,
+      ) ??
+      promotionTargets.find((item) => item.env === "prod") ??
+      promotionTargets.find(
+        (item) => item.env === "staging" && item.branch === selectedEnv.branch,
+      ) ??
+      promotionTargets[0];
+    setPromotionTargetKey(preferred?.key ?? "");
+  }, [selectedEnv?.env, selectedEnv?.branch, promotionTargets.map((item) => item.key).join("|")]);
+
+  useEffect(() => {
+    if (!selectedEnv) {
+      setManualDeployTargetKey("");
+      return;
+    }
+    const availableTargets = [
+      { key: `${selectedEnv.env}::${selectedEnv.branch}` },
+      ...promotionTargets,
+    ];
+    if (availableTargets.find((item) => item.key === manualDeployTargetKey)) {
+      return;
+    }
+    setManualDeployTargetKey(`${selectedEnv.env}::${selectedEnv.branch}`);
+  }, [selectedEnv?.env, selectedEnv?.branch, promotionTargets.map((item) => item.key).join("|"), manualDeployTargetKey]);
 
   function upd(patch: Partial<AppConfig>) {
     setConfig((c) => ({ ...c, ...patch }));
@@ -446,12 +501,15 @@ export function SettingsPage({
 
   async function handleRequestPromotion() {
     if (!selectedEnv || !canWrite) return;
+    const target = promotionTargets.find((item) => item.key === promotionTargetKey);
     setPromotionBusy(true);
     try {
       await requestPromotion({
         app: selectedEnv.app,
         source_env: selectedEnv.env,
         source_branch: selectedEnv.branch,
+        target_env: target?.env,
+        target_branch: target?.branch,
       });
       setPromotions(
         await getPromotions(
@@ -464,8 +522,8 @@ export function SettingsPage({
         tone: "ok",
         text:
           currentUser?.role === "owner"
-            ? "Promotion started. Relay is moving the staging image into production now."
-            : "Promotion request created. An owner can approve it from this lane.",
+            ? `Promotion started. Relay is moving ${selectedEnv.env}/${selectedEnv.branch} into ${target?.label ?? "the selected target lane"} now.`
+            : `Promotion request created for ${target?.label ?? "the selected target lane"}. An owner can approve it from this lane.`,
       });
       await onUpdated();
     } catch (err) {
@@ -505,6 +563,93 @@ export function SettingsPage({
     }
   }
 
+  async function handleRollbackLane() {
+    if (!selectedEnv || !canWrite) return;
+    const confirmed = window.confirm(
+      `Queue a rollback for ${selectedEnv.app}/${selectedEnv.env}/${selectedEnv.branch}? Relay will re-activate the previous image for this lane.`,
+    );
+    if (!confirmed) return;
+
+    setRolloutBusy("rollback");
+    try {
+      await rollback(selectedEnv);
+      setNotice({
+        tone: "ok",
+        text: "Rollback queued. Relay is restoring the previous image for this lane now.",
+      });
+      await onUpdated();
+    } catch (err) {
+      setNotice({
+        tone: "warn",
+        text: `Rollback failed: ${err instanceof Error ? err.message : "unknown error"}`,
+      });
+    } finally {
+      setRolloutBusy("");
+    }
+  }
+
+  async function handlePromoteAllTraffic() {
+    if (!selectedEnv || !canWrite) return;
+    setRolloutBusy("promote-traffic");
+    try {
+      const next = { ...toApiPayload(config), traffic_split_percent: 100 };
+      await saveAppConfig(selectedEnv, next);
+      upd({ traffic_split_percent: 100 });
+      setNotice({
+        tone: "ok",
+        text: "Traffic split set to 100%. Relay will treat this lane as a full cutover instead of a canary.",
+      });
+      await onUpdated();
+    } catch (err) {
+      setNotice({
+        tone: "warn",
+        text: `Traffic promotion failed: ${err instanceof Error ? err.message : "unknown error"}`,
+      });
+    } finally {
+      setRolloutBusy("");
+    }
+  }
+
+  async function handleManualDeploy() {
+    if (!selectedEnv || !canWrite) return;
+    const [targetEnv, targetBranch] = manualDeployTargetKey.split("::");
+    const payload = {
+      app: selectedEnv.app,
+      env: targetEnv || selectedEnv.env,
+      branch: targetBranch || selectedEnv.branch,
+      repo_url: (config.repo_url ?? "").trim(),
+      source: manualDeploySource,
+      workspace_env: selectedEnv.env,
+      workspace_branch: selectedEnv.branch,
+    };
+    if (manualDeploySource === "git" && !payload.repo_url) {
+      setNotice({
+        tone: "warn",
+        text: "Manual git deploy needs a repository URL on this lane first.",
+      });
+      return;
+    }
+    setManualDeployBusy(true);
+    try {
+      await createDeploy(payload);
+      setNotice({
+        tone: "ok",
+        text:
+          manualDeploySource === "workspace"
+            ? `Workspace deploy queued for ${payload.env}/${payload.branch}. Relay is rebuilding from the current ${selectedEnv.env}/${selectedEnv.branch} workspace now.`
+            : `Git deploy queued for ${payload.env}/${payload.branch} from ${payload.repo_url || "the saved repository"}.`,
+      });
+      await onUpdated();
+    } catch (err) {
+      setNotice({
+        tone: "warn",
+        text: `Manual deploy failed: ${err instanceof Error ? err.message : "unknown error"}`,
+      });
+    } finally {
+      setManualDeployBusy(false);
+    }
+  }
+
   if (!selectedEnv) {
     return (
       <div className="flex items-center justify-center h-full text-white/30 text-sm">
@@ -524,6 +669,15 @@ export function SettingsPage({
   const pendingPromotion = promotions.find(
     (item) => item.status === "pending_approval",
   );
+  const selectedPromotionTarget =
+    promotionTargets.find((item) => item.key === promotionTargetKey) ?? null;
+  const manualDeployTargets = [
+    {
+      key: `${selectedEnv.env}::${selectedEnv.branch}`,
+      label: `${selectedEnv.env}/${selectedEnv.branch} (current lane)`,
+    },
+    ...promotionTargets.map((item) => ({ key: item.key, label: item.label })),
+  ];
 
   return (
     <div className="space-y-6">
@@ -722,6 +876,35 @@ export function SettingsPage({
               disabled={!canWrite}
             />
           </Field>
+          <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-4 space-y-3">
+            <div>
+              <div className="eyebrow mb-0.5">Live rollout policy</div>
+              <div className="text-sm font-medium text-white">
+                {config.traffic_split_percent ?? 100}% new traffic, {config.rollout_min_requests ?? 25} request minimum, rollback above {config.rollout_error_percent ?? 5}% errors
+              </div>
+              <div className="text-xs text-white/35 mt-1">
+                Relay monitors canary exposure for {config.rollout_assess_seconds ?? 300} seconds before deciding whether to continue or revert.
+              </div>
+            </div>
+            <div className="flex gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={handlePromoteAllTraffic}
+                disabled={rolloutBusy === "promote-traffic" || !canWrite || (config.traffic_split_percent ?? 100) >= 100}
+                className="ghost-btn"
+              >
+                {rolloutBusy === "promote-traffic" ? "Applying..." : "Promote All Traffic"}
+              </button>
+              <button
+                type="button"
+                onClick={handleRollbackLane}
+                disabled={rolloutBusy === "rollback" || !canWrite}
+                className="ghost-btn border-red-500/40 text-red-300 hover:bg-red-500/10"
+              >
+                {rolloutBusy === "rollback" ? "Queueing..." : "Rollback Lane"}
+              </button>
+            </div>
+          </div>
           {(config.rollout_status || selectedEnv.rollout_status) && (
             <div className="text-xs text-white/35">
               Rollout status:{" "}
@@ -856,32 +1039,64 @@ export function SettingsPage({
             </button>
           </div>
           <div className="text-xs text-white/35">
-            Delete Lane permanently removes this lane's runtime, workspace, and lane data.
+            Delete Lane permanently removes this lane&apos;s runtime, workspace, and lane data.
           </div>
         </div>
       </SectionCard>
 
-      {(selectedEnv.env === "staging" || promotions.length > 0) && (
-        <SectionCard title="Promotion" eyebrow="Staging to production">
+      {(selectedEnv.env !== "prod" || promotions.length > 0) && (
+        <SectionCard title="Rollout & Promotion" eyebrow="Promote, approve, revert">
           <div className="space-y-3">
             <p className="text-sm text-white/50">
               Promote the currently healthy{" "}
               <strong className="text-white">{selectedEnv.env}</strong> lane
-              into production. Relay keeps an audit trail, waits for approval
+              into another lane. Relay keeps an audit trail, waits for approval
               when required, and queues rollback if post-promote health fails.
             </p>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <MiniMetric
+                label="Canary split"
+                value={`${config.traffic_split_percent ?? selectedEnv.traffic_split_percent ?? 100}%`}
+              />
+              <MiniMetric
+                label="Assess window"
+                value={`${config.rollout_assess_seconds ?? selectedEnv.rollout_assess_seconds ?? 300}s`}
+              />
+              <MiniMetric
+                label="Rollback gate"
+                value={`${config.rollout_error_percent ?? selectedEnv.rollout_error_percent ?? 5}% / ${config.rollout_min_requests ?? selectedEnv.rollout_min_requests ?? 25} req`}
+              />
+            </div>
             <div className="flex gap-2 flex-wrap">
-              {selectedEnv.env === "staging" && (
+              {selectedEnv.env !== "prod" && (
+                <Field label="Target lane" className="min-w-[220px]">
+                  <select
+                    className="text-input"
+                    value={promotionTargetKey}
+                    onChange={(e) => setPromotionTargetKey(e.target.value)}
+                    disabled={!canWrite || promotionBusy}
+                  >
+                    {promotionTargets.map((target) => (
+                      <option key={target.key} value={target.key}>
+                        {target.label}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              )}
+            </div>
+            <div className="flex gap-2 flex-wrap">
+              {selectedEnv.env !== "prod" && (
                 <button
                   type="button"
                   onClick={handleRequestPromotion}
-                  disabled={promotionBusy || !canWrite}
+                  disabled={promotionBusy || !canWrite || !selectedPromotionTarget}
                   className="primary-btn"
                 >
                   {promotionBusy
                     ? "Working..."
                     : isOwner
-                      ? "Promote To Production"
+                      ? `Promote To ${selectedPromotionTarget?.env ?? "target"}`
                       : "Request Promotion"}
                 </button>
               )}
@@ -895,6 +1110,14 @@ export function SettingsPage({
                   {promotionBusy ? "Approving..." : "Approve Pending Request"}
                 </button>
               )}
+              <button
+                type="button"
+                onClick={handleRollbackLane}
+                disabled={rolloutBusy === "rollback" || !canWrite}
+                className="ghost-btn border-red-500/40 text-red-300 hover:bg-red-500/10"
+              >
+                {rolloutBusy === "rollback" ? "Queueing..." : "Rollback This Lane"}
+              </button>
             </div>
             {!promotions.length ? (
               <div className="text-sm text-white/25">
@@ -965,6 +1188,96 @@ export function SettingsPage({
           </div>
         </SectionCard>
       )}
+
+      <SectionCard title="Build layout" eyebrow="Monorepo + Dockerfile">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <Field label="Project Root">
+            <input
+              className="text-input font-mono text-xs"
+              value={config.project_root ?? ""}
+              onChange={(e) => upd({ project_root: e.target.value })}
+              placeholder="apps/api"
+              disabled={!canWrite}
+            />
+          </Field>
+          <Field label="Build Context">
+            <input
+              className="text-input font-mono text-xs"
+              value={config.build_context ?? ""}
+              onChange={(e) => upd({ build_context: e.target.value })}
+              placeholder="."
+              disabled={!canWrite}
+            />
+          </Field>
+          <Field label="Dockerfile">
+            <input
+              className="text-input font-mono text-xs"
+              value={config.dockerfile ?? ""}
+              onChange={(e) => upd({ dockerfile: e.target.value })}
+              placeholder="apps/api/Dockerfile"
+              disabled={!canWrite}
+            />
+          </Field>
+        </div>
+        <p className="text-xs text-white/35">
+          All three paths are optional and repo-relative. Leave them blank for automatic detection. Set only the pieces you need for monorepo apps.
+        </p>
+        <div>
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={busy || !canWrite}
+            className="primary-btn"
+          >
+            {busy ? "Saving..." : "Save Build Layout"}
+          </button>
+        </div>
+      </SectionCard>
+
+      <SectionCard title="Manual Deploy" eyebrow="Rebuild or redeploy on demand">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <Field label="Deploy Source">
+            <select
+              className="text-input"
+              value={manualDeploySource}
+              onChange={(e) =>
+                setManualDeploySource(e.target.value === "git" ? "git" : "workspace")
+              }
+              disabled={!canWrite || manualDeployBusy}
+            >
+              <option value="workspace">Current workspace</option>
+              <option value="git">Saved repo_url + target branch</option>
+            </select>
+          </Field>
+          <Field label="Target Lane">
+            <select
+              className="text-input"
+              value={manualDeployTargetKey}
+              onChange={(e) => setManualDeployTargetKey(e.target.value)}
+              disabled={!canWrite || manualDeployBusy}
+            >
+              {manualDeployTargets.map((target) => (
+                <option key={target.key} value={target.key}>
+                  {target.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </div>
+        <p className="text-xs text-white/35">
+          Workspace deploys rebuild from the current lane&apos;s saved server workspace. Git deploys refresh the selected target lane from its saved repository and branch.
+        </p>
+        <div>
+          <button
+            type="button"
+            onClick={handleManualDeploy}
+            disabled={!canWrite || manualDeployBusy}
+            className="primary-btn"
+          >
+            {manualDeployBusy ? "Queueing..." : "Queue Manual Deploy"}
+          </button>
+        </div>
+      </SectionCard>
 
       {/* GitHub / Webhooks */}
       <SectionCard title="GitHub / Webhooks" eyebrow="Per-project integration">
@@ -1470,6 +1783,15 @@ function SegButton({
     >
       {children}
     </button>
+  );
+}
+
+function MiniMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="bg-white/[0.03] border border-white/[0.06] rounded-lg px-3 py-2.5">
+      <div className="text-[10px] text-white/35 mb-1">{label}</div>
+      <div className="text-sm text-white">{value}</div>
+    </div>
   );
 }
 

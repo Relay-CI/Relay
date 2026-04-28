@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // BuildDockerfile executes the Dockerfile at dockerfilePath with build context
@@ -361,12 +362,53 @@ func runInChroot(ctx context.Context, rootfs, workdir string, envMap map[string]
 		return err
 	}
 
+	// Write output to a temp *os.File instead of assigning logw directly.
+	// When logw is a non-File writer (e.g. http.ResponseWriter), exec creates an
+	// internal pipe + goroutine that blocks cmd.Wait() until the read-end sees
+	// EOF.  Detached grandchildren spawned by RUN steps (npm background daemons,
+	// esbuild watchers, etc.) inherit the pipe write-end and keep it alive after
+	// their parent exits, causing an indefinite hang.  Using *os.File avoids the
+	// internal goroutine entirely; a separate tail goroutine streams to logw.
+	tmp, err := os.CreateTemp("", "station-run-*.log")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}()
+
+	// Tail goroutine: stream new bytes from the temp file to logw while cmd runs.
+	tailDone := make(chan struct{})
+	tr, trErr := os.Open(tmpPath)
+	if trErr == nil {
+		go func() {
+			defer tr.Close()
+			buf := make([]byte, 8192)
+			for {
+				n, _ := tr.Read(buf)
+				if n > 0 {
+					_, _ = logw.Write(buf[:n])
+					continue
+				}
+				select {
+				case <-tailDone:
+					_, _ = io.Copy(logw, tr)
+					return
+				default:
+					time.Sleep(50 * time.Millisecond)
+				}
+			}
+		}()
+	}
+
 	// Re-exec ourselves with a magic subcommand that sets up chroot + exec.
 	// ctx cancellation (e.g. HTTP client disconnect) kills the build command.
 	cmd := exec.CommandContext(ctx, self, "__station_run__", rootfs, workdir, shell)
 	cmd.Stdin = strings.NewReader("") // prevent Go from opening /dev/null for stdin
-	cmd.Stdout = logw
-	cmd.Stderr = logw
+	cmd.Stdout = tmp
+	cmd.Stderr = tmp
 
 	// Build env: PATH + image env + any host proxies.
 	env := []string{
@@ -385,6 +427,7 @@ func runInChroot(ctx context.Context, rootfs, workdir string, envMap map[string]
 	if len(mounts) > 0 {
 		data, err := json.Marshal(mounts)
 		if err != nil {
+			close(tailDone)
 			return fmt.Errorf("encode RUN mounts: %w", err)
 		}
 		env = append(env, buildRunMountsEnv+"="+string(data))
@@ -397,7 +440,9 @@ func runInChroot(ctx context.Context, rootfs, workdir string, envMap map[string]
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: syscall.CLONE_NEWNS,
 	}
-	return cmd.Run()
+	runErr := cmd.Run()
+	close(tailDone)
+	return runErr
 }
 
 // isBuildRunInit detects the __station_run__ sub-command used by runInChroot.

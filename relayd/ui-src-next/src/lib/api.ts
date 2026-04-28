@@ -151,6 +151,9 @@ export interface EnvInfo {
   env: string;
   branch: string;
   access_role?: string;
+  project_root?: string;
+  build_context?: string;
+  dockerfile?: string;
   engine?: string;
   mode?: string;
   traffic_mode?: string;
@@ -210,6 +213,16 @@ export interface Deploy {
   log?: string;
 }
 
+export interface CreateDeployRequest {
+  app: string;
+  env: string;
+  branch: string;
+  repo_url?: string;
+  source?: string;
+  workspace_env?: string;
+  workspace_branch?: string;
+}
+
 export interface Service {
   name: string;
   type: string;
@@ -234,6 +247,13 @@ export async function getDeploys(): Promise<Deploy[]> {
 
 export async function getDeployById(id: string): Promise<Deploy> {
   return apiFetch<Deploy>(`/api/deploys/${id}`);
+}
+
+export async function createDeploy(payload: CreateDeployRequest): Promise<Deploy> {
+  return apiFetch<Deploy>("/api/deploys", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 // ── Deployment operations ─────────────────────────────────────────────────
@@ -299,6 +319,9 @@ export async function cancelDeploy(deployId: string): Promise<void> {
 
 export interface AppConfig {
   repo_url?: string;
+  project_root?: string;
+  build_context?: string;
+  dockerfile?: string;
   engine?: string;
   mode?: string;
   traffic_mode?: string;
@@ -546,8 +569,119 @@ export interface ServerConfig {
   acme_disabled?: string;
   theme_name?: string;
   theme_css?: string;
+  plugin_mutations_enabled?: boolean;
   doctor?: DoctorReport;
   [key: string]: unknown;
+}
+
+export interface AdminOpsContainerUsage {
+  id: string;
+  label: string;
+  kind: string;
+  container: string;
+  running: boolean;
+  cpu_percent: number;
+  mem_usage_bytes: number;
+  mem_limit_bytes: number;
+  mem_percent: number;
+  storage_bytes: number;
+  net_rx_bytes: number;
+  net_tx_bytes: number;
+  block_read_bytes: number;
+  block_write_bytes: number;
+}
+
+export interface AdminOpsLaneUsage {
+  cpu_percent: number;
+  mem_usage_bytes: number;
+  mem_limit_bytes: number;
+  mem_percent: number;
+  storage_bytes: number;
+  net_rx_bytes: number;
+  net_tx_bytes: number;
+  block_read_bytes: number;
+  block_write_bytes: number;
+  running_containers: number;
+  container_count: number;
+  measured: boolean;
+  note?: string;
+  targets: AdminOpsContainerUsage[];
+}
+
+export interface AdminOpsTrafficWindow {
+  requests: number;
+  server_errors: number;
+  client_errors: number;
+  bandwidth_bytes: number;
+  server_error_rate: number;
+}
+
+export interface AdminOpsDeploySummary {
+  id: string;
+  status: string;
+  source?: string;
+  created_at: string;
+  started_at?: string;
+  ended_at?: string;
+  build_number?: number;
+  build_duration_ms?: number;
+  commit_sha?: string;
+  commit_message?: string;
+  deployed_by?: string;
+  image_tag?: string;
+  previous_image_tag?: string;
+}
+
+export interface AdminOpsDeployDelta {
+  current: AdminOpsDeploySummary;
+  previous?: AdminOpsDeploySummary;
+  window: { seconds: number };
+  current_traffic?: AdminOpsTrafficWindow;
+  previous_traffic?: AdminOpsTrafficWindow;
+  build_duration_delta_ms?: number;
+  server_error_rate_delta?: number;
+  request_delta?: number;
+  bandwidth_delta_bytes?: number;
+  analytics_available: boolean;
+  analytics_note?: string;
+}
+
+export interface AdminOpsLane {
+  app: string;
+  env: string;
+  branch: string;
+  engine: string;
+  public_host?: string;
+  host_port?: number;
+  repo_url?: string;
+  stopped: boolean;
+  current_image?: string;
+  previous_image?: string;
+  usage: AdminOpsLaneUsage;
+  latest?: AdminOpsDeployDelta;
+}
+
+export interface AdminOpsApp {
+  app: string;
+  lane_count: number;
+  online_lanes: number;
+  usage: AdminOpsLaneUsage;
+  lanes: AdminOpsLane[];
+}
+
+export interface AdminOpsResponse {
+  generated_at: number;
+  summary: {
+    app_count: number;
+    lane_count: number;
+    online_lanes: number;
+    cpu_percent: number;
+    mem_usage_bytes: number;
+    mem_limit_bytes: number;
+    mem_percent: number;
+    storage_bytes: number;
+  };
+  apps: AdminOpsApp[];
 }
 
 export interface DoctorCheck {
@@ -592,6 +726,10 @@ export async function getPublicTheme(): Promise<PublicTheme> {
 
 export async function getDoctor(): Promise<DoctorReport> {
   return apiFetch<DoctorReport>("/api/doctor");
+}
+
+export async function getAdminOps(): Promise<AdminOpsResponse> {
+  return apiFetch<AdminOpsResponse>("/api/admin/ops");
 }
 
 // ── Build logs ────────────────────────────────────────────────────────────
@@ -705,8 +843,85 @@ export async function getAuditLog(limit?: number): Promise<AuditEntry[]> {
 
 // ── Plugins ───────────────────────────────────────────────────────────────
 
-export async function getBuildpackPlugins(): Promise<unknown[]> {
-  return apiFetch<unknown[]>("/api/plugins/buildpacks");
+export interface BuildpackPlugin {
+  name: string;
+  description?: string;
+  priority?: number;
+  detect: {
+    kind?: string;
+    kinds?: string[];
+    files_any?: string[];
+    files_all?: string[];
+    dirs_any?: string[];
+    dirs_all?: string[];
+    package_deps_any?: string[];
+    package_deps_all?: string[];
+    file_extensions_any?: string[];
+    file_extensions_all?: string[];
+  };
+  plan: {
+    kind?: string;
+    service_port?: number;
+    build_image?: string;
+    run_image?: string;
+    install_cmd?: string;
+    build_cmd?: string;
+    start_cmd?: string;
+    dockerfile_template: string;
+    write_default_conf?: boolean;
+    cleanup_paths?: string[];
+  };
+}
+
+export interface PluginCatalogEntry {
+  name: string;
+  description?: string;
+  tags?: string[];
+  homepage?: string;
+  source_url?: string;
+  installed: boolean;
+}
+
+export async function getBuildpackPlugins(): Promise<BuildpackPlugin[]> {
+  return apiFetch<BuildpackPlugin[]>("/api/plugins/buildpacks");
+}
+
+export async function getPluginCatalog(): Promise<PluginCatalogEntry[]> {
+  return apiFetch<PluginCatalogEntry[]>("/api/plugins/catalog");
+}
+
+export async function installCatalogPlugin(
+  name: string,
+): Promise<BuildpackPlugin> {
+  return apiFetch<BuildpackPlugin>("/api/plugins/catalog", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function installBuildpackPlugin(
+  plugin: BuildpackPlugin,
+): Promise<BuildpackPlugin> {
+  return apiFetch<BuildpackPlugin>("/api/plugins/buildpacks", {
+    method: "POST",
+    body: JSON.stringify(plugin),
+  });
+}
+
+export async function installBuildpackPluginFromURL(
+  url: string,
+  sha256?: string,
+): Promise<BuildpackPlugin> {
+  return apiFetch<BuildpackPlugin>("/api/plugins/buildpacks/install-url", {
+    method: "POST",
+    body: JSON.stringify({ url, sha256 }),
+  });
+}
+
+export async function removeBuildpackPlugin(name: string): Promise<void> {
+  await apiFetch(`/api/plugins/buildpacks/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
 }
 
 // ── Project delete ────────────────────────────────────────────────────────

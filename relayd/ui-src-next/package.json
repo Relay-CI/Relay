@@ -5,7 +5,7 @@
     "dev": "next dev",
     "build": "next build && node -e \"const fs=require('fs');const path=require('path');function cp(src,dst){const s=fs.statSync(src);if(s.isDirectory()){fs.mkdirSync(dst,{recursive:true});fs.readdirSync(src).forEach(f=>cp(path.join(src,f),path.join(dst,f)));}else{fs.mkdirSync(path.dirname(dst),{recursive:true});fs.copyFileSync(src,dst);}}if(fs.existsSync('../ui')){fs.rmSync('../ui',{recursive:true});}cp('out','../ui');console.log('Copied out/ to ../ui/');\"",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint ."
   },
   "dependencies": {
     "class-variance-authority": "^0.7.1",

@@ -17,6 +17,7 @@ package main
 // All other endpoints use plain JSON request/response bodies.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -193,7 +194,7 @@ func daemonBuild(w http.ResponseWriter, r *http.Request) {
 	// rsync makes this incremental on repeated builds; cp -a is the fallback.
 	contextDir := req.ContextDir
 	if strings.HasPrefix(req.ContextDir, "/mnt/") {
-		if synced, syncErr := syncContextToNative(req.ContextDir, logw); syncErr == nil {
+		if synced, syncErr := syncContextToNative(r.Context(), req.ContextDir, logw); syncErr == nil {
 			contextDir = synced
 		} else {
 			fmt.Fprintf(logw, "[context-sync] warn: %v — using original path\n", syncErr)
@@ -371,7 +372,7 @@ func daemonErr(w http.ResponseWriter, msg string) {
 // syncContextToNative copies src (a /mnt/ 9P path) to WSL2-native storage so
 // Dockerfile COPY instructions read from ext4 instead of the slow 9P bridge.
 // Uses rsync for incremental copies when available, cp -a as fallback.
-func syncContextToNative(src string, logw io.Writer) (string, error) {
+func syncContextToNative(ctx context.Context, src string, logw io.Writer) (string, error) {
 	key := strings.NewReplacer("/", "_", ":", "_", " ", "_").Replace(strings.TrimPrefix(src, "/"))
 	dst := filepath.Join(stateBaseDir(), "build-contexts", key)
 	fmt.Fprintf(logw, "[context-sync] syncing %s → %s\n", src, dst)
@@ -380,7 +381,7 @@ func syncContextToNative(src string, logw io.Writer) (string, error) {
 		if err := os.MkdirAll(dst, 0755); err != nil {
 			return "", fmt.Errorf("mkdir build-context dst: %w", err)
 		}
-		cmd := exec.Command("rsync", "-a", "--delete", src+"/", dst+"/")
+		cmd := exec.CommandContext(ctx, "rsync", "-a", "--delete", src+"/", dst+"/")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return "", fmt.Errorf("rsync: %v (%s)", err, strings.TrimSpace(string(out)))
 		}
@@ -392,7 +393,7 @@ func syncContextToNative(src string, logw io.Writer) (string, error) {
 		return "", fmt.Errorf("mkdir parent: %w", err)
 	}
 	_ = os.RemoveAll(dst)
-	cmd := exec.Command("cp", "-a", src, dst)
+	cmd := exec.CommandContext(ctx, "cp", "-a", src, dst)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("cp: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
