@@ -285,6 +285,7 @@ func (s *Server) constrainAppState(st *AppState) {
 	st.RolloutErrorPercent = normalizeRolloutErrorPercent(st.RolloutErrorPercent)
 	st.RolloutAssessSeconds = normalizeRolloutAssessSeconds(st.RolloutAssessSeconds)
 	st.RolloutStatus = strings.TrimSpace(st.RolloutStatus)
+	st.PublicHost, st.PublicHosts = canonicalizePublicHosts(st.PublicHost, st.PublicHosts)
 	if st.TrafficSplitPercent >= 100 || normalizeActiveSlot(st.StandbySlot) == "" {
 		st.TrafficSplitPercent = defaultTrafficSplitPercent()
 		if st.RolloutStatus == "monitoring" {

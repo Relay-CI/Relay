@@ -256,12 +256,15 @@ export function SettingsPage({
   }
 
   function toApiPayload(cfg: AppConfig) {
+    const publicHosts = normalizeHostEntries(cfg.public_hosts ?? []);
     return {
       ...cfg,
       mode: uiModeToApi(cfg.mode),
       traffic_mode: uiTrafficModeToApi(cfg.traffic_mode),
       host_port: Number(cfg.host_port) || 0,
       service_port: Number(cfg.service_port) || 0,
+      public_host: publicHosts[0] ?? "",
+      public_hosts: publicHosts,
     };
   }
 
@@ -791,11 +794,10 @@ export function SettingsPage({
             </div>
           </SegmentCard>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <Field label="Public Host">
-              <input
-                className="text-input"
-                value={config.public_host ?? ""}
-                onChange={(e) => upd({ public_host: e.target.value })}
+            <Field label="Public Hosts">
+              <HostChipsInput
+                value={normalizeHostEntries(config.public_hosts ?? (config.public_host ? [config.public_host] : []))}
+                onChange={(hosts) => upd({ public_host: hosts[0] ?? "", public_hosts: hosts })}
                 placeholder="app.yourdomain.com"
                 disabled={!canWrite}
               />
@@ -1745,6 +1747,117 @@ function Field({
       <div className="text-xs text-white/40 mb-1.5">{label}</div>
       {children}
     </label>
+  );
+}
+
+function normalizeHostEntries(values: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of values) {
+    const host = raw.trim().toLowerCase();
+    if (!host || seen.has(host)) continue;
+    seen.add(host);
+    out.push(host);
+  }
+  return out;
+}
+
+function HostChipsInput({
+  value,
+  onChange,
+  disabled,
+  placeholder,
+}: {
+  value: string[];
+  onChange: (value: string[]) => void;
+  disabled?: boolean;
+  placeholder?: string;
+}) {
+  const [draft, setDraft] = useState("");
+
+  function commit(nextRaw: string) {
+    const additions = normalizeHostEntries(
+      nextRaw
+        .split(/[\s,;\n\r\t]+/)
+        .map((item) => item.trim())
+        .filter(Boolean),
+    );
+    if (!additions.length) {
+      setDraft("");
+      return;
+    }
+    onChange(normalizeHostEntries([...value, ...additions]));
+    setDraft("");
+  }
+
+  function remove(host: string) {
+    onChange(value.filter((item) => item !== host));
+  }
+
+  return (
+    <div className="rounded-lg border border-white/[0.08] bg-white/[0.03] px-3 py-2.5">
+      <div className="flex flex-wrap gap-2">
+        {value.map((host, index) => (
+          <span
+            key={host}
+            className="inline-flex items-center gap-2 rounded-full border border-white/[0.08] bg-white/[0.06] px-3 py-1 text-xs text-white"
+          >
+            <span className="font-mono">{host}</span>
+            {index === 0 && (
+              <span className="rounded-full bg-relay-accent/15 px-1.5 py-0.5 text-[10px] uppercase tracking-[0.18em] text-relay-accent">
+                Primary
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => remove(host)}
+              disabled={disabled}
+              className="text-white/45 transition hover:text-white disabled:cursor-not-allowed disabled:text-white/20"
+              aria-label={`Remove ${host}`}
+            >
+              x
+            </button>
+          </span>
+        ))}
+        <input
+          className="min-w-[220px] flex-1 bg-transparent text-sm text-white outline-none placeholder:text-white/28"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (disabled) return;
+            if (e.key === "Enter" || e.key === "," || e.key === "Tab") {
+              const trimmed = draft.trim();
+              if (trimmed) {
+                e.preventDefault();
+                commit(draft);
+              }
+              return;
+            }
+            if (e.key === "Backspace" && !draft && value.length > 0) {
+              e.preventDefault();
+              onChange(value.slice(0, -1));
+            }
+          }}
+          onBlur={() => {
+            if (!disabled && draft.trim()) commit(draft);
+          }}
+          onPaste={(e) => {
+            if (disabled) return;
+            const text = e.clipboardData.getData("text");
+            if (!text) return;
+            if (/[,\n\r;\t ]/.test(text)) {
+              e.preventDefault();
+              commit(text);
+            }
+          }}
+          placeholder={placeholder}
+          disabled={disabled}
+        />
+      </div>
+      <p className="mt-2 text-[11px] text-white/32">
+        Type a hostname and press Enter, Tab, or comma to add it. The first chip is the primary host used for preview links.
+      </p>
+    </div>
   );
 }
 

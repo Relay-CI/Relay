@@ -310,6 +310,38 @@ func TestSaveAndLoadAppStatePersistsHostPortExplicit(t *testing.T) {
 	}
 }
 
+func TestSaveAndLoadAppStatePersistsPublicHosts(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	st := &AppState{
+		App:         "demo",
+		Env:         EnvProd,
+		Branch:      "main",
+		Engine:      EngineDocker,
+		Mode:        "traefik",
+		HostPort:    3555,
+		ServicePort: 3000,
+		PublicHost:  "demo.example.com",
+		PublicHosts: []string{"demo.example.com", "www.demo.example.com", "demo.example.com"},
+	}
+
+	if err := s.saveAppState(st); err != nil {
+		t.Fatalf("save app state: %v", err)
+	}
+	got, err := s.getAppState(st.App, st.Env, st.Branch)
+	if err != nil {
+		t.Fatalf("get app state: %v", err)
+	}
+	if got.PublicHost != "demo.example.com" {
+		t.Fatalf("expected primary host to persist, got %q", got.PublicHost)
+	}
+	if len(got.PublicHosts) != 2 {
+		t.Fatalf("expected 2 unique public hosts, got %#v", got.PublicHosts)
+	}
+	if got.PublicHosts[0] != "demo.example.com" || got.PublicHosts[1] != "www.demo.example.com" {
+		t.Fatalf("unexpected public hosts: %#v", got.PublicHosts)
+	}
+}
+
 func TestRepairLegacyAppHostPortsFromRuntime(t *testing.T) {
 	s := newPreviewPortTestServer(t)
 	containerName := appBaseContainerName("myhltv", EnvProd, "main")
@@ -389,6 +421,41 @@ func TestEnsureGlobalProxyRepairsLegacyHostPortsBeforeWritingConfig(t *testing.T
 	}
 	if got.HostPort != 3002 {
 		t.Fatalf("expected persisted host port 3002, got %d", got.HostPort)
+	}
+}
+
+func TestEnsureGlobalProxyWritesAllPublicHostAliases(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+
+	if err := s.saveAppState(&AppState{
+		App:         "myhltv",
+		Env:         EnvProd,
+		Branch:      "main",
+		Engine:      EngineDocker,
+		Mode:        "traefik",
+		HostPort:    3002,
+		PublicHost:  "myhltv.example.com",
+		PublicHosts: []string{"myhltv.example.com", "www.myhltv.example.com"},
+		Stopped:     false,
+	}); err != nil {
+		t.Fatalf("save app state: %v", err)
+	}
+
+	if err := s.ensureGlobalProxy(); err != nil {
+		t.Fatalf("ensure global proxy: %v", err)
+	}
+
+	configPath := filepath.Join(s.dataDir, "global-proxy", "Caddyfile")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read caddyfile: %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "myhltv.example.com {\n\treverse_proxy host.docker.internal:3002\n}") {
+		t.Fatalf("expected primary host route in caddyfile, got:\n%s", text)
+	}
+	if !strings.Contains(text, "www.myhltv.example.com {\n\treverse_proxy host.docker.internal:3002\n}") {
+		t.Fatalf("expected alias host route in caddyfile, got:\n%s", text)
 	}
 }
 

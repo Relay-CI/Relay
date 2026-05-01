@@ -217,8 +217,9 @@ type DeployRequest struct {
 	ServicePort int `json:"service_port"`
 	HostPort    int `json:"host_port"`
 	// Internal marker so persisted explicit preview ports are not silently re-assigned.
-	HostPortExplicit bool   `json:"-"`
-	PublicHost       string `json:"public_host"`
+	HostPortExplicit bool     `json:"-"`
+	PublicHost       string   `json:"public_host"`
+	PublicHosts      []string `json:"public_hosts,omitempty"`
 
 	Mode        string `json:"mode"`         // "traefik" or "port"
 	TrafficMode string `json:"traffic_mode"` // "edge" or "session"
@@ -275,6 +276,7 @@ type AppState struct {
 	HostPortExplicit     bool      `json:"host_port_explicit,omitempty"`
 	ServicePort          int       `json:"service_port"`
 	PublicHost           string    `json:"public_host"`
+	PublicHosts          []string  `json:"public_hosts,omitempty"`
 	ActiveSlot           string    `json:"active_slot,omitempty"`
 	StandbySlot          string    `json:"standby_slot,omitempty"`
 	DrainUntil           int64     `json:"drain_until,omitempty"`
@@ -3546,9 +3548,9 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	const projectsQueryWithResources = `SELECT app, env, branch, COALESCE(engine,''), mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), repo_url, COALESCE(stopped,0), COALESCE(cpu_limit,''), COALESCE(mem_limit,''), COALESCE(resource_mode,'')
+	const projectsQueryWithResources = `SELECT app, env, branch, COALESCE(engine,''), mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(public_hosts,''), COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), repo_url, COALESCE(stopped,0), COALESCE(cpu_limit,''), COALESCE(mem_limit,''), COALESCE(resource_mode,'')
 		FROM app_state ORDER BY app, env, branch`
-	const projectsQueryLegacy = `SELECT app, env, branch, COALESCE(engine,''), mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), repo_url, COALESCE(stopped,0)
+	const projectsQueryLegacy = `SELECT app, env, branch, COALESCE(engine,''), mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(public_hosts,''), COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), repo_url, COALESCE(stopped,0)
 		FROM app_state ORDER BY app, env, branch`
 	rows, err := s.db.Query(projectsQueryWithResources)
 	hasResourceColumns := true
@@ -3563,37 +3565,38 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type ProjectEnv struct {
-		App                  string  `json:"app"`
-		Env                  string  `json:"env"`
-		Branch               string  `json:"branch"`
-		Engine               string  `json:"engine,omitempty"`
-		Mode                 string  `json:"mode"`
-		HostPort             int     `json:"host_port"`
-		HostPortExplicit     bool    `json:"host_port_explicit,omitempty"`
-		ServicePort          int     `json:"service_port"`
-		PublicHost           string  `json:"public_host"`
-		ActiveSlot           string  `json:"active_slot,omitempty"`
-		StandbySlot          string  `json:"standby_slot,omitempty"`
-		DrainUntil           int64   `json:"drain_until,omitempty"`
-		TrafficMode          string  `json:"traffic_mode,omitempty"`
-		AccessPolicy         string  `json:"access_policy,omitempty"`
-		IPAllowlist          string  `json:"ip_allowlist,omitempty"`
-		ExpiresAt            int64   `json:"expires_at,omitempty"`
-		WebhookSecret        string  `json:"webhook_secret,omitempty"`
-		NotificationWebhooks string  `json:"notification_webhooks,omitempty"`
-		TrafficSplitPercent  int     `json:"traffic_split_percent,omitempty"`
-		RolloutMinRequests   int     `json:"rollout_min_requests,omitempty"`
-		RolloutErrorPercent  float64 `json:"rollout_error_percent,omitempty"`
-		RolloutAssessSeconds int     `json:"rollout_assess_seconds,omitempty"`
-		RolloutStartedAt     int64   `json:"rollout_started_at,omitempty"`
-		RolloutDeployID      string  `json:"rollout_deploy_id,omitempty"`
-		RolloutStatus        string  `json:"rollout_status,omitempty"`
-		RepoURL              string  `json:"repo_url"`
-		Stopped              bool    `json:"stopped,omitempty"`
-		AccessRole           string  `json:"access_role,omitempty"`
-		CPULimit             string  `json:"cpu_limit,omitempty"`
-		MemLimit             string  `json:"mem_limit,omitempty"`
-		ResourceMode         string  `json:"resource_mode,omitempty"`
+		App                  string   `json:"app"`
+		Env                  string   `json:"env"`
+		Branch               string   `json:"branch"`
+		Engine               string   `json:"engine,omitempty"`
+		Mode                 string   `json:"mode"`
+		HostPort             int      `json:"host_port"`
+		HostPortExplicit     bool     `json:"host_port_explicit,omitempty"`
+		ServicePort          int      `json:"service_port"`
+		PublicHost           string   `json:"public_host"`
+		PublicHosts          []string `json:"public_hosts,omitempty"`
+		ActiveSlot           string   `json:"active_slot,omitempty"`
+		StandbySlot          string   `json:"standby_slot,omitempty"`
+		DrainUntil           int64    `json:"drain_until,omitempty"`
+		TrafficMode          string   `json:"traffic_mode,omitempty"`
+		AccessPolicy         string   `json:"access_policy,omitempty"`
+		IPAllowlist          string   `json:"ip_allowlist,omitempty"`
+		ExpiresAt            int64    `json:"expires_at,omitempty"`
+		WebhookSecret        string   `json:"webhook_secret,omitempty"`
+		NotificationWebhooks string   `json:"notification_webhooks,omitempty"`
+		TrafficSplitPercent  int      `json:"traffic_split_percent,omitempty"`
+		RolloutMinRequests   int      `json:"rollout_min_requests,omitempty"`
+		RolloutErrorPercent  float64  `json:"rollout_error_percent,omitempty"`
+		RolloutAssessSeconds int      `json:"rollout_assess_seconds,omitempty"`
+		RolloutStartedAt     int64    `json:"rollout_started_at,omitempty"`
+		RolloutDeployID      string   `json:"rollout_deploy_id,omitempty"`
+		RolloutStatus        string   `json:"rollout_status,omitempty"`
+		RepoURL              string   `json:"repo_url"`
+		Stopped              bool     `json:"stopped,omitempty"`
+		AccessRole           string   `json:"access_role,omitempty"`
+		CPULimit             string   `json:"cpu_limit,omitempty"`
+		MemLimit             string   `json:"mem_limit,omitempty"`
+		ResourceMode         string   `json:"resource_mode,omitempty"`
 	}
 
 	type ProjectInfo struct {
@@ -3605,17 +3608,20 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 	byApp := map[string]*ProjectInfo{}
 	for rows.Next() {
 		var pe ProjectEnv
+		var publicHostsRaw string
 		if hasResourceColumns {
 			if err := rows.Scan(&pe.App, &pe.Env, &pe.Branch, &pe.Engine, &pe.Mode,
-				&pe.HostPort, &pe.HostPortExplicit, &pe.ServicePort, &pe.PublicHost, &pe.ActiveSlot, &pe.StandbySlot, &pe.DrainUntil, &pe.TrafficMode, &pe.AccessPolicy, &pe.IPAllowlist, &pe.ExpiresAt, &pe.WebhookSecret, &pe.NotificationWebhooks, &pe.TrafficSplitPercent, &pe.RolloutMinRequests, &pe.RolloutErrorPercent, &pe.RolloutAssessSeconds, &pe.RolloutStartedAt, &pe.RolloutDeployID, &pe.RolloutStatus, &pe.RepoURL, &pe.Stopped, &pe.CPULimit, &pe.MemLimit, &pe.ResourceMode); err != nil {
+				&pe.HostPort, &pe.HostPortExplicit, &pe.ServicePort, &pe.PublicHost, &publicHostsRaw, &pe.ActiveSlot, &pe.StandbySlot, &pe.DrainUntil, &pe.TrafficMode, &pe.AccessPolicy, &pe.IPAllowlist, &pe.ExpiresAt, &pe.WebhookSecret, &pe.NotificationWebhooks, &pe.TrafficSplitPercent, &pe.RolloutMinRequests, &pe.RolloutErrorPercent, &pe.RolloutAssessSeconds, &pe.RolloutStartedAt, &pe.RolloutDeployID, &pe.RolloutStatus, &pe.RepoURL, &pe.Stopped, &pe.CPULimit, &pe.MemLimit, &pe.ResourceMode); err != nil {
 				continue
 			}
 		} else {
 			if err := rows.Scan(&pe.App, &pe.Env, &pe.Branch, &pe.Engine, &pe.Mode,
-				&pe.HostPort, &pe.HostPortExplicit, &pe.ServicePort, &pe.PublicHost, &pe.ActiveSlot, &pe.StandbySlot, &pe.DrainUntil, &pe.TrafficMode, &pe.AccessPolicy, &pe.IPAllowlist, &pe.ExpiresAt, &pe.WebhookSecret, &pe.NotificationWebhooks, &pe.TrafficSplitPercent, &pe.RolloutMinRequests, &pe.RolloutErrorPercent, &pe.RolloutAssessSeconds, &pe.RolloutStartedAt, &pe.RolloutDeployID, &pe.RolloutStatus, &pe.RepoURL, &pe.Stopped); err != nil {
+				&pe.HostPort, &pe.HostPortExplicit, &pe.ServicePort, &pe.PublicHost, &publicHostsRaw, &pe.ActiveSlot, &pe.StandbySlot, &pe.DrainUntil, &pe.TrafficMode, &pe.AccessPolicy, &pe.IPAllowlist, &pe.ExpiresAt, &pe.WebhookSecret, &pe.NotificationWebhooks, &pe.TrafficSplitPercent, &pe.RolloutMinRequests, &pe.RolloutErrorPercent, &pe.RolloutAssessSeconds, &pe.RolloutStartedAt, &pe.RolloutDeployID, &pe.RolloutStatus, &pe.RepoURL, &pe.Stopped); err != nil {
 				continue
 			}
 		}
+		pe.PublicHosts = parsePublicHosts(publicHostsRaw)
+		pe.PublicHost, pe.PublicHosts = canonicalizePublicHosts(pe.PublicHost, pe.PublicHosts)
 		pe.Engine = firstNonEmptyEngine(pe.Engine)
 		pe.TrafficMode = firstNonEmpty(normalizeTrafficMode(pe.TrafficMode), s.lanePolicy(DeployEnv(pe.Env)).DefaultTrafficMode)
 		pe.AccessPolicy = firstNonEmpty(normalizeAccessPolicy(pe.AccessPolicy), s.lanePolicy(DeployEnv(pe.Env)).DefaultAccessPolicy)
@@ -5564,7 +5570,7 @@ func (s *Server) buildSnapshotJSON() ([]byte, error) {
 
 func (s *Server) buildSnapshotJSONForSession(sess *UserSession) ([]byte, error) {
 	rows, err := s.db.Query(
-		`SELECT app, env, branch, COALESCE(engine,''), mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), repo_url, COALESCE(stopped,0)
+		`SELECT app, env, branch, COALESCE(engine,''), mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(public_hosts,''), COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), repo_url, COALESCE(stopped,0)
 		FROM app_state ORDER BY app, env, branch`,
 	)
 	if err != nil {
@@ -5573,35 +5579,36 @@ func (s *Server) buildSnapshotJSONForSession(sess *UserSession) ([]byte, error) 
 	defer rows.Close()
 
 	type snapEnv struct {
-		App                  string  `json:"app"`
-		Env                  string  `json:"env"`
-		Branch               string  `json:"branch"`
-		Engine               string  `json:"engine,omitempty"`
-		Mode                 string  `json:"mode"`
-		HostPort             int     `json:"host_port"`
-		HostPortExplicit     bool    `json:"host_port_explicit,omitempty"`
-		ServicePort          int     `json:"service_port"`
-		PublicHost           string  `json:"public_host"`
-		ActiveSlot           string  `json:"active_slot,omitempty"`
-		StandbySlot          string  `json:"standby_slot,omitempty"`
-		DrainUntil           int64   `json:"drain_until,omitempty"`
-		TrafficMode          string  `json:"traffic_mode,omitempty"`
-		AccessPolicy         string  `json:"access_policy,omitempty"`
-		IPAllowlist          string  `json:"ip_allowlist,omitempty"`
-		ExpiresAt            int64   `json:"expires_at,omitempty"`
-		WebhookSecret        string  `json:"webhook_secret,omitempty"`
-		NotificationWebhooks string  `json:"notification_webhooks,omitempty"`
-		TrafficSplitPercent  int     `json:"traffic_split_percent,omitempty"`
-		RolloutMinRequests   int     `json:"rollout_min_requests,omitempty"`
-		RolloutErrorPercent  float64 `json:"rollout_error_percent,omitempty"`
-		RolloutAssessSeconds int     `json:"rollout_assess_seconds,omitempty"`
-		RolloutStartedAt     int64   `json:"rollout_started_at,omitempty"`
-		RolloutDeployID      string  `json:"rollout_deploy_id,omitempty"`
-		RolloutStatus        string  `json:"rollout_status,omitempty"`
-		RepoURL              string  `json:"repo_url"`
-		Stopped              bool    `json:"stopped,omitempty"`
-		Running              bool    `json:"running,omitempty"`
-		AccessRole           string  `json:"access_role,omitempty"`
+		App                  string   `json:"app"`
+		Env                  string   `json:"env"`
+		Branch               string   `json:"branch"`
+		Engine               string   `json:"engine,omitempty"`
+		Mode                 string   `json:"mode"`
+		HostPort             int      `json:"host_port"`
+		HostPortExplicit     bool     `json:"host_port_explicit,omitempty"`
+		ServicePort          int      `json:"service_port"`
+		PublicHost           string   `json:"public_host"`
+		PublicHosts          []string `json:"public_hosts,omitempty"`
+		ActiveSlot           string   `json:"active_slot,omitempty"`
+		StandbySlot          string   `json:"standby_slot,omitempty"`
+		DrainUntil           int64    `json:"drain_until,omitempty"`
+		TrafficMode          string   `json:"traffic_mode,omitempty"`
+		AccessPolicy         string   `json:"access_policy,omitempty"`
+		IPAllowlist          string   `json:"ip_allowlist,omitempty"`
+		ExpiresAt            int64    `json:"expires_at,omitempty"`
+		WebhookSecret        string   `json:"webhook_secret,omitempty"`
+		NotificationWebhooks string   `json:"notification_webhooks,omitempty"`
+		TrafficSplitPercent  int      `json:"traffic_split_percent,omitempty"`
+		RolloutMinRequests   int      `json:"rollout_min_requests,omitempty"`
+		RolloutErrorPercent  float64  `json:"rollout_error_percent,omitempty"`
+		RolloutAssessSeconds int      `json:"rollout_assess_seconds,omitempty"`
+		RolloutStartedAt     int64    `json:"rollout_started_at,omitempty"`
+		RolloutDeployID      string   `json:"rollout_deploy_id,omitempty"`
+		RolloutStatus        string   `json:"rollout_status,omitempty"`
+		RepoURL              string   `json:"repo_url"`
+		Stopped              bool     `json:"stopped,omitempty"`
+		Running              bool     `json:"running,omitempty"`
+		AccessRole           string   `json:"access_role,omitempty"`
 	}
 	type snapProject struct {
 		Name     string           `json:"name"`
@@ -5612,10 +5619,13 @@ func (s *Server) buildSnapshotJSONForSession(sess *UserSession) ([]byte, error) 
 	byApp := map[string]*snapProject{}
 	for rows.Next() {
 		var pe snapEnv
+		var publicHostsRaw string
 		if err := rows.Scan(&pe.App, &pe.Env, &pe.Branch, &pe.Engine, &pe.Mode,
-			&pe.HostPort, &pe.HostPortExplicit, &pe.ServicePort, &pe.PublicHost, &pe.ActiveSlot, &pe.StandbySlot, &pe.DrainUntil, &pe.TrafficMode, &pe.AccessPolicy, &pe.IPAllowlist, &pe.ExpiresAt, &pe.WebhookSecret, &pe.NotificationWebhooks, &pe.TrafficSplitPercent, &pe.RolloutMinRequests, &pe.RolloutErrorPercent, &pe.RolloutAssessSeconds, &pe.RolloutStartedAt, &pe.RolloutDeployID, &pe.RolloutStatus, &pe.RepoURL, &pe.Stopped); err != nil {
+			&pe.HostPort, &pe.HostPortExplicit, &pe.ServicePort, &pe.PublicHost, &publicHostsRaw, &pe.ActiveSlot, &pe.StandbySlot, &pe.DrainUntil, &pe.TrafficMode, &pe.AccessPolicy, &pe.IPAllowlist, &pe.ExpiresAt, &pe.WebhookSecret, &pe.NotificationWebhooks, &pe.TrafficSplitPercent, &pe.RolloutMinRequests, &pe.RolloutErrorPercent, &pe.RolloutAssessSeconds, &pe.RolloutStartedAt, &pe.RolloutDeployID, &pe.RolloutStatus, &pe.RepoURL, &pe.Stopped); err != nil {
 			continue
 		}
+		pe.PublicHosts = parsePublicHosts(publicHostsRaw)
+		pe.PublicHost, pe.PublicHosts = canonicalizePublicHosts(pe.PublicHost, pe.PublicHosts)
 		pe.Engine = firstNonEmptyEngine(pe.Engine)
 		pe.TrafficMode = firstNonEmpty(normalizeTrafficMode(pe.TrafficMode), s.lanePolicy(DeployEnv(pe.Env)).DefaultTrafficMode)
 		pe.AccessPolicy = firstNonEmpty(normalizeAccessPolicy(pe.AccessPolicy), s.lanePolicy(DeployEnv(pe.Env)).DefaultAccessPolicy)
@@ -7052,6 +7062,7 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 			HostPort             *int      `json:"host_port"`
 			ServicePort          *int      `json:"service_port"`
 			PublicHost           *string   `json:"public_host"`
+			PublicHosts          *[]string `json:"public_hosts"`
 			WebhookSecret        *string   `json:"webhook_secret"`
 			NotificationWebhooks *string   `json:"notification_webhooks"`
 			TrafficSplitPercent  *int      `json:"traffic_split_percent"`
@@ -7180,6 +7191,16 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 			}
 			st.PublicHost = publicHost
 		}
+		if body.PublicHosts != nil {
+			primary, hosts := canonicalizePublicHosts(st.PublicHost, *body.PublicHosts)
+			if err := validateAppPublicHosts(hosts, normalizedRequestHost(r), s.serverDashboardHost()); err != nil {
+				httpError(w, 400, err.Error())
+				return
+			}
+			st.PublicHost = primary
+			st.PublicHosts = hosts
+		}
+		st.PublicHost, st.PublicHosts = canonicalizePublicHosts(st.PublicHost, st.PublicHosts)
 		if body.WebhookSecret != nil {
 			st.WebhookSecret = strings.TrimSpace(*body.WebhookSecret)
 		}
@@ -7243,9 +7264,9 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		proxyNeedsRefresh := false
 		if previousState == nil {
-			proxyNeedsRefresh = strings.TrimSpace(st.PublicHost) != ""
+			proxyNeedsRefresh = len(st.PublicHosts) > 0
 		} else {
-			proxyNeedsRefresh = strings.TrimSpace(previousState.PublicHost) != strings.TrimSpace(st.PublicHost) || previousState.HostPort != st.HostPort
+			proxyNeedsRefresh = !samePublicHosts(previousState.PublicHosts, st.PublicHosts) || previousState.HostPort != st.HostPort
 		}
 		if proxyNeedsRefresh {
 			if err := s.ensureGlobalProxy(); err != nil {
@@ -10076,9 +10097,20 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		// Match events where the host belongs to the given app.
-		hostFilter = ` AND host IN (SELECT public_host FROM app_state WHERE app=? AND public_host!='')`
-		hostArgs = append(hostArgs, app)
+		hosts, err := s.publicHostsForApp(app)
+		if err != nil {
+			httpError(w, 500, err.Error())
+			return
+		}
+		if len(hosts) == 0 {
+			writeJSON(w, 200, analyticsResponse{PeriodLabel: periodLabel})
+			return
+		}
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(hosts)), ",")
+		hostFilter = ` AND host IN (` + placeholders + `)`
+		for _, host := range hosts {
+			hostArgs = append(hostArgs, host)
+		}
 	}
 
 	// Total requests.
@@ -10778,7 +10810,7 @@ func (s *Server) ensureGlobalProxy() error {
 		return err
 	}
 
-	rows, err := s.db.Query(`SELECT public_host, COALESCE(host_port, 0) FROM app_state WHERE public_host != '' AND COALESCE(stopped,0)=0`)
+	rows, err := s.db.Query(`SELECT public_host, COALESCE(public_hosts,''), COALESCE(host_port, 0) FROM app_state WHERE (public_host != '' OR COALESCE(public_hosts,'') != '') AND COALESCE(stopped,0)=0`)
 	if err != nil {
 		return err
 	}
@@ -10790,14 +10822,22 @@ func (s *Server) ensureGlobalProxy() error {
 	}
 	var routes []route
 	for rows.Next() {
-		var r route
-		if err := rows.Scan(&r.host, &r.hostPort); err != nil {
+		var publicHost string
+		var publicHostsRaw string
+		var hostPort int
+		if err := rows.Scan(&publicHost, &publicHostsRaw, &hostPort); err != nil {
 			continue
 		}
-		if r.hostPort <= 0 || strings.TrimSpace(r.host) == "" {
+		if hostPort <= 0 {
 			continue
 		}
-		routes = append(routes, r)
+		primary, hosts := canonicalizePublicHosts(publicHost, parsePublicHosts(publicHostsRaw))
+		if primary == "" {
+			continue
+		}
+		for _, host := range hosts {
+			routes = append(routes, route{host: host, hostPort: hostPort})
+		}
 	}
 	if dashboardHost := strings.TrimSpace(s.serverDashboardHost()); dashboardHost != "" {
 		if relayPort := listenAddrPort(s.httpAddr); relayPort > 0 {
@@ -11254,6 +11294,105 @@ func validateProxyHostname(value string, field string) error {
 		}
 	}
 	return nil
+}
+
+func parsePublicHosts(raw string) []string {
+	return normalizePublicHosts(strings.FieldsFunc(raw, func(r rune) bool {
+		switch r {
+		case ',', ';', '\n', '\r', '\t', ' ':
+			return true
+		default:
+			return false
+		}
+	}))
+}
+
+func normalizePublicHosts(hosts []string) []string {
+	if len(hosts) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(hosts))
+	seen := make(map[string]struct{}, len(hosts))
+	for _, host := range hosts {
+		normalized := normalizedHostname(host)
+		if normalized == "" {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func encodePublicHosts(hosts []string) string {
+	return strings.Join(normalizePublicHosts(hosts), "\n")
+}
+
+func canonicalizePublicHosts(primary string, hosts []string) (string, []string) {
+	combined := make([]string, 0, len(hosts)+1)
+	if strings.TrimSpace(primary) != "" {
+		combined = append(combined, primary)
+	}
+	combined = append(combined, hosts...)
+	normalized := normalizePublicHosts(combined)
+	if len(normalized) == 0 {
+		return "", nil
+	}
+	return normalized[0], normalized
+}
+
+func samePublicHosts(a, b []string) bool {
+	a = normalizePublicHosts(a)
+	b = normalizePublicHosts(b)
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func validateAppPublicHosts(hosts []string, requestHost string, dashboardHost string) error {
+	for _, host := range normalizePublicHosts(hosts) {
+		if err := validateProxyHostname(host, "public_hosts"); err != nil {
+			return err
+		}
+		if host != "" && (host == normalizedHostname(requestHost) || host == normalizedHostname(dashboardHost)) {
+			return fmt.Errorf("public_hosts cannot include the Relay dashboard host; use a different subdomain for apps")
+		}
+	}
+	return nil
+}
+
+func (s *Server) publicHostsForApp(app string) ([]string, error) {
+	rows, err := s.db.Query(`SELECT public_host, COALESCE(public_hosts,'') FROM app_state WHERE app=?`, app)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var hosts []string
+	for rows.Next() {
+		var publicHost string
+		var publicHostsRaw string
+		if err := rows.Scan(&publicHost, &publicHostsRaw); err != nil {
+			continue
+		}
+		if publicHost != "" {
+			hosts = append(hosts, publicHost)
+		}
+		hosts = append(hosts, parsePublicHosts(publicHostsRaw)...)
+	}
+	return normalizePublicHosts(hosts), rows.Err()
 }
 
 func requiresSameOrigin(method string) bool {
@@ -12112,6 +12251,7 @@ func migrateDB(db *sql.DB) error {
 			host_port_explicit INTEGER DEFAULT 0,
 			service_port INTEGER,
 			public_host TEXT,
+			public_hosts TEXT DEFAULT '',
 			active_slot TEXT,
 			standby_slot TEXT,
 			drain_until INTEGER,
@@ -12220,6 +12360,7 @@ func migrateDB(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN cpu_limit TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN mem_limit TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN resource_mode TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN public_hosts TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN image TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN port INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN host_port INTEGER DEFAULT 0`)
@@ -12877,24 +13018,26 @@ func (s *Server) reconcileStaleDeploysOnStartup() error {
 func (s *Server) saveAppState(st *AppState) error {
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO app_state
-		(app, env, branch, repo_url, project_root, build_context, dockerfile, engine, current_image, previous_image, mode, host_port, host_port_explicit, service_port, public_host, active_slot, standby_slot, drain_until, traffic_mode, access_policy, ip_allowlist, repo_hash, expires_at, webhook_secret, notification_webhooks, traffic_split_percent, rollout_min_requests, rollout_error_percent, rollout_assess_seconds, rollout_started_at, rollout_deploy_id, rollout_status, stopped, cpu_limit, mem_limit, resource_mode, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(app, env, branch, repo_url, project_root, build_context, dockerfile, engine, current_image, previous_image, mode, host_port, host_port_explicit, service_port, public_host, public_hosts, active_slot, standby_slot, drain_until, traffic_mode, access_policy, ip_allowlist, repo_hash, expires_at, webhook_secret, notification_webhooks, traffic_split_percent, rollout_min_requests, rollout_error_percent, rollout_assess_seconds, rollout_started_at, rollout_deploy_id, rollout_status, stopped, cpu_limit, mem_limit, resource_mode, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		st.App, string(st.Env), st.Branch, st.RepoURL, st.ProjectRoot, st.BuildContext, st.Dockerfile, firstNonEmptyEngine(st.Engine), st.CurrentImage, st.PreviousImage, st.Mode,
-		st.HostPort, st.HostPortExplicit, st.ServicePort, st.PublicHost, normalizeActiveSlot(st.ActiveSlot), normalizeActiveSlot(st.StandbySlot), st.DrainUntil, firstNonEmpty(normalizeTrafficMode(st.TrafficMode), "edge"), firstNonEmpty(normalizeAccessPolicy(st.AccessPolicy), s.lanePolicy(st.Env).DefaultAccessPolicy), normalizeIPAllowlist(st.IPAllowlist), st.RepoHash, st.ExpiresAt, st.WebhookSecret, st.NotificationWebhooks, st.TrafficSplitPercent, st.RolloutMinRequests, st.RolloutErrorPercent, st.RolloutAssessSeconds, st.RolloutStartedAt, st.RolloutDeployID, st.RolloutStatus, st.Stopped, strings.TrimSpace(st.CPULimit), strings.TrimSpace(st.MemLimit), strings.TrimSpace(st.ResourceMode), time.Now().UnixMilli(),
+		st.HostPort, st.HostPortExplicit, st.ServicePort, st.PublicHost, encodePublicHosts(st.PublicHosts), normalizeActiveSlot(st.ActiveSlot), normalizeActiveSlot(st.StandbySlot), st.DrainUntil, firstNonEmpty(normalizeTrafficMode(st.TrafficMode), "edge"), firstNonEmpty(normalizeAccessPolicy(st.AccessPolicy), s.lanePolicy(st.Env).DefaultAccessPolicy), normalizeIPAllowlist(st.IPAllowlist), st.RepoHash, st.ExpiresAt, st.WebhookSecret, st.NotificationWebhooks, st.TrafficSplitPercent, st.RolloutMinRequests, st.RolloutErrorPercent, st.RolloutAssessSeconds, st.RolloutStartedAt, st.RolloutDeployID, st.RolloutStatus, st.Stopped, strings.TrimSpace(st.CPULimit), strings.TrimSpace(st.MemLimit), strings.TrimSpace(st.ResourceMode), time.Now().UnixMilli(),
 	)
 	return err
 }
 
 func (s *Server) getAppState(app string, env DeployEnv, branch string) (*AppState, error) {
-	row := s.db.QueryRow(`SELECT app, env, branch, repo_url, COALESCE(project_root,''), COALESCE(build_context,''), COALESCE(dockerfile,''), COALESCE(engine,''), current_image, previous_image, mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(repo_hash,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), COALESCE(stopped,0), COALESCE(cpu_limit,''), COALESCE(mem_limit,''), COALESCE(resource_mode,'')
+	row := s.db.QueryRow(`SELECT app, env, branch, repo_url, COALESCE(project_root,''), COALESCE(build_context,''), COALESCE(dockerfile,''), COALESCE(engine,''), current_image, previous_image, mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(public_hosts,''), COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(repo_hash,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), COALESCE(stopped,0), COALESCE(cpu_limit,''), COALESCE(mem_limit,''), COALESCE(resource_mode,'')
 		FROM app_state WHERE app=? AND env=? AND branch=?`, app, string(env), branch)
 
 	var st AppState
 	var envS string
-	if err := row.Scan(&st.App, &envS, &st.Branch, &st.RepoURL, &st.ProjectRoot, &st.BuildContext, &st.Dockerfile, &st.Engine, &st.CurrentImage, &st.PreviousImage, &st.Mode, &st.HostPort, &st.HostPortExplicit, &st.ServicePort, &st.PublicHost, &st.ActiveSlot, &st.StandbySlot, &st.DrainUntil, &st.TrafficMode, &st.AccessPolicy, &st.IPAllowlist, &st.RepoHash, &st.ExpiresAt, &st.WebhookSecret, &st.NotificationWebhooks, &st.TrafficSplitPercent, &st.RolloutMinRequests, &st.RolloutErrorPercent, &st.RolloutAssessSeconds, &st.RolloutStartedAt, &st.RolloutDeployID, &st.RolloutStatus, &st.Stopped, &st.CPULimit, &st.MemLimit, &st.ResourceMode); err != nil {
+	var publicHostsRaw string
+	if err := row.Scan(&st.App, &envS, &st.Branch, &st.RepoURL, &st.ProjectRoot, &st.BuildContext, &st.Dockerfile, &st.Engine, &st.CurrentImage, &st.PreviousImage, &st.Mode, &st.HostPort, &st.HostPortExplicit, &st.ServicePort, &st.PublicHost, &publicHostsRaw, &st.ActiveSlot, &st.StandbySlot, &st.DrainUntil, &st.TrafficMode, &st.AccessPolicy, &st.IPAllowlist, &st.RepoHash, &st.ExpiresAt, &st.WebhookSecret, &st.NotificationWebhooks, &st.TrafficSplitPercent, &st.RolloutMinRequests, &st.RolloutErrorPercent, &st.RolloutAssessSeconds, &st.RolloutStartedAt, &st.RolloutDeployID, &st.RolloutStatus, &st.Stopped, &st.CPULimit, &st.MemLimit, &st.ResourceMode); err != nil {
 		return nil, err
 	}
 	st.Env = DeployEnv(envS)
+	st.PublicHosts = parsePublicHosts(publicHostsRaw)
 	s.constrainAppState(&st)
 	return &st, nil
 }

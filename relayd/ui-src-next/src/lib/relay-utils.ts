@@ -333,6 +333,7 @@ export function buildSettingsConfig(
         host_port?: number;
         service_port?: number;
         public_host?: string;
+        public_hosts?: string[];
         webhook_secret?: string;
         notification_webhooks?: string;
         traffic_split_percent?: number;
@@ -359,6 +360,7 @@ export function buildSettingsConfig(
     host_port: selectedEnv?.host_port ?? 0,
     service_port: selectedEnv?.service_port ?? 0,
     public_host: selectedEnv?.public_host ?? "",
+    public_hosts: selectedEnv?.public_hosts ?? (selectedEnv?.public_host ? [selectedEnv.public_host] : []),
     webhook_secret: selectedEnv?.webhook_secret ?? "",
     notification_webhooks: selectedEnv?.notification_webhooks ?? "",
     traffic_split_percent: selectedEnv?.traffic_split_percent ?? 100,

@@ -163,6 +163,7 @@ export interface EnvInfo {
   host_port?: number;
   service_port?: number;
   public_host?: string;
+  public_hosts?: string[];
   repo_url?: string;
   webhook_secret?: string;
   notification_webhooks?: string;
@@ -331,6 +332,7 @@ export interface AppConfig {
   host_port?: number;
   service_port?: number;
   public_host?: string;
+  public_hosts?: string[];
   webhook_secret?: string;
   notification_webhooks?: string;
   traffic_split_percent?: number;
