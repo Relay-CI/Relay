@@ -56,6 +56,7 @@ const relaydRunUsage = `relayd — Relay agent
 
 Usage:
 	relayd [--addr :8080] [--port 8080] [--data-dir ./data] [--socket /path/to/relay.sock] [--no-socket]
+	relayd [--cloud-agent] [--cloud-hub]
 	relayd version
 	relayd service <...>
 
@@ -63,6 +64,8 @@ Examples:
 	relayd
 	relayd --port 9090
 	relayd --addr 0.0.0.0:9090
+	relayd --cloud-agent
+	relayd --cloud-hub
 	relayd --data-dir /var/lib/relayd --socket /var/lib/relayd/relay.sock
 `
 
@@ -71,6 +74,8 @@ type relaydRunConfig struct {
 	DataDir       string
 	SocketPath    string
 	DisableSocket bool
+	CloudAgent    bool
+	CloudHub      bool
 	ShowVersion   bool
 }
 
@@ -85,6 +90,10 @@ func parseRelaydRunArgs(args []string) (relaydRunConfig, error) {
 			return cfg, fmt.Errorf("%s", relaydRunUsage)
 		case a == "--no-socket":
 			cfg.DisableSocket = true
+		case a == "--cloud-agent":
+			cfg.CloudAgent = true
+		case a == "--cloud-hub":
+			cfg.CloudHub = true
 		case a == "--addr":
 			i++
 			if i >= len(args) {
@@ -716,6 +725,7 @@ type Server struct {
 	acmeServer   *http.Server
 	acmeListener net.Listener
 	socketPath   string
+	cloud        *cloudController
 }
 
 // ---------------------- Config ----------------------
@@ -2766,6 +2776,113 @@ func (s *Server) acmeDisabled() bool {
 	return s.serverConfigGet("acme_disabled") == "true"
 }
 
+type customHostRule struct {
+	ID                  string `json:"id,omitempty"`
+	Host                string `json:"host"`
+	Action              string `json:"action"`
+	RedirectURL         string `json:"redirect_url,omitempty"`
+	RedirectCode        int    `json:"redirect_code,omitempty"`
+	PreservePath        bool   `json:"preserve_path,omitempty"`
+	UpstreamURL         string `json:"upstream_url,omitempty"`
+	ResponseStatus      int    `json:"response_status,omitempty"`
+	ResponseBody        string `json:"response_body,omitempty"`
+	ResponseContentType string `json:"response_content_type,omitempty"`
+}
+
+func normalizeCustomHostRules(rules []customHostRule) []customHostRule {
+	out := make([]customHostRule, 0, len(rules))
+	for _, rule := range rules {
+		rule.ID = strings.TrimSpace(rule.ID)
+		rule.Host = normalizedHostname(rule.Host)
+		rule.Action = strings.TrimSpace(rule.Action)
+		rule.RedirectURL = strings.TrimSpace(rule.RedirectURL)
+		rule.UpstreamURL = strings.TrimSpace(rule.UpstreamURL)
+		rule.ResponseContentType = strings.TrimSpace(rule.ResponseContentType)
+		if rule.RedirectCode == 0 {
+			rule.RedirectCode = http.StatusFound
+		}
+		if rule.ResponseStatus == 0 {
+			rule.ResponseStatus = http.StatusOK
+		}
+		out = append(out, rule)
+	}
+	return out
+}
+
+func validateAbsoluteHTTPURL(raw string, field string) error {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("%s must be a valid URL", field)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("%s must use http or https", field)
+	}
+	if strings.TrimSpace(parsed.Host) == "" {
+		return fmt.Errorf("%s must include a host", field)
+	}
+	return nil
+}
+
+func validateCustomHostRule(rule customHostRule, relayPort int) error {
+	if err := validateProxyHostname(rule.Host, "custom_host_rules.host"); err != nil {
+		return err
+	}
+	switch rule.Action {
+	case "redirect":
+		if err := validateAbsoluteHTTPURL(rule.RedirectURL, "custom_host_rules.redirect_url"); err != nil {
+			return err
+		}
+		switch rule.RedirectCode {
+		case http.StatusMovedPermanently, http.StatusFound, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+		default:
+			return fmt.Errorf("custom_host_rules.redirect_code must be 301, 302, 307, or 308")
+		}
+	case "reverse_proxy":
+		if err := validateAbsoluteHTTPURL(rule.UpstreamURL, "custom_host_rules.upstream_url"); err != nil {
+			return err
+		}
+	case "static_response":
+		if rule.ResponseStatus < 100 || rule.ResponseStatus > 599 {
+			return fmt.Errorf("custom_host_rules.response_status must be between 100 and 599")
+		}
+	case "relay_dashboard":
+		if relayPort <= 0 {
+			return fmt.Errorf("relay dashboard host rules require Relay to listen on a TCP port")
+		}
+	default:
+		return fmt.Errorf("custom_host_rules.action must be redirect, reverse_proxy, static_response, or relay_dashboard")
+	}
+	return nil
+}
+
+func encodeCustomHostRules(rules []customHostRule) string {
+	rules = normalizeCustomHostRules(rules)
+	if len(rules) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(rules)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+func parseCustomHostRules(raw string) []customHostRule {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var rules []customHostRule
+	if err := json.Unmarshal([]byte(raw), &rules); err != nil {
+		return nil
+	}
+	return normalizeCustomHostRules(rules)
+}
+
+func (s *Server) serverCustomHostRules() []customHostRule {
+	return parseCustomHostRules(s.serverConfigGet("custom_host_rules"))
+}
+
 type doctorCheck struct {
 	Status  string `json:"status"`
 	Summary string `json:"summary"`
@@ -2987,6 +3104,7 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 			"base_domain":              s.serverBaseDomain(),
 			"dashboard_host":           s.serverDashboardHost(),
 			"acme_disabled":            s.serverConfigGet("acme_disabled"),
+			"custom_host_rules":        s.serverCustomHostRules(),
 			"theme_name":               s.serverConfigGet("theme_name"),
 			"theme_css":                s.serverConfigGet("theme_css"),
 			"plugin_mutations_enabled": s.pluginMutationsEnabled(),
@@ -2994,11 +3112,12 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 		})
 	case http.MethodPost:
 		var body struct {
-			BaseDomain    *string `json:"base_domain"`
-			DashboardHost *string `json:"dashboard_host"`
-			ACMEDisabled  *string `json:"acme_disabled"`
-			ThemeName     *string `json:"theme_name"`
-			ThemeCSS      *string `json:"theme_css"`
+			BaseDomain      *string           `json:"base_domain"`
+			DashboardHost   *string           `json:"dashboard_host"`
+			ACMEDisabled    *string           `json:"acme_disabled"`
+			CustomHostRules *[]customHostRule `json:"custom_host_rules"`
+			ThemeName       *string           `json:"theme_name"`
+			ThemeCSS        *string           `json:"theme_css"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httpError(w, 400, "invalid JSON")
@@ -3033,6 +3152,18 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 			updates["acme_disabled"] = v
 			proxyChanged = true
 		}
+		if body.CustomHostRules != nil {
+			rules := normalizeCustomHostRules(*body.CustomHostRules)
+			relayPort := listenAddrPort(s.httpAddr)
+			for _, rule := range rules {
+				if err := validateCustomHostRule(rule, relayPort); err != nil {
+					httpError(w, 400, err.Error())
+					return
+				}
+			}
+			updates["custom_host_rules"] = encodeCustomHostRules(rules)
+			proxyChanged = true
+		}
 		if body.ThemeName != nil {
 			updates["theme_name"] = strings.TrimSpace(*body.ThemeName)
 		}
@@ -3040,9 +3171,10 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 			updates["theme_css"] = *body.ThemeCSS
 		}
 		previous := map[string]string{
-			"base_domain":    s.serverConfigGet("base_domain"),
-			"dashboard_host": s.serverConfigGet("dashboard_host"),
-			"acme_disabled":  s.serverConfigGet("acme_disabled"),
+			"base_domain":       s.serverConfigGet("base_domain"),
+			"dashboard_host":    s.serverConfigGet("dashboard_host"),
+			"acme_disabled":     s.serverConfigGet("acme_disabled"),
+			"custom_host_rules": s.serverConfigGet("custom_host_rules"),
 		}
 		tx, err := s.db.Begin()
 		if err != nil {
@@ -3076,6 +3208,7 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 			"base_domain":              s.serverConfigGet("base_domain"),
 			"dashboard_host":           s.serverConfigGet("dashboard_host"),
 			"acme_disabled":            s.serverConfigGet("acme_disabled"),
+			"custom_host_rules":        s.serverCustomHostRules(),
 			"theme_name":               s.serverConfigGet("theme_name"),
 			"theme_css":                s.serverConfigGet("theme_css"),
 			"plugin_mutations_enabled": s.pluginMutationsEnabled(),
@@ -4574,6 +4707,9 @@ func main() {
 		stationRuntime:        newStationRuntime(dataDir),
 	}
 	s.corsOrigins, s.allowAllCORS = parseAllowedOrigins(os.Getenv("RELAY_CORS_ORIGINS"))
+	if err := s.initCloud(runCfg); err != nil {
+		panic(err)
+	}
 
 	mustMkdir(s.workspacesDir)
 	mustMkdir(s.logsDir)
@@ -4679,6 +4815,9 @@ func main() {
 
 	// Webhooks (unauthenticated, use provider-specific secrets if configured)
 	mux.HandleFunc("/api/webhooks/github", s.handleGithubWebhook)
+	if s.cloud != nil && s.cloud.hubEnabled {
+		s.registerCloudHubRoutes(mux)
+	}
 	mux.HandleFunc("/api/edge/authz", s.handleEdgeAuthz)
 	mux.HandleFunc("/api/analytics", authAny(s.handleAnalytics))
 	mux.HandleFunc("/api/doctor", authAny(s.handleDoctor))
@@ -4797,6 +4936,9 @@ func main() {
 	go s.startACMEListener()
 	// Tail Caddy access logs and aggregate per-request analytics.
 	go s.startLogTailer()
+	if s.cloud != nil && s.cloud.agentEnabled {
+		go s.runCloudAgentLoop()
+	}
 	httpServer := &http.Server{
 		Addr:    addr,
 		Handler: s.withCORS(mux),
@@ -10805,6 +10947,33 @@ func (s *Server) startACMEListener() {
 	}()
 }
 
+func customHostRuleBlock(rule customHostRule, relayPort int) (string, error) {
+	switch rule.Action {
+	case "redirect":
+		target := rule.RedirectURL
+		if rule.PreservePath {
+			target += "{uri}"
+		}
+		return fmt.Sprintf("\tredir %s %d\n", target, rule.RedirectCode), nil
+	case "reverse_proxy":
+		return fmt.Sprintf("\treverse_proxy %s\n", rule.UpstreamURL), nil
+	case "static_response":
+		var block strings.Builder
+		if ct := strings.TrimSpace(rule.ResponseContentType); ct != "" {
+			block.WriteString(fmt.Sprintf("\theader Content-Type %s\n", strconv.Quote(ct)))
+		}
+		block.WriteString(fmt.Sprintf("\trespond %s %d\n", strconv.Quote(rule.ResponseBody), rule.ResponseStatus))
+		return block.String(), nil
+	case "relay_dashboard":
+		if relayPort <= 0 {
+			return "", fmt.Errorf("relay dashboard host rules require Relay to listen on a TCP port")
+		}
+		return fmt.Sprintf("\treverse_proxy host.docker.internal:%d\n", relayPort), nil
+	default:
+		return "", fmt.Errorf("unsupported custom host rule action: %s", rule.Action)
+	}
+}
+
 func (s *Server) ensureGlobalProxy() error {
 	if _, err := s.repairLegacyAppHostPortsFromRuntime(); err != nil {
 		return err
@@ -10817,10 +10986,23 @@ func (s *Server) ensureGlobalProxy() error {
 	defer rows.Close()
 
 	type route struct {
-		host     string
-		hostPort int
+		host  string
+		block string
 	}
+	routeIndex := map[string]int{}
 	var routes []route
+	setRoute := func(host string, block string) {
+		host = strings.TrimSpace(host)
+		if host == "" || strings.TrimSpace(block) == "" {
+			return
+		}
+		if idx, ok := routeIndex[host]; ok {
+			routes[idx].block = block
+			return
+		}
+		routeIndex[host] = len(routes)
+		routes = append(routes, route{host: host, block: block})
+	}
 	for rows.Next() {
 		var publicHost string
 		var publicHostsRaw string
@@ -10836,13 +11018,21 @@ func (s *Server) ensureGlobalProxy() error {
 			continue
 		}
 		for _, host := range hosts {
-			routes = append(routes, route{host: host, hostPort: hostPort})
+			setRoute(host, fmt.Sprintf("\treverse_proxy host.docker.internal:%d\n", hostPort))
 		}
 	}
 	if dashboardHost := strings.TrimSpace(s.serverDashboardHost()); dashboardHost != "" {
 		if relayPort := listenAddrPort(s.httpAddr); relayPort > 0 {
-			routes = append(routes, route{host: dashboardHost, hostPort: relayPort})
+			setRoute(dashboardHost, fmt.Sprintf("\treverse_proxy host.docker.internal:%d\n", relayPort))
 		}
+	}
+	relayPort := listenAddrPort(s.httpAddr)
+	for _, rule := range s.serverCustomHostRules() {
+		block, err := customHostRuleBlock(rule, relayPort)
+		if err != nil {
+			return err
+		}
+		setRoute(rule.Host, block)
 	}
 
 	containerName := "relay-global-proxy"
@@ -10878,7 +11068,7 @@ func (s *Server) ensureGlobalProxy() error {
 	cf.WriteString("}\n\n")
 	for _, r := range routes {
 		cf.WriteString(strings.TrimSpace(r.host) + " {\n")
-		cf.WriteString(fmt.Sprintf("\treverse_proxy host.docker.internal:%d\n", r.hostPort))
+		cf.WriteString(r.block)
 		cf.WriteString("}\n\n")
 	}
 	if err := os.WriteFile(configPath, []byte(cf.String()), 0644); err != nil {
@@ -12446,6 +12636,30 @@ func migrateDB(db *sql.DB) error {
 		health_detail TEXT DEFAULT ''
 	)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_promotions_app_ts ON promotions(app, requested_at DESC)`)
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS cloud_agent_tokens (
+		token TEXT PRIMARY KEY,
+		workspace_id TEXT NOT NULL DEFAULT 'default',
+		server_name TEXT NOT NULL DEFAULT '',
+		created_at INTEGER NOT NULL DEFAULT 0
+	)`)
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS connected_servers (
+		id TEXT PRIMARY KEY,
+		token TEXT NOT NULL UNIQUE,
+		workspace_id TEXT NOT NULL DEFAULT 'default',
+		server_name TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'offline',
+		ws_session_id TEXT NOT NULL DEFAULT '',
+		agent_version TEXT NOT NULL DEFAULT '',
+		last_heartbeat_at INTEGER NOT NULL DEFAULT 0,
+		last_disconnect_at INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL DEFAULT 0,
+		updated_at INTEGER NOT NULL DEFAULT 0
+	)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_connected_servers_status_heartbeat
+		ON connected_servers(status, last_heartbeat_at DESC)`)
+	_, _ = db.Exec(`ALTER TABLE connected_servers ADD COLUMN ws_session_id TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE connected_servers ADD COLUMN agent_version TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE connected_servers ADD COLUMN last_disconnect_at INTEGER NOT NULL DEFAULT 0`)
 	if err := seedLanePolicies(db); err != nil {
 		return err
 	}

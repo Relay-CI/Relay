@@ -569,11 +569,25 @@ export interface ServerConfig {
   base_domain?: string;
   dashboard_host?: string;
   acme_disabled?: string;
+  custom_host_rules?: CustomHostRule[];
   theme_name?: string;
   theme_css?: string;
   plugin_mutations_enabled?: boolean;
   doctor?: DoctorReport;
   [key: string]: unknown;
+}
+
+export interface CustomHostRule {
+  id?: string;
+  host: string;
+  action: "redirect" | "reverse_proxy" | "static_response" | "relay_dashboard";
+  redirect_url?: string;
+  redirect_code?: number;
+  preserve_path?: boolean;
+  upstream_url?: string;
+  response_status?: number;
+  response_body?: string;
+  response_content_type?: string;
 }
 
 export interface AdminOpsContainerUsage {

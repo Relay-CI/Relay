@@ -459,6 +459,29 @@ func TestEnsureGlobalProxyWritesAllPublicHostAliases(t *testing.T) {
 	}
 }
 
+func TestEnsureGlobalProxyWritesCustomRedirectRule(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	if err := s.writeServerConfig(map[string]string{
+		"custom_host_rules": `[{"host":"relay.example.com","action":"redirect","redirect_url":"https://example.com","redirect_code":301,"preserve_path":true}]`,
+	}); err != nil {
+		t.Fatalf("write server config: %v", err)
+	}
+
+	if err := s.ensureGlobalProxy(); err != nil {
+		t.Fatalf("ensure global proxy: %v", err)
+	}
+
+	configPath := filepath.Join(s.dataDir, "global-proxy", "Caddyfile")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read caddyfile: %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "relay.example.com {\n\tredir https://example.com{uri} 301\n}") {
+		t.Fatalf("expected redirect rule in caddyfile, got:\n%s", text)
+	}
+}
+
 type mockRuntime struct {
 	running   map[string]bool
 	published map[string]int
