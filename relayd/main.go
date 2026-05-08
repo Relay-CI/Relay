@@ -5494,14 +5494,14 @@ func (s *Server) resolveRuntimeLogTarget(app string, env DeployEnv, branch strin
 	if strings.TrimSpace(id) == "" {
 		id = runtimeLogDefaultTarget(targets)
 		if id == "" {
-			return nil, targets, lane, fmt.Errorf(runtimeLogOfflineReason(lane, nil))
+			return nil, targets, lane, errors.New(runtimeLogOfflineReason(lane, nil))
 		}
 	}
 	for _, target := range targets {
 		if target.ID == id {
 			t := target
 			if !t.Running {
-				return &t, targets, lane, fmt.Errorf(runtimeLogOfflineReason(lane, &t))
+				return &t, targets, lane, errors.New(runtimeLogOfflineReason(lane, &t))
 			}
 			return &t, targets, lane, nil
 		}
