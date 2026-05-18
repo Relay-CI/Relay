@@ -789,10 +789,14 @@ export async function getRuntimeTargets(
 
 export async function getAnalytics(
   app?: string,
+  env?: string,
+  branch?: string,
   period?: string,
 ): Promise<unknown> {
   const params = new URLSearchParams();
   if (app) params.set("app", app);
+  if (env) params.set("env", env);
+  if (branch) params.set("branch", branch);
   if (period) params.set("period", period);
   return apiFetch(`/api/analytics?${params}`);
 }

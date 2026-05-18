@@ -98,7 +98,8 @@ export function useRuntimeLogs(
   // Stream logs when target changes
   useEffect(() => {
     if (!selectedEnv?.app || !selectedEnv?.env || !selectedEnv?.branch) return undefined;
-    const effectiveTarget = selectedTarget || state.defaultTarget;
+    const selectedTargetMeta = state.targets.find((t) => t.id === selectedTarget) ?? null;
+    const effectiveTarget = selectedTargetMeta ? selectedTarget : state.defaultTarget;
     const effectiveTargetMeta = state.targets.find((t) => t.id === effectiveTarget) ?? null;
     const laneState = state.lane;
 

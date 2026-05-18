@@ -43,7 +43,7 @@ export function AnalyticsPage({ selectedEnv }: AnalyticsPageProps) {
     setLoading(true);
     setError(null);
 
-    getAnalytics(selectedEnv?.app, period)
+    getAnalytics(selectedEnv?.app, selectedEnv?.env, selectedEnv?.branch, period)
       .then((result) => {
         if (cancelled) return;
         setData((result as AnalyticsData) ?? null);
@@ -57,7 +57,7 @@ export function AnalyticsPage({ selectedEnv }: AnalyticsPageProps) {
       });
 
     return () => { cancelled = true; };
-  }, [period, selectedEnv?.app]);
+  }, [period, selectedEnv?.app, selectedEnv?.env, selectedEnv?.branch]);
 
   const total = data?.total_requests ?? 0;
   const byCountry = data?.by_country ?? [];

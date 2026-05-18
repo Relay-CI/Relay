@@ -1135,7 +1135,7 @@ func (r *StationRuntime) RemoveVolume(name string) {
 	_ = os.RemoveAll(r.volumePath(name))
 }
 
-func (r *StationRuntime) Build(ctx context.Context, tag, contextDir, dockerfilePath string, logw io.Writer) error {
+func (r *StationRuntime) Build(ctx context.Context, tag, contextDir, dockerfilePath string, buildArgs map[string]string, logw io.Writer) error {
 	bin, err := r.binary()
 	if err != nil {
 		return err

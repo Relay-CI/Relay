@@ -488,7 +488,7 @@ type ContainerRuntime interface {
 	Pull(image string) error
 	// Build builds an image from contextDir tagged as tag.
 	// dockerfilePath may be "" to use the default Dockerfile in contextDir.
-	Build(ctx context.Context, tag, contextDir, dockerfilePath string, logw io.Writer) error
+	Build(ctx context.Context, tag, contextDir, dockerfilePath string, buildArgs map[string]string, logw io.Writer) error
 	// RemoveImage removes an image by reference (ignores errors).
 	RemoveImage(ref string)
 	// ListImages returns all image refs matching the given repository name.
@@ -621,10 +621,20 @@ func (r *DockerRuntime) Pull(image string) error {
 	return exec.Command("docker", "pull", image).Run()
 }
 
-func (r *DockerRuntime) Build(ctx context.Context, tag, contextDir, dockerfilePath string, logw io.Writer) error {
+func (r *DockerRuntime) Build(ctx context.Context, tag, contextDir, dockerfilePath string, buildArgs map[string]string, logw io.Writer) error {
 	args := []string{"build", "-t", tag}
 	if dockerfilePath != "" {
 		args = append(args, "-f", dockerfilePath)
+	}
+	if len(buildArgs) > 0 {
+		keys := make([]string, 0, len(buildArgs))
+		for key := range buildArgs {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			args = append(args, "--build-arg", fmt.Sprintf("%s=%s", key, buildArgs[key]))
+		}
 	}
 	args = append(args, ".")
 	return runCmdLoggedEnvCtx(ctx, contextDir, logw, []string{"DOCKER_BUILDKIT=1"}, "docker", args...)
@@ -7926,20 +7936,21 @@ func (s *Server) getAppSecrets(app string, env DeployEnv, branch string) (map[st
 	return res, nil
 }
 
-func (s *Server) mergeLaneSecretsIntoEnv(app string, env DeployEnv, branch string, target map[string]string, log func(string, ...any)) {
+func (s *Server) mergeLaneSecretsIntoEnv(app string, env DeployEnv, branch string, target map[string]string, log func(string, ...any)) int {
 	if target == nil {
-		return
+		return 0
 	}
 	secs, err := s.getAppSecrets(app, env, branch)
 	if err != nil {
 		if log != nil {
 			log("warning: could not load admin secrets: %v", err)
 		}
-		return
+		return 0
 	}
 	for k, v := range secs {
 		target[k] = v
 	}
+	return len(secs)
 }
 
 func scrubWorkspaceEnvFiles(repoDir string) (int, error) {
@@ -8466,6 +8477,13 @@ func (s *Server) runDeploy(job DeployJob) {
 		}
 	}
 
+	buildEnv := map[string]string{}
+	buildSecretCount := s.mergeLaneSecretsIntoEnv(req.App, req.Env, req.Branch, buildEnv, log)
+	buildEnvB64 := encodeBuildEnvArgValue(buildEnv)
+	if buildSecretCount > 0 {
+		log("build env: injected %d lane secret(s) into build steps", buildSecretCount)
+	}
+
 	repoHash := repoFingerprint(buildContextDir)
 	artifactRef := ""
 	reusedArtifact := false
@@ -8480,7 +8498,17 @@ func (s *Server) runDeploy(job DeployJob) {
 	} else if engine == EngineStation {
 		artifactRef = stationSnapshotName(req.App, req.Env, req.Branch, d.ID)
 		log("station build starting...")
-		if _, err := s.buildStationSnapshot(buildCtx, buildContextDir, dockerfilePath, artifactRef, logf); err != nil {
+		stationDockerfilePath, cleanupBuildDockerfile, err := prepareBuildDockerfileWithEnv(buildContextDir, dockerfilePath, buildEnvB64, true)
+		if err != nil {
+			end := time.Now()
+			d.Status = StatusFailed
+			d.EndedAt = &end
+			d.Error = "station build prep failed: " + err.Error()
+			_ = s.updateDeployStatus(d.ID, d.Status, d.Error, d.StartedAt, d.EndedAt, "", "")
+			return
+		}
+		defer cleanupBuildDockerfile()
+		if _, err := s.buildStationSnapshot(buildCtx, buildContextDir, stationDockerfilePath, artifactRef, logf); err != nil {
 			end := time.Now()
 			d.Status = StatusFailed
 			d.EndedAt = &end
@@ -8504,7 +8532,21 @@ func (s *Server) runDeploy(job DeployJob) {
 		if customDockerfile != "" {
 			buildDockerfilePath = dockerfilePath
 		}
-		if err := s.runtime.Build(buildCtx, artifactRef, buildContextDir, buildDockerfilePath, logf); err != nil {
+		wrappedDockerfilePath, cleanupBuildDockerfile, err := prepareBuildDockerfileWithEnv(buildContextDir, buildDockerfilePath, buildEnvB64, false)
+		if err != nil {
+			end := time.Now()
+			d.Status = StatusFailed
+			d.EndedAt = &end
+			d.Error = "docker build prep failed: " + err.Error()
+			_ = s.updateDeployStatus(d.ID, d.Status, d.Error, d.StartedAt, d.EndedAt, "", "")
+			return
+		}
+		defer cleanupBuildDockerfile()
+		var buildArgs map[string]string
+		if buildEnvB64 != "" {
+			buildArgs = map[string]string{relayBuildEnvArg: buildEnvB64}
+		}
+		if err := s.runtime.Build(buildCtx, artifactRef, buildContextDir, wrappedDockerfilePath, buildArgs, logf); err != nil {
 			end := time.Now()
 			d.Status = StatusFailed
 			d.EndedAt = &end
@@ -8578,7 +8620,10 @@ func (s *Server) runDeploy(job DeployJob) {
 			}
 		}
 		s.reconcileProjectServices(log, req.App, req.Env, req.Branch, desiredMap)
-		s.mergeLaneSecretsIntoEnv(req.App, req.Env, req.Branch, extraEnv, log)
+		runtimeSecretCount := s.mergeLaneSecretsIntoEnv(req.App, req.Env, req.Branch, extraEnv, log)
+		if runtimeSecretCount > 0 {
+			log("runtime env: injected %d lane secret(s) into containers", runtimeSecretCount)
+		}
 
 		if !appStopped {
 			_ = s.stopStationLane(req.App, req.Env, req.Branch)
@@ -8608,7 +8653,10 @@ func (s *Server) runDeploy(job DeployJob) {
 			log("station engine does not support companion services; skipping %d service(s)", len(desiredServices))
 		}
 		s.reconcileProjectServices(log, req.App, req.Env, req.Branch, desiredMap)
-		s.mergeLaneSecretsIntoEnv(req.App, req.Env, req.Branch, extraEnv, log)
+		runtimeSecretCount := s.mergeLaneSecretsIntoEnv(req.App, req.Env, req.Branch, extraEnv, log)
+		if runtimeSecretCount > 0 {
+			log("runtime env: injected %d lane secret(s) into containers", runtimeSecretCount)
+		}
 		if !appStopped {
 			if err := s.runStationApp(log, req, artifactRef, extraEnv); err != nil {
 				end := time.Now()
@@ -10194,6 +10242,8 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	adb := s.analyticsStore()
 	period := r.URL.Query().Get("period")
 	app := strings.TrimSpace(r.URL.Query().Get("app"))
+	branch := strings.TrimSpace(r.URL.Query().Get("branch"))
+	env := DeployEnv(strings.TrimSpace(r.URL.Query().Get("env")))
 	var sess *UserSession
 	if s.hasUsers() {
 		sess = s.validateUserSession(r)
@@ -10222,24 +10272,28 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 	hostArgs := []any{since}
 	if app != "" {
 		if sess != nil {
-			rows, err := s.db.Query(`SELECT DISTINCT env FROM app_state WHERE app=?`, app)
-			if err == nil {
-				allowed := false
-				for rows.Next() {
-					var env string
-					if rows.Scan(&env) == nil && roleAtLeast(s.effectiveLaneRole(sess, app, DeployEnv(env)), "viewer") {
-						allowed = true
-						break
+			allowed := false
+			if env != "" {
+				allowed = roleAtLeast(s.effectiveLaneRole(sess, app, env), "viewer")
+			} else {
+				rows, err := s.db.Query(`SELECT DISTINCT env FROM app_state WHERE app=?`, app)
+				if err == nil {
+					for rows.Next() {
+						var laneEnv string
+						if rows.Scan(&laneEnv) == nil && roleAtLeast(s.effectiveLaneRole(sess, app, DeployEnv(laneEnv)), "viewer") {
+							allowed = true
+							break
+						}
 					}
-				}
-				rows.Close()
-				if !allowed {
-					httpError(w, 403, "insufficient app access")
-					return
+					rows.Close()
 				}
 			}
+			if !allowed {
+				httpError(w, 403, "insufficient app access")
+				return
+			}
 		}
-		hosts, err := s.publicHostsForApp(app)
+		hosts, err := s.analyticsHostsForSelection(app, env, branch)
 		if err != nil {
 			httpError(w, 500, err.Error())
 			return
@@ -11520,6 +11574,29 @@ func normalizePublicHosts(hosts []string) []string {
 	return out
 }
 
+func normalizeAnalyticsHosts(hosts []string) []string {
+	if len(hosts) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(hosts))
+	seen := make(map[string]struct{}, len(hosts))
+	for _, host := range hosts {
+		normalized := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+		if normalized == "" {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func encodePublicHosts(hosts []string) string {
 	return strings.Join(normalizePublicHosts(hosts), "\n")
 }
@@ -11583,6 +11660,25 @@ func (s *Server) publicHostsForApp(app string) ([]string, error) {
 		hosts = append(hosts, parsePublicHosts(publicHostsRaw)...)
 	}
 	return normalizePublicHosts(hosts), rows.Err()
+}
+
+func (s *Server) analyticsHostsForSelection(app string, env DeployEnv, branch string) ([]string, error) {
+	if app == "" {
+		return nil, nil
+	}
+	if env == "" || strings.TrimSpace(branch) == "" {
+		return s.publicHostsForApp(app)
+	}
+	st, err := s.getAppState(app, env, branch)
+	if err != nil {
+		return nil, err
+	}
+	if st == nil {
+		return nil, nil
+	}
+	hosts := append([]string{}, analyticsWindowHost(st.PublicHost, st.HostPort)...)
+	hosts = append(hosts, st.PublicHosts...)
+	return normalizeAnalyticsHosts(hosts), nil
 }
 
 func requiresSameOrigin(method string) bool {
@@ -13825,6 +13921,167 @@ func quoteForSh(s string) string {
 }
 
 func shQuote(s string) string { return quoteForSh(s) }
+
+const relayBuildEnvArg = "RELAY_BUILD_ENV_B64"
+
+func encodeBuildEnvArgValue(env map[string]string) string {
+	if len(env) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var script strings.Builder
+	for _, key := range keys {
+		script.WriteString("export ")
+		script.WriteString(key)
+		script.WriteString("=")
+		script.WriteString(shQuote(env[key]))
+		script.WriteString("\n")
+	}
+	return base64.StdEncoding.EncodeToString([]byte(script.String()))
+}
+
+func prepareBuildDockerfileWithEnv(contextDir string, dockerfilePath string, buildEnvB64 string, embedDefault bool) (string, func(), error) {
+	if strings.TrimSpace(buildEnvB64) == "" {
+		return dockerfilePath, func() {}, nil
+	}
+	srcPath := strings.TrimSpace(dockerfilePath)
+	if srcPath == "" {
+		srcPath = filepath.Join(contextDir, "Dockerfile")
+	}
+	content, err := os.ReadFile(srcPath)
+	if err != nil {
+		return "", nil, err
+	}
+	wrapped := injectBuildEnvIntoDockerfile(string(content), buildEnvB64, embedDefault)
+	tmp, err := os.CreateTemp(contextDir, ".relay-build-*.Dockerfile")
+	if err != nil {
+		return "", nil, err
+	}
+	if _, err := tmp.WriteString(wrapped); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return "", nil, err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		return "", nil, err
+	}
+	return tmp.Name(), func() { _ = os.Remove(tmp.Name()) }, nil
+}
+
+func injectBuildEnvIntoDockerfile(content string, buildEnvB64 string, embedDefault bool) string {
+	lines := splitDockerfileLogicalLines(content)
+	var out strings.Builder
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(strings.ToUpper(trimmed), "FROM "):
+			out.WriteString(line)
+			if !strings.HasSuffix(line, "\n") {
+				out.WriteString("\n")
+			}
+			out.WriteString(buildEnvArgInstruction(buildEnvB64, embedDefault))
+		case strings.HasPrefix(strings.ToUpper(trimmed), "RUN "):
+			out.WriteString(wrapDockerRunInstructionForBuildEnv(line))
+		default:
+			out.WriteString(line)
+		}
+	}
+	return out.String()
+}
+
+func splitDockerfileLogicalLines(content string) []string {
+	parts := strings.SplitAfter(content, "\n")
+	if len(parts) == 0 {
+		return nil
+	}
+	lines := make([]string, 0, len(parts))
+	var current strings.Builder
+	for _, part := range parts {
+		current.WriteString(part)
+		if dockerfileLineContinues(part) {
+			continue
+		}
+		lines = append(lines, current.String())
+		current.Reset()
+	}
+	if current.Len() > 0 {
+		lines = append(lines, current.String())
+	}
+	return lines
+}
+
+func dockerfileLineContinues(line string) bool {
+	line = strings.TrimRight(line, "\r\n")
+	line = strings.TrimRight(line, " \t")
+	if line == "" {
+		return false
+	}
+	backslashes := 0
+	for i := len(line) - 1; i >= 0 && line[i] == '\\'; i-- {
+		backslashes++
+	}
+	return backslashes%2 == 1
+}
+
+func buildEnvArgInstruction(buildEnvB64 string, embedDefault bool) string {
+	if embedDefault && strings.TrimSpace(buildEnvB64) != "" {
+		return fmt.Sprintf("ARG %s=%s\n", relayBuildEnvArg, buildEnvB64)
+	}
+	return fmt.Sprintf("ARG %s\n", relayBuildEnvArg)
+}
+
+func wrapDockerRunInstructionForBuildEnv(line string) string {
+	newline := ""
+	switch {
+	case strings.HasSuffix(line, "\r\n"):
+		newline = "\r\n"
+	case strings.HasSuffix(line, "\n"):
+		newline = "\n"
+	}
+	trimmed := strings.TrimSpace(line)
+	rest := strings.TrimSpace(trimmed[3:])
+	if strings.HasPrefix(rest, "[") {
+		return line
+	}
+	flags, cmd, ok := splitDockerRunFlags(rest)
+	if !ok {
+		return line
+	}
+	script := fmt.Sprintf(`if [ -n "${%s:-}" ]; then eval "$(printf '%%s' "$%s" | base64 -d)"; fi; exec /bin/sh -lc %s`,
+		relayBuildEnvArg,
+		relayBuildEnvArg,
+		shQuote(cmd),
+	)
+	return fmt.Sprintf("RUN %s/bin/sh -lc %s%s", flags, shQuote(script), newline)
+}
+
+func splitDockerRunFlags(rest string) (string, string, bool) {
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return "", "", false
+	}
+	var flags []string
+	for strings.HasPrefix(rest, "--") {
+		idx := strings.IndexAny(rest, " \t\r\n")
+		if idx <= 0 {
+			return "", "", false
+		}
+		flags = append(flags, rest[:idx])
+		rest = strings.TrimLeft(rest[idx:], " \t\r\n")
+	}
+	if rest == "" {
+		return "", "", false
+	}
+	if len(flags) == 0 {
+		return "", rest, true
+	}
+	return strings.Join(flags, " ") + " ", rest, true
+}
 
 func shellJSON(cmd string) string {
 	// Dockerfile JSON CMD expects ["sh","-lc","..."] form for arbitrary strings
