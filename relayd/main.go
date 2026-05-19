@@ -5418,10 +5418,7 @@ func (s *Server) runtimeLogTargets(app string, env DeployEnv, branch string) ([]
 		return s.stationRuntimeLogTargets(app, env, branch, st)
 	}
 
-	activeSlot := normalizeActiveSlot(st.ActiveSlot)
-	if activeSlot == "" {
-		activeSlot = s.currentActiveSlot(app, env, branch, st)
-	}
+	activeSlot := s.currentActiveSlotWithRuntime(s.runtime, app, env, branch, st)
 	standbySlot := normalizeActiveSlot(st.StandbySlot)
 
 	targets := make([]RuntimeLogTarget, 0, 6)
@@ -11327,15 +11324,19 @@ func (s *Server) repairLegacyAppHostPortsFromRuntime() (int, error) {
 }
 
 func (s *Server) currentActiveSlotWithRuntime(runtime ContainerRuntime, app string, env DeployEnv, branch string, state *AppState) string {
-	if state != nil && normalizeActiveSlot(state.ActiveSlot) != "" {
-		return normalizeActiveSlot(state.ActiveSlot)
+	stored := ""
+	if state != nil {
+		stored = normalizeActiveSlot(state.ActiveSlot)
+		if stored != "" && runtime.IsRunning(appSlotContainerName(app, env, branch, stored)) {
+			return stored
+		}
 	}
 	for _, slot := range []string{"blue", "green"} {
 		if runtime.IsRunning(appSlotContainerName(app, env, branch, slot)) {
 			return slot
 		}
 	}
-	return ""
+	return stored
 }
 
 func (s *Server) currentActiveSlot(app string, env DeployEnv, branch string, state *AppState) string {

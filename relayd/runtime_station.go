@@ -1807,12 +1807,9 @@ func (s *Server) stationRuntimeLogTargets(app string, env DeployEnv, branch stri
 	activeSlot := ""
 	standbySlot := ""
 	if st != nil {
-		activeSlot = normalizeActiveSlot(st.ActiveSlot)
 		standbySlot = normalizeActiveSlot(st.StandbySlot)
 	}
-	if activeSlot == "" {
-		activeSlot = s.currentActiveSlotWithRuntime(runtime, app, env, branch, st)
-	}
+	activeSlot = s.currentActiveSlotWithRuntime(runtime, app, env, branch, st)
 
 	targets := make([]RuntimeLogTarget, 0, 6)
 	lane := RuntimeLogLaneState{

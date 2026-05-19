@@ -502,6 +502,28 @@ func TestAppLaneRunningIgnoresProxyOnlyContainer(t *testing.T) {
 	}
 }
 
+func TestCurrentActiveSlotPrefersRunningSlotOverStaleState(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	rt := s.runtime.(*mockRuntime)
+
+	app := "demo"
+	env := EnvPreview
+	branch := "main"
+
+	rt.running[appSlotContainerName(app, env, branch, "green")] = true
+
+	state := &AppState{
+		App:        app,
+		Env:        env,
+		Branch:     branch,
+		ActiveSlot: "blue",
+	}
+
+	if got := s.currentActiveSlotWithRuntime(rt, app, env, branch, state); got != "green" {
+		t.Fatalf("expected running slot green to override stale state, got %q", got)
+	}
+}
+
 func TestRuntimeLogTargetsPreferAvailableAppLogsOverProxy(t *testing.T) {
 	s := newPreviewPortTestServer(t)
 	rt := s.runtime.(*mockRuntime)
@@ -553,6 +575,43 @@ func TestRuntimeLogTargetsPreferAvailableAppLogsOverProxy(t *testing.T) {
 	}
 	if !selected.Available {
 		t.Fatalf("expected live target logs to remain available")
+	}
+}
+
+func TestRuntimeLogTargetsUseRunningSlotAsLiveTargetWhenStateIsStale(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	rt := s.runtime.(*mockRuntime)
+
+	app := "demo"
+	env := EnvPreview
+	branch := "main"
+	green := appSlotContainerName(app, env, branch, "green")
+
+	if err := s.saveAppState(&AppState{
+		App:          app,
+		Env:          env,
+		Branch:       branch,
+		Engine:       EngineDocker,
+		ActiveSlot:   "blue",
+		CurrentImage: "demo:latest",
+	}); err != nil {
+		t.Fatalf("save app state: %v", err)
+	}
+
+	rt.exists[green] = true
+	rt.running[green] = true
+
+	targets, _, err := s.runtimeLogTargets(app, env, branch)
+	if err != nil {
+		t.Fatalf("runtimeLogTargets: %v", err)
+	}
+	if got := runtimeLogDefaultTarget(targets); got != "live" {
+		t.Fatalf("expected live target to follow running slot, got %q", got)
+	}
+	for _, target := range targets {
+		if target.ID == "live" && target.Slot != "green" {
+			t.Fatalf("expected live target to point at green slot, got %q", target.Slot)
+		}
 	}
 }
 
