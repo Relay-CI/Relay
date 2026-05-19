@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestShouldAutoAssignPreviewHostPort(t *testing.T) {
@@ -482,13 +483,114 @@ func TestEnsureGlobalProxyWritesCustomRedirectRule(t *testing.T) {
 	}
 }
 
+func TestAppLaneRunningIgnoresProxyOnlyContainer(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	rt := s.runtime.(*mockRuntime)
+
+	app := "demo"
+	env := EnvPreview
+	branch := "main"
+
+	rt.running[appBaseContainerName(app, env, branch)] = true
+	if s.appLaneRunning(app, env, branch) {
+		t.Fatalf("edge proxy alone should not count as an app lane")
+	}
+
+	rt.running[appSlotContainerName(app, env, branch, "blue")] = true
+	if !s.appLaneRunning(app, env, branch) {
+		t.Fatalf("running app slot should count as an app lane")
+	}
+}
+
+func TestRuntimeLogTargetsPreferAvailableAppLogsOverProxy(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	rt := s.runtime.(*mockRuntime)
+
+	app := "demo"
+	env := EnvPreview
+	branch := "main"
+	live := appSlotContainerName(app, env, branch, "blue")
+	proxy := appBaseContainerName(app, env, branch)
+
+	if err := s.saveAppState(&AppState{
+		App:          app,
+		Env:          env,
+		Branch:       branch,
+		Engine:       EngineDocker,
+		ActiveSlot:   "blue",
+		CurrentImage: "demo:latest",
+	}); err != nil {
+		t.Fatalf("save app state: %v", err)
+	}
+
+	rt.exists[live] = true
+	rt.exists[proxy] = true
+	rt.running[proxy] = true
+
+	targets, lane, err := s.runtimeLogTargets(app, env, branch)
+	if err != nil {
+		t.Fatalf("runtimeLogTargets: %v", err)
+	}
+	if lane.AppRunning {
+		t.Fatalf("expected app lane to report no running app container")
+	}
+	if !lane.HasRunningTarget {
+		t.Fatalf("expected running proxy target to keep lane targets online")
+	}
+	if got := runtimeLogDefaultTarget(targets); got != "live" {
+		t.Fatalf("expected crashed live app logs to be default target, got %q", got)
+	}
+
+	selected, _, _, err := s.resolveRuntimeLogTarget(app, env, branch, "live")
+	if err != nil {
+		t.Fatalf("resolveRuntimeLogTarget: %v", err)
+	}
+	if selected == nil || selected.ID != "live" {
+		t.Fatalf("expected live target, got %#v", selected)
+	}
+	if selected.Running {
+		t.Fatalf("expected live target to be stopped")
+	}
+	if !selected.Available {
+		t.Fatalf("expected live target logs to remain available")
+	}
+}
+
+func TestWaitForRuntimeContainerReadyFailsFastForExitedContainer(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	rt := &mockRuntime{
+		running:   map[string]bool{},
+		exists:    map[string]bool{"demo": true},
+		published: map[string]int{},
+	}
+
+	start := time.Now()
+	err := s.waitForRuntimeContainerReady(rt, nil, "demo", 3000, 5*time.Second)
+	if err == nil {
+		t.Fatalf("expected exited container readiness failure")
+	}
+	if !strings.Contains(err.Error(), "exited before becoming ready") {
+		t.Fatalf("unexpected readiness error: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("expected fast failure for exited container, took %s", elapsed)
+	}
+}
+
 type mockRuntime struct {
 	running   map[string]bool
+	exists    map[string]bool
 	published map[string]int
 }
 
-func (m *mockRuntime) RunDetached(ContainerSpec) error       { return nil }
-func (m *mockRuntime) Remove(string)                         {}
+func (m *mockRuntime) RunDetached(ContainerSpec) error { return nil }
+func (m *mockRuntime) Remove(string)                   {}
+func (m *mockRuntime) ContainerExists(name string) bool {
+	if m.exists == nil {
+		return m.running[name]
+	}
+	return m.exists[name] || m.running[name]
+}
 func (m *mockRuntime) IsRunning(name string) bool            { return m.running[name] }
 func (m *mockRuntime) ContainerIP(string) string             { return "" }
 func (m *mockRuntime) PublishedPort(name string, _ int) int  { return m.published[name] }
@@ -524,7 +626,7 @@ func newPreviewPortTestServer(t *testing.T) *Server {
 		dataDir:      dataDir,
 		caddyLogsDir: filepath.Join(dataDir, "caddy-logs"),
 		db:           db,
-		runtime:      &mockRuntime{running: map[string]bool{}, published: map[string]int{}},
+		runtime:      &mockRuntime{running: map[string]bool{}, exists: map[string]bool{}, published: map[string]int{}},
 	}
 }
 

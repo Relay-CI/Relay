@@ -760,6 +760,7 @@ export interface RuntimeTarget {
   id: string;
   label: string;
   running: boolean;
+  available: boolean;
 }
 
 export interface RuntimeTargetsResponse {

@@ -468,6 +468,8 @@ type ContainerRuntime interface {
 	RunDetached(spec ContainerSpec) error
 	// Remove stops and deletes a container (ignores not-found errors).
 	Remove(name string)
+	// ContainerExists reports whether the named container or target still exists.
+	ContainerExists(name string) bool
 	// IsRunning reports whether the named container is currently running.
 	IsRunning(name string) bool
 	// ContainerIP returns the first IP address found in the container's networks.
@@ -554,6 +556,17 @@ func (r *DockerRuntime) RunDetached(spec ContainerSpec) error {
 
 func (r *DockerRuntime) Remove(name string) {
 	_ = exec.Command("docker", "rm", "-f", name).Run()
+}
+
+func (r *DockerRuntime) ContainerExists(name string) bool {
+	if strings.TrimSpace(name) == "" {
+		return false
+	}
+	out, err := exec.Command("docker", "inspect", name).CombinedOutput()
+	if err != nil {
+		return false
+	}
+	return len(out) > 0
 }
 
 func (r *DockerRuntime) IsRunning(name string) bool {
@@ -2452,7 +2465,6 @@ func (s *Server) stopProjectServiceRuntime(app, env, branch, name string) {
 
 func (s *Server) appLaneRunning(app string, env DeployEnv, branch string) bool {
 	names := []string{
-		appBaseContainerName(app, env, branch),
 		appSlotContainerName(app, env, branch, "blue"),
 		appSlotContainerName(app, env, branch, "green"),
 		stationAppName(app, env, branch),
@@ -5310,6 +5322,7 @@ type RuntimeLogTarget struct {
 	Kind      string `json:"kind"`
 	Container string `json:"container"`
 	Running   bool   `json:"running"`
+	Available bool   `json:"available"`
 	Live      bool   `json:"live,omitempty"`
 	Slot      string `json:"slot,omitempty"`
 	Service   string `json:"service,omitempty"`
@@ -5338,11 +5351,34 @@ func runtimeLogDefaultTarget(targets []RuntimeLogTarget) string {
 		}
 	}
 	for _, target := range targets {
+		if target.Kind == "app" && target.Live && target.Available {
+			return target.ID
+		}
+	}
+	for _, target := range targets {
+		if target.Kind == "app" && target.Available {
+			return target.ID
+		}
+	}
+	for _, target := range targets {
 		if target.Running {
 			return target.ID
 		}
 	}
+	for _, target := range targets {
+		if target.Available {
+			return target.ID
+		}
+	}
 	return ""
+}
+
+func runtimeLogTargetStatus(runtime ContainerRuntime, container string) (running bool, available bool) {
+	running = runtime.IsRunning(container)
+	if running {
+		return true, true
+	}
+	return false, runtime.ContainerExists(container)
 }
 
 func runtimeLogOfflineReason(lane RuntimeLogLaneState, target *RuntimeLogTarget) string {
@@ -5397,7 +5433,7 @@ func (s *Server) runtimeLogTargets(app string, env DeployEnv, branch string) ([]
 		if _, ok := seen[target.ID]; ok {
 			return
 		}
-		target.Running = s.runtime.IsRunning(target.Container)
+		target.Running, target.Available = runtimeLogTargetStatus(s.runtime, target.Container)
 		targets = append(targets, target)
 		seen[target.ID] = struct{}{}
 	}
@@ -5428,7 +5464,7 @@ func (s *Server) runtimeLogTargets(app string, env DeployEnv, branch string) ([]
 			continue
 		}
 		name := appSlotContainerName(app, env, branch, slot)
-		if s.runtime.IsRunning(name) {
+		if s.runtime.ContainerExists(name) {
 			add(RuntimeLogTarget{
 				ID:        "slot:" + slot,
 				Label:     fmt.Sprintf("App slot (%s)", slot),
@@ -5510,7 +5546,7 @@ func (s *Server) resolveRuntimeLogTarget(app string, env DeployEnv, branch strin
 	for _, target := range targets {
 		if target.ID == id {
 			t := target
-			if !t.Running {
+			if !t.Available {
 				return &t, targets, lane, errors.New(runtimeLogOfflineReason(lane, &t))
 			}
 			return &t, targets, lane, nil
@@ -5583,7 +5619,7 @@ func (s *Server) handleRuntimeLogStream(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	runtime := s.runtimeForEngine(selected.Engine)
-	if !runtime.IsRunning(selected.Container) {
+	if !selected.Available || !runtime.ContainerExists(selected.Container) {
 		httpError(w, 409, runtimeLogOfflineReason(lane, selected))
 		return
 	}
@@ -9205,6 +9241,52 @@ func rolloutDrainDuration() time.Duration {
 	return time.Duration(secs) * time.Second
 }
 
+func logRuntimeContainerDiagnostics(runtime ContainerRuntime, log func(string, ...any), name string) {
+	if log == nil {
+		return
+	}
+	if _, ok := runtime.(*StationRuntime); ok {
+		if rec, _ := latestStationContainerByApp(name); rec != nil {
+			log("container %s: pid=%d running=%v port=%d", name, rec.PID, stationContainerRunning(rec), rec.Port)
+		} else {
+			log("container %s: no record found in state dir", name)
+		}
+		if path := stationRuntimeLogPath(name); path != "" {
+			if data, readErr := os.ReadFile(path); readErr == nil {
+				if len(data) == 0 {
+					log("container log is empty")
+				} else {
+					if len(data) > 4096 {
+						data = data[len(data)-4096:]
+					}
+					log("container output:\n%s", strings.TrimSpace(string(data)))
+				}
+			} else {
+				log("container log unreadable: %v", readErr)
+			}
+		} else {
+			log("container log not found (no state record?)")
+		}
+		return
+	}
+	if _, ok := runtime.(*DockerRuntime); ok {
+		state, stateErr := exec.Command("docker", "inspect", "--format", "{{json .State}}", name).CombinedOutput()
+		if stateErr != nil {
+			log("container %s inspect failed: %v (%s)", name, stateErr, strings.TrimSpace(string(state)))
+		} else {
+			log("container %s state: %s", name, strings.TrimSpace(string(state)))
+		}
+		logs, logsErr := exec.Command("docker", "logs", "--tail", "200", name).CombinedOutput()
+		if logsErr != nil {
+			log("container %s logs unavailable: %v (%s)", name, logsErr, strings.TrimSpace(string(logs)))
+		} else if trimmed := strings.TrimSpace(string(logs)); trimmed != "" {
+			log("container output:\n%s", trimmed)
+		} else {
+			log("container log is empty")
+		}
+	}
+}
+
 func (s *Server) waitForRuntimeContainerReady(runtime ContainerRuntime, log func(string, ...any), name string, port int, timeout time.Duration) error {
 	port = firstNonZero(port, 3000)
 	deadline := time.Now().Add(timeout)
@@ -9237,6 +9319,12 @@ func (s *Server) waitForRuntimeContainerReady(runtime ContainerRuntime, log func
 					}
 				}
 			}
+		} else if attempts > 0 && runtime.ContainerExists(name) {
+			if log != nil {
+				log("container %s exited before becoming ready", name)
+			}
+			logRuntimeContainerDiagnostics(runtime, log, name)
+			return fmt.Errorf("container %s exited before becoming ready on port %d", name, port)
 		}
 		if log != nil && attempts > 0 && attempts%10 == 0 {
 			log("waiting for %s to accept traffic on port %d", name, port)
@@ -9268,6 +9356,9 @@ func (s *Server) waitForRuntimeContainerReady(runtime ContainerRuntime, log func
 				log("container log not found (no state record?)")
 			}
 		}
+	}
+	if _, ok := runtime.(*DockerRuntime); ok {
+		logRuntimeContainerDiagnostics(runtime, log, name)
 	}
 	return fmt.Errorf("container %s did not become ready on port %d within %s", name, port, timeout)
 }
@@ -14379,6 +14470,21 @@ func nodeDefaultBuildCmd(repoDir string) string {
 }
 
 func nodeDefaultStartCmd(repoDir string) string {
+	if nodePackageScript(repoDir, "start") != "" {
+		// Respect explicit lifecycle scripts when present.
+		if fileExists(filepath.Join(repoDir, "pnpm-lock.yaml")) {
+			return "pnpm start"
+		}
+		if fileExists(filepath.Join(repoDir, "yarn.lock")) {
+			return "yarn start"
+		}
+		return "npm start"
+	}
+	for _, name := range []string{"server.js", "index.js"} {
+		if fileExists(filepath.Join(repoDir, name)) {
+			return "node " + name
+		}
+	}
 	// Default to start script matching package manager
 	if fileExists(filepath.Join(repoDir, "pnpm-lock.yaml")) {
 		return "pnpm start"

@@ -55,6 +55,37 @@ func TestBunBuildpackUsesBunCommands(t *testing.T) {
 	}
 }
 
+func TestNodeGenericBuildpackFallsBackToServerJSWhenStartScriptMissing(t *testing.T) {
+	repoDir := t.TempDir()
+	mustWriteTestFile(t, filepath.Join(repoDir, "package.json"), `{"name":"demo"}`)
+	mustWriteTestFile(t, filepath.Join(repoDir, "server.js"), `console.log("hello")`)
+
+	plan, err := (&NodeGenericBuildpack{}).Plan(DeployRequest{}, repoDir, nil)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if plan.StartCmd != "node server.js" {
+		t.Fatalf("unexpected node generic fallback start command: %q", plan.StartCmd)
+	}
+}
+
+func TestNodeGenericBuildpackPrefersPackageManagerStartScriptWhenPresent(t *testing.T) {
+	repoDir := t.TempDir()
+	mustWriteTestFile(t, filepath.Join(repoDir, "package.json"), `{
+		"name":"demo",
+		"scripts":{"start":"node server.js"}
+	}`)
+	mustWriteTestFile(t, filepath.Join(repoDir, "server.js"), `console.log("hello")`)
+
+	plan, err := (&NodeGenericBuildpack{}).Plan(DeployRequest{}, repoDir, nil)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if plan.StartCmd != "npm start" {
+		t.Fatalf("unexpected node generic scripted start command: %q", plan.StartCmd)
+	}
+}
+
 func TestPythonBuildpackDjangoUsesUvicornWhenAvailable(t *testing.T) {
 	repoDir := t.TempDir()
 	mustWriteTestFile(t, filepath.Join(repoDir, "manage.py"), `import os

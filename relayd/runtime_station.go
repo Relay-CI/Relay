@@ -1065,6 +1065,19 @@ func (r *StationRuntime) Remove(name string) {
 	}
 }
 
+func (r *StationRuntime) ContainerExists(name string) bool {
+	if strings.TrimSpace(name) == "" {
+		return false
+	}
+	if _, err := loadstationContainerByID(name); err == nil {
+		return true
+	}
+	if rec, err := latestStationContainerByApp(name); err == nil && rec != nil {
+		return true
+	}
+	return loadstationProxyRecord(name) != nil
+}
+
 func (r *StationRuntime) IsRunning(name string) bool {
 	if rec, err := latestStationContainerByApp(name); err == nil && stationContainerRunning(rec) {
 		return true
@@ -1816,7 +1829,7 @@ func (s *Server) stationRuntimeLogTargets(app string, env DeployEnv, branch stri
 			return
 		}
 		target.Engine = EngineStation
-		target.Running = runtime.IsRunning(target.Container)
+		target.Running, target.Available = runtimeLogTargetStatus(runtime, target.Container)
 		targets = append(targets, target)
 		seen[target.ID] = struct{}{}
 	}
@@ -1857,7 +1870,7 @@ func (s *Server) stationRuntimeLogTargets(app string, env DeployEnv, branch stri
 			continue
 		}
 		name := appSlotContainerName(app, env, branch, slot)
-		if runtime.IsRunning(name) {
+		if runtime.ContainerExists(name) {
 			add(RuntimeLogTarget{
 				ID:        "slot:" + slot,
 				Label:     fmt.Sprintf("App slot (%s)", slot),

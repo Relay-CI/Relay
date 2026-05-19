@@ -114,7 +114,7 @@ export function useRuntimeLogs(
       return undefined;
     }
 
-    if (effectiveTargetMeta && !effectiveTargetMeta.running) {
+    if (effectiveTargetMeta && !effectiveTargetMeta.available) {
       setState((prev) => ({
         ...prev,
         lines: [],
