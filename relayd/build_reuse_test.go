@@ -30,6 +30,27 @@ func TestRepoFingerprintIgnoresTransientDirs(t *testing.T) {
 	}
 }
 
+func TestBuildInputFingerprintChangesWhenBuildEnvChanges(t *testing.T) {
+	repoDir := t.TempDir()
+	mustWriteTestFile(t, filepath.Join(repoDir, "src", "app.js"), "console.log('v1')\n")
+	mustWriteTestFile(t, filepath.Join(repoDir, "package.json"), `{"name":"demo"}`)
+
+	base := buildInputFingerprint(repoDir, nil)
+	withFirstSecret := buildInputFingerprint(repoDir, map[string]string{
+		"VITE_DASHBOARD_EMAIL": "first@example.com",
+	})
+	withSecondSecret := buildInputFingerprint(repoDir, map[string]string{
+		"VITE_DASHBOARD_EMAIL": "second@example.com",
+	})
+
+	if base == withFirstSecret {
+		t.Fatalf("expected build env to affect fingerprint: base=%s withFirstSecret=%s", base, withFirstSecret)
+	}
+	if withFirstSecret == withSecondSecret {
+		t.Fatalf("expected secret value change to affect fingerprint: first=%s second=%s", withFirstSecret, withSecondSecret)
+	}
+}
+
 func TestPreviousDeployImage(t *testing.T) {
 	prev := &AppState{
 		CurrentImage:  "current-image",

@@ -1,8 +1,11 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strings"
 )
 
@@ -55,4 +58,26 @@ func shouldIgnoreRepoPath(rel string) bool {
 	default:
 		return false
 	}
+}
+
+func buildInputFingerprint(repoDir string, buildEnv map[string]string) string {
+	base := repoFingerprint(repoDir)
+	if len(buildEnv) == 0 {
+		return base
+	}
+	h := sha256.New()
+	_, _ = h.Write([]byte(base))
+	_, _ = h.Write([]byte{0})
+	keys := make([]string, 0, len(buildEnv))
+	for key := range buildEnv {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		_, _ = h.Write([]byte(key))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(buildEnv[key]))
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }

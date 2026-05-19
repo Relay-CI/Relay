@@ -48,6 +48,22 @@ func TestInjectBuildEnvIntoDockerfileWrapsRunSteps(t *testing.T) {
 	}
 }
 
+func TestInjectBuildEnvIntoDockerfileWrapsExecRunSteps(t *testing.T) {
+	src := strings.Join([]string{
+		"FROM node:22 AS builder",
+		`RUN ["npm","run","build"]`,
+		`RUN --mount=type=cache,target=/root/.npm ["npm","ci"]`,
+		"",
+	}, "\n")
+	got := injectBuildEnvIntoDockerfile(src, "YWJj", false)
+	if !strings.Contains(got, `RUN ["/bin/sh","-lc","if [ -n \"${RELAY_BUILD_ENV_B64:-}\" ]; then eval \"$(printf '%s' \"$RELAY_BUILD_ENV_B64\" | base64 -d)\"; fi; exec \"$0\" \"$@\"","npm","run","build"]`) {
+		t.Fatalf("expected wrapped exec-form run, got:\n%s", got)
+	}
+	if !strings.Contains(got, `RUN --mount=type=cache,target=/root/.npm ["/bin/sh","-lc","if [ -n \"${RELAY_BUILD_ENV_B64:-}\" ]; then eval \"$(printf '%s' \"$RELAY_BUILD_ENV_B64\" | base64 -d)\"; fi; exec \"$0\" \"$@\"","npm","ci"]`) {
+		t.Fatalf("expected wrapped exec-form run with flags, got:\n%s", got)
+	}
+}
+
 func TestPrepareBuildDockerfileWithEnvCreatesWrappedCopy(t *testing.T) {
 	dir := t.TempDir()
 	orig := filepath.Join(dir, "Dockerfile")

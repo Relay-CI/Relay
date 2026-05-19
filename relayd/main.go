@@ -8484,7 +8484,7 @@ func (s *Server) runDeploy(job DeployJob) {
 		log("build env: injected %d lane secret(s) into build steps", buildSecretCount)
 	}
 
-	repoHash := repoFingerprint(buildContextDir)
+	repoHash := buildInputFingerprint(buildContextDir, buildEnv)
 	artifactRef := ""
 	reusedArtifact := false
 	if strings.TrimSpace(job.PromoteImage) != "" {
@@ -14045,19 +14045,48 @@ func wrapDockerRunInstructionForBuildEnv(line string) string {
 	}
 	trimmed := strings.TrimSpace(line)
 	rest := strings.TrimSpace(trimmed[3:])
-	if strings.HasPrefix(rest, "[") {
-		return line
-	}
 	flags, cmd, ok := splitDockerRunFlags(rest)
 	if !ok {
 		return line
+	}
+	wrappedCmd, ok := wrapDockerRunCommandForBuildEnv(cmd)
+	if !ok {
+		return line
+	}
+	return fmt.Sprintf("RUN %s%s%s", flags, wrappedCmd, newline)
+}
+
+func wrapDockerRunCommandForBuildEnv(cmd string) (string, bool) {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return "", false
+	}
+	if strings.HasPrefix(cmd, "[") {
+		return wrapDockerRunExecCommandForBuildEnv(cmd)
 	}
 	script := fmt.Sprintf(`if [ -n "${%s:-}" ]; then eval "$(printf '%%s' "$%s" | base64 -d)"; fi; exec /bin/sh -lc %s`,
 		relayBuildEnvArg,
 		relayBuildEnvArg,
 		shQuote(cmd),
 	)
-	return fmt.Sprintf("RUN %s/bin/sh -lc %s%s", flags, shQuote(script), newline)
+	return fmt.Sprintf("/bin/sh -lc %s", shQuote(script)), true
+}
+
+func wrapDockerRunExecCommandForBuildEnv(cmd string) (string, bool) {
+	var argv []string
+	if err := json.Unmarshal([]byte(cmd), &argv); err != nil || len(argv) == 0 {
+		return "", false
+	}
+	script := fmt.Sprintf(`if [ -n "${%s:-}" ]; then eval "$(printf '%%s' "$%s" | base64 -d)"; fi; exec "$0" "$@"`,
+		relayBuildEnvArg,
+		relayBuildEnvArg,
+	)
+	wrapped := append([]string{"/bin/sh", "-lc", script}, argv...)
+	encoded, err := json.Marshal(wrapped)
+	if err != nil {
+		return "", false
+	}
+	return string(encoded), true
 }
 
 func splitDockerRunFlags(rest string) (string, string, bool) {
