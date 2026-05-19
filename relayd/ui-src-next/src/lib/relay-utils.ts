@@ -497,13 +497,14 @@ export function runtimeLogLevel(line: string): string {
   const lower = (line ?? "").toLowerCase();
   if (lower.includes("fatal") || lower.includes("panic")) return "fatal";
   if (lower.includes("error") || lower.includes("failed")) return "error";
-  if (lower.includes("warn")) return "warning";
+  if (lower.includes("warn")) return "warn";
+  if (lower.includes("debug") || lower.includes("trace")) return "debug";
   return "info";
 }
 
 export function runtimeLogLevelVariant(level: string): string {
   if (level === "fatal" || level === "error") return "danger";
-  if (level === "warning") return "warning";
+  if (level === "warn" || level === "warning") return "warning";
   return "muted";
 }
 
@@ -541,10 +542,13 @@ export function parseRuntimeLogEntry(
 export function sinceISO(windowFilter: string): string {
   const map: Record<string, number> = {
     "30m": 30 * 60 * 1000,
+    "1h": 60 * 60 * 1000,
     "6h": 6 * 60 * 60 * 1000,
     "24h": 24 * 60 * 60 * 1000,
+    "7d": 7 * 24 * 60 * 60 * 1000,
   };
-  return new Date(Date.now() - (map[windowFilter] ?? map["30m"])).toISOString();
+  if (windowFilter === "all") return "";
+  return new Date(Date.now() - (map[windowFilter] ?? map["1h"])).toISOString();
 }
 
 export function runtimeFilterMatches(
@@ -552,11 +556,18 @@ export function runtimeFilterMatches(
   levelFilter: string,
   query: string,
 ): boolean {
+  const normalizedLevel = String(levelFilter ?? "").trim().toLowerCase();
+  const entryLevel = String(entry.level ?? "").trim().toLowerCase();
   const matchesLevel =
-    levelFilter === "all" ||
-    (levelFilter === "warning" && entry.level === "warning") ||
-    (levelFilter === "error" && entry.level === "error") ||
-    (levelFilter === "fatal" && entry.level === "fatal");
+    !normalizedLevel ||
+    normalizedLevel === "all" ||
+    (normalizedLevel === "warn" && (entryLevel === "warn" || entryLevel === "warning")) ||
+    (normalizedLevel === "warning" && (entryLevel === "warn" || entryLevel === "warning")) ||
+    (normalizedLevel === "error" && entryLevel === "error") ||
+    (normalizedLevel === "fatal" && entryLevel === "fatal") ||
+    (normalizedLevel === "info" && entryLevel === "info") ||
+    (normalizedLevel === "debug" && (entryLevel === "debug" || entryLevel === "trace")) ||
+    (normalizedLevel === "trace" && entryLevel === "trace");
   if (!matchesLevel) return false;
   const normalizedQuery = query.trim().toLowerCase();
   if (!normalizedQuery) return true;

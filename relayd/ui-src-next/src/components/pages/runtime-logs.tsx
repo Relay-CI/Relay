@@ -28,11 +28,11 @@ const WINDOWS = [
   { label: "7d", value: "7d" },
 ] as const;
 
-const LEVELS = ["", "error", "warn", "info", "debug"] as const;
+const LEVELS = ["all", "error", "warn", "info", "debug"] as const;
 
 export function RuntimeLogsPage({ selectedEnv }: RuntimeLogsPageProps) {
   const [window, setWindow] = useState("1h");
-  const [levelFilter, setLevelFilter] = useState("");
+  const [levelFilter, setLevelFilter] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedTarget, setSelectedTarget] = useState<string>("");
 
@@ -90,7 +90,7 @@ export function RuntimeLogsPage({ selectedEnv }: RuntimeLogsPageProps) {
               onClick={() => setLevelFilter(lv)}
               className={cn("text-[11px] px-2.5 py-1 rounded border transition-colors", levelFilter === lv ? "bg-white/[0.08] border-white/20 text-white" : "border-white/[0.06] text-white/40 hover:text-white/60")}
             >
-              {lv || "all"}
+              {lv}
             </button>
           ))}
         </div>
@@ -167,14 +167,14 @@ function StatusBadge({ state }: { state: string }) {
 
 function logLevelClass(level: string) {
   if (level === "error") return "log-line--error";
-  if (level === "warn") return "log-line--warn";
+  if (level === "warn" || level === "warning") return "log-line--warn";
   if (level === "info") return "log-line--info";
   return "";
 }
 
 function levelColor(level: string) {
   if (level === "error" || level === "fatal") return "text-red-400";
-  if (level === "warn") return "text-amber-400";
+  if (level === "warn" || level === "warning") return "text-amber-400";
   if (level === "info") return "text-sky-400";
   if (level === "debug" || level === "trace") return "text-white/35";
   return "text-white/50";
