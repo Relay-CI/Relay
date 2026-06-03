@@ -307,6 +307,7 @@ type AppState struct {
 	CPULimit             string    `json:"cpu_limit,omitempty"`
 	MemLimit             string    `json:"mem_limit,omitempty"`
 	ResourceMode         string    `json:"resource_mode,omitempty"`
+	Volumes              []string  `json:"volumes,omitempty"`
 }
 
 // ---------------------- Multi-service / Project config ----------------------
@@ -754,16 +755,17 @@ type Server struct {
 // ---------------------- Config ----------------------
 
 type RelayConfig struct {
-	Kind         string `json:"kind"`         // optional hint; else auto-detect
-	BuildImage   string `json:"build_image"`  // docker image to run install/build
-	RunImage     string `json:"run_image"`    // runtime image; if empty, defaults per pack
-	ServicePort  int    `json:"service_port"` // container port
-	InstallCmd   string `json:"install_cmd"`
-	BuildCmd     string `json:"build_cmd"`
-	StartCmd     string `json:"start_cmd"`
-	ProjectRoot  string `json:"project_root"`  // repo-relative app root for monorepos
-	BuildContext string `json:"build_context"` // repo-relative docker build context
-	Dockerfile   string `json:"dockerfile"`    // repo-relative dockerfile path
+	Kind         string   `json:"kind"`         // optional hint; else auto-detect
+	BuildImage   string   `json:"build_image"`  // docker image to run install/build
+	RunImage     string   `json:"run_image"`    // runtime image; if empty, defaults per pack
+	ServicePort  int      `json:"service_port"` // container port
+	InstallCmd   string   `json:"install_cmd"`
+	BuildCmd     string   `json:"build_cmd"`
+	StartCmd     string   `json:"start_cmd"`
+	ProjectRoot  string   `json:"project_root"`  // repo-relative app root for monorepos
+	BuildContext string   `json:"build_context"` // repo-relative docker build context
+	Dockerfile   string   `json:"dockerfile"`    // repo-relative dockerfile path
+	Volumes      []string `json:"volumes,omitempty"` // persistent volume mounts e.g. ["/data"]
 }
 
 func cleanRepoRelativePath(value string) (string, error) {
@@ -8326,6 +8328,12 @@ func (s *Server) runDeploy(job DeployJob) {
 				}
 				return ""
 			}(),
+			Volumes: func() []string {
+				if state != nil {
+					return state.Volumes
+				}
+				return nil
+			}(),
 			Stopped: false,
 		}
 		s.constrainAppState(nextState)
@@ -8878,6 +8886,18 @@ func (s *Server) runDeploy(job DeployJob) {
 				return prev.IPAllowlist
 			}
 			return ""
+		}(),
+		Volumes: func() []string {
+			if cfg != nil && len(cfg.Volumes) > 0 {
+				return cfg.Volumes
+			}
+			if currentState != nil {
+				return currentState.Volumes
+			}
+			if prev != nil {
+				return prev.Volumes
+			}
+			return nil
 		}(),
 		Stopped: appStopped,
 	}
@@ -9541,9 +9561,16 @@ func (s *Server) runSlotContainerWithRuntime(runtime ContainerRuntime, log func(
 		ExtraHosts:    s.serviceHostAliasesForRuntime(runtime, app, env, branch),
 		PortBindings:  []string{fmt.Sprintf("127.0.0.1::%d", firstNonZero(servicePort, 3000))},
 	}
-	if st, err := s.getAppState(app, env, branch); err == nil && st != nil && st.ResourceMode != "auto" {
-		spec.CPULimit = st.CPULimit
-		spec.MemLimit = st.MemLimit
+	if st, err := s.getAppState(app, env, branch); err == nil && st != nil {
+		if st.ResourceMode != "auto" {
+			spec.CPULimit = st.CPULimit
+			spec.MemLimit = st.MemLimit
+		}
+		for _, v := range st.Volumes {
+			if expanded := expandAppVolume(app, string(env), branch, v); expanded != "" {
+				spec.Volumes = append(spec.Volumes, expanded)
+			}
+		}
 	}
 	if log != nil {
 		log("runtime run candidate: %s on %s", containerName, networkName)
@@ -11697,6 +11724,58 @@ func encodePublicHosts(hosts []string) string {
 	return strings.Join(normalizePublicHosts(hosts), "\n")
 }
 
+func encodeVolumes(vols []string) string {
+	out := make([]string, 0, len(vols))
+	for _, v := range vols {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+func parseVolumes(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, "\n")
+	out := make([]string, 0, len(parts))
+	for _, v := range parts {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// expandAppVolume resolves a volume entry from relay.config.json into a
+// Docker -v argument. A bare container path like "/data" becomes a
+// relay-managed named volume so data survives deploys and rollbacks.
+// Explicit bindings ("name:/data" or "/host/path:/data") pass through as-is.
+func expandAppVolume(app, env, branch, v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	if strings.Contains(v, ":") {
+		return v
+	}
+	target := v
+	if !strings.HasPrefix(target, "/") {
+		target = "/" + target
+	}
+	pathPart := safe(strings.TrimPrefix(target, "/"))
+	if pathPart == "" {
+		pathPart = "data"
+	}
+	return fmt.Sprintf("relay__%s__%s__%s__%s:%s", safe(app), safe(env), safe(branch), pathPart, target)
+}
+
 func canonicalizePublicHosts(primary string, hosts []string) (string, []string) {
 	combined := make([]string, 0, len(hosts)+1)
 	if strings.TrimSpace(primary) != "" {
@@ -12655,6 +12734,7 @@ func migrateDB(db *sql.DB) error {
 			cpu_limit TEXT DEFAULT '',
 			mem_limit TEXT DEFAULT '',
 			resource_mode TEXT DEFAULT '',
+			volumes TEXT DEFAULT '',
 			updated_at INTEGER,
 			PRIMARY KEY (app, env, branch)
 		);`,
@@ -12748,6 +12828,7 @@ func migrateDB(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN host_port INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN spec_hash TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN repo_hash TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN volumes TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE users ADD COLUMN created_at INTEGER`)
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS server_config (key TEXT PRIMARY KEY, value TEXT)`)
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS users (
@@ -13424,26 +13505,28 @@ func (s *Server) reconcileStaleDeploysOnStartup() error {
 func (s *Server) saveAppState(st *AppState) error {
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO app_state
-		(app, env, branch, repo_url, project_root, build_context, dockerfile, engine, current_image, previous_image, mode, host_port, host_port_explicit, service_port, public_host, public_hosts, active_slot, standby_slot, drain_until, traffic_mode, access_policy, ip_allowlist, repo_hash, expires_at, webhook_secret, notification_webhooks, traffic_split_percent, rollout_min_requests, rollout_error_percent, rollout_assess_seconds, rollout_started_at, rollout_deploy_id, rollout_status, stopped, cpu_limit, mem_limit, resource_mode, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(app, env, branch, repo_url, project_root, build_context, dockerfile, engine, current_image, previous_image, mode, host_port, host_port_explicit, service_port, public_host, public_hosts, active_slot, standby_slot, drain_until, traffic_mode, access_policy, ip_allowlist, repo_hash, expires_at, webhook_secret, notification_webhooks, traffic_split_percent, rollout_min_requests, rollout_error_percent, rollout_assess_seconds, rollout_started_at, rollout_deploy_id, rollout_status, stopped, cpu_limit, mem_limit, resource_mode, volumes, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		st.App, string(st.Env), st.Branch, st.RepoURL, st.ProjectRoot, st.BuildContext, st.Dockerfile, firstNonEmptyEngine(st.Engine), st.CurrentImage, st.PreviousImage, st.Mode,
-		st.HostPort, st.HostPortExplicit, st.ServicePort, st.PublicHost, encodePublicHosts(st.PublicHosts), normalizeActiveSlot(st.ActiveSlot), normalizeActiveSlot(st.StandbySlot), st.DrainUntil, firstNonEmpty(normalizeTrafficMode(st.TrafficMode), "edge"), firstNonEmpty(normalizeAccessPolicy(st.AccessPolicy), s.lanePolicy(st.Env).DefaultAccessPolicy), normalizeIPAllowlist(st.IPAllowlist), st.RepoHash, st.ExpiresAt, st.WebhookSecret, st.NotificationWebhooks, st.TrafficSplitPercent, st.RolloutMinRequests, st.RolloutErrorPercent, st.RolloutAssessSeconds, st.RolloutStartedAt, st.RolloutDeployID, st.RolloutStatus, st.Stopped, strings.TrimSpace(st.CPULimit), strings.TrimSpace(st.MemLimit), strings.TrimSpace(st.ResourceMode), time.Now().UnixMilli(),
+		st.HostPort, st.HostPortExplicit, st.ServicePort, st.PublicHost, encodePublicHosts(st.PublicHosts), normalizeActiveSlot(st.ActiveSlot), normalizeActiveSlot(st.StandbySlot), st.DrainUntil, firstNonEmpty(normalizeTrafficMode(st.TrafficMode), "edge"), firstNonEmpty(normalizeAccessPolicy(st.AccessPolicy), s.lanePolicy(st.Env).DefaultAccessPolicy), normalizeIPAllowlist(st.IPAllowlist), st.RepoHash, st.ExpiresAt, st.WebhookSecret, st.NotificationWebhooks, st.TrafficSplitPercent, st.RolloutMinRequests, st.RolloutErrorPercent, st.RolloutAssessSeconds, st.RolloutStartedAt, st.RolloutDeployID, st.RolloutStatus, st.Stopped, strings.TrimSpace(st.CPULimit), strings.TrimSpace(st.MemLimit), strings.TrimSpace(st.ResourceMode), encodeVolumes(st.Volumes), time.Now().UnixMilli(),
 	)
 	return err
 }
 
 func (s *Server) getAppState(app string, env DeployEnv, branch string) (*AppState, error) {
-	row := s.db.QueryRow(`SELECT app, env, branch, repo_url, COALESCE(project_root,''), COALESCE(build_context,''), COALESCE(dockerfile,''), COALESCE(engine,''), current_image, previous_image, mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(public_hosts,''), COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(repo_hash,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), COALESCE(stopped,0), COALESCE(cpu_limit,''), COALESCE(mem_limit,''), COALESCE(resource_mode,'')
+	row := s.db.QueryRow(`SELECT app, env, branch, repo_url, COALESCE(project_root,''), COALESCE(build_context,''), COALESCE(dockerfile,''), COALESCE(engine,''), current_image, previous_image, mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(public_hosts,''), COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(repo_hash,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), COALESCE(stopped,0), COALESCE(cpu_limit,''), COALESCE(mem_limit,''), COALESCE(resource_mode,''), COALESCE(volumes,'')
 		FROM app_state WHERE app=? AND env=? AND branch=?`, app, string(env), branch)
 
 	var st AppState
 	var envS string
 	var publicHostsRaw string
-	if err := row.Scan(&st.App, &envS, &st.Branch, &st.RepoURL, &st.ProjectRoot, &st.BuildContext, &st.Dockerfile, &st.Engine, &st.CurrentImage, &st.PreviousImage, &st.Mode, &st.HostPort, &st.HostPortExplicit, &st.ServicePort, &st.PublicHost, &publicHostsRaw, &st.ActiveSlot, &st.StandbySlot, &st.DrainUntil, &st.TrafficMode, &st.AccessPolicy, &st.IPAllowlist, &st.RepoHash, &st.ExpiresAt, &st.WebhookSecret, &st.NotificationWebhooks, &st.TrafficSplitPercent, &st.RolloutMinRequests, &st.RolloutErrorPercent, &st.RolloutAssessSeconds, &st.RolloutStartedAt, &st.RolloutDeployID, &st.RolloutStatus, &st.Stopped, &st.CPULimit, &st.MemLimit, &st.ResourceMode); err != nil {
+	var volumesRaw string
+	if err := row.Scan(&st.App, &envS, &st.Branch, &st.RepoURL, &st.ProjectRoot, &st.BuildContext, &st.Dockerfile, &st.Engine, &st.CurrentImage, &st.PreviousImage, &st.Mode, &st.HostPort, &st.HostPortExplicit, &st.ServicePort, &st.PublicHost, &publicHostsRaw, &st.ActiveSlot, &st.StandbySlot, &st.DrainUntil, &st.TrafficMode, &st.AccessPolicy, &st.IPAllowlist, &st.RepoHash, &st.ExpiresAt, &st.WebhookSecret, &st.NotificationWebhooks, &st.TrafficSplitPercent, &st.RolloutMinRequests, &st.RolloutErrorPercent, &st.RolloutAssessSeconds, &st.RolloutStartedAt, &st.RolloutDeployID, &st.RolloutStatus, &st.Stopped, &st.CPULimit, &st.MemLimit, &st.ResourceMode, &volumesRaw); err != nil {
 		return nil, err
 	}
 	st.Env = DeployEnv(envS)
 	st.PublicHosts = parsePublicHosts(publicHostsRaw)
+	st.Volumes = parseVolumes(volumesRaw)
 	s.constrainAppState(&st)
 	return &st, nil
 }
