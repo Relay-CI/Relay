@@ -950,7 +950,7 @@ export async function removeBuildpackPlugin(name: string): Promise<void> {
 export async function deleteProject(name: string): Promise<void> {
   await apiFetch("/api/projects/delete", {
     method: "POST",
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ app: name }),
   });
 }
 

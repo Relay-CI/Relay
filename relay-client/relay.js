@@ -1891,12 +1891,14 @@ async function main() {
   // ── login ─────────────────────────────────────────────────────────────────────
   if (cmd === "login") {
     const existingCfg = loadRelayConfig(process.cwd()).data || {};
-    const serverUrl = (
-      args.url ||
-      process.env.RELAY_URL ||
-      existingCfg.url ||
-      (await prompt("Server URL", "http://127.0.0.1:8080"))
-    ).replace(/\/+$/, "");
+    const explicitLoginUrl = args.url || process.env.RELAY_URL || "";
+    const defaultLoginUrl = existingCfg.url || "http://127.0.0.1:8080";
+    const rawServerUrl =
+      explicitLoginUrl ||
+      (process.stdin.isTTY
+        ? await prompt("Server URL", defaultLoginUrl)
+        : defaultLoginUrl);
+    const serverUrl = rawServerUrl.replace(/\/+$/, "");
     // Start the local callback server on a random port (port 0 lets the OS
     // pick a free one).  Using a single server avoids the TOCTOU race of the
     // old probe-close-rebind pattern.
@@ -1934,6 +1936,7 @@ async function main() {
 
     const loginUrl = `${serverUrl}/dashboard/?cli=1&port=${callbackPort}`;
     console.log(`\n  ${c.bold}Opening browser to log in…${c.reset}`);
+    console.log(`  ${c.dim}Server:${c.reset} ${c.cyan}${serverUrl}${c.reset}`);
     console.log(
       `  ${c.dim}If it doesn't open, visit:${c.reset}  ${c.cyan}${loginUrl}${c.reset}\n`,
     );
