@@ -965,7 +965,21 @@ async function resolveOrSetup(args, { needDeploy = false } = {}) {
 // (mode 0600) already restrict access to the user running relayd.
 
 function tokenHeader(token) {
-  return token ? { "X-Relay-Token": token } : {};
+  return token
+    ? { "X-Relay-Token": token, Authorization: `Bearer ${token}` }
+    : {};
+}
+
+function authFailureHint() {
+  if (!process.env.RELAY_TOKEN) return "";
+  let cfg = {};
+  try {
+    cfg = loadRelayConfig(process.cwd()).data || {};
+  } catch {}
+  if (cfg.token && cfg.token !== process.env.RELAY_TOKEN) {
+    return " RELAY_TOKEN is set and overrides the token saved in .relay.json; unset RELAY_TOKEN or pass --token from relay login.";
+  }
+  return " Check that RELAY_TOKEN or .relay.json contains a current token. If this server uses user accounts, run relay login again.";
 }
 
 /**
@@ -1044,8 +1058,12 @@ async function apiJSON(transport, method, apiPath, body = undefined) {
     json = { raw: text };
   }
   if (status >= 400) {
+    const baseMessage =
+      json && json.error ? json.error : `HTTP ${status}: ${text}`;
     const e = new Error(
-      json && json.error ? json.error : `HTTP ${status}: ${text}`,
+      status === 401 || status === 403
+        ? `${baseMessage}.${authFailureHint()}`
+        : baseMessage,
     );
     e.status = status;
     e.json = json;
@@ -1073,9 +1091,15 @@ function putFile(transport, apiPath, absPath) {
         (res) => {
           res.resume();
           res.on("end", () => {
-            if (res.statusCode >= 400)
-              reject(new Error(`HTTP ${res.statusCode}`));
-            else resolve();
+            if (res.statusCode >= 400) {
+              const hint =
+                res.statusCode === 401 || res.statusCode === 403
+                  ? `.${authFailureHint()}`
+                  : "";
+              reject(new Error(`HTTP ${res.statusCode}${hint}`));
+              return;
+            }
+            resolve();
           });
         },
       );
@@ -1098,7 +1122,12 @@ function putFile(transport, apiPath, absPath) {
       try {
         j = JSON.parse(txt);
       } catch {}
-      throw new Error(j && j.error ? j.error : `HTTP ${res.status}: ${txt}`);
+      const baseMessage = j && j.error ? j.error : `HTTP ${res.status}: ${txt}`;
+      throw new Error(
+        res.status === 401 || res.status === 403
+          ? `${baseMessage}.${authFailureHint()}`
+          : baseMessage,
+      );
     }
   });
 }
