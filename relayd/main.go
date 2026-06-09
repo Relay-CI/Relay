@@ -1175,6 +1175,7 @@ func (b *NodeNextBuildpack) Plan(req DeployRequest, repoDir string, cfg *RelayCo
 	if cfg != nil && strings.EqualFold(cfg.Kind, "next-standalone") {
 		standalone = true
 	}
+	exported := isNextExportEnabled(repoDir)
 
 	port := 3000
 	install := firstNonEmpty(req.InstallCmd, nodeInstallCmd(repoDir))
@@ -1227,6 +1228,73 @@ CMD ["node","server.js"]
 			Cleanup: func(repoDir string) error {
 				cleanupRelayDockerignore(repoDir)
 				_ = os.Remove(filepath.Join(repoDir, "Dockerfile"))
+				return nil
+			},
+		}, nil
+	}
+
+	if exported {
+		runImg := getenv("RELAY_NGINX_IMAGE", "nginx:alpine")
+		return BuildPlan{
+			Kind:        "next-export",
+			ServicePort: 80,
+			BuildImage:  firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg),
+			RunImage:    firstNonEmpty(cfgStr(cfg, "RunImage"), runImg),
+			InstallCmd:  install,
+			BuildCmd:    build,
+			StartCmd:    "",
+			Verify:      nil,
+			WriteDockerfile: func(repoDir string) error {
+				df := fmt.Sprintf(`# syntax=docker/dockerfile:1.7
+FROM %s AS deps
+WORKDIR /app
+ENV CI=true
+COPY package.json ./
+COPY package-lock.json* pnpm-lock.yaml* yarn.lock* ./
+%s
+
+FROM deps AS builder
+COPY . .
+%s
+
+FROM %s
+COPY --from=builder /app/out /usr/share/nginx/html
+COPY default.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80
+`, firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg), nodeRunStepWithCaches(repoDir, "", install), nodeRunStepWithCaches(repoDir, laneID, build, "/app/.next/cache"), firstNonEmpty(cfgStr(cfg, "RunImage"), runImg))
+
+				writeRelayDockerignore(repoDir)
+				if err := os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte(df), 0644); err != nil {
+					return err
+				}
+				defPath := filepath.Join(repoDir, "default.conf")
+				marker := filepath.Join(repoDir, ".relay_default_conf_created")
+				if !fileExists(defPath) {
+					defaultConf := `server {
+	listen 80;
+	server_name _;
+	root /usr/share/nginx/html;
+	index index.html;
+	location / {
+		try_files $uri $uri/ /index.html;
+	}
+}
+`
+					if err := os.WriteFile(defPath, []byte(defaultConf), 0644); err != nil {
+						return err
+					}
+					_ = os.WriteFile(marker, []byte("1"), 0644)
+				}
+				return nil
+			},
+			Cleanup: func(repoDir string) error {
+				cleanupRelayDockerignore(repoDir)
+				_ = os.Remove(filepath.Join(repoDir, "Dockerfile"))
+				marker := filepath.Join(repoDir, ".relay_default_conf_created")
+				if fileExists(marker) {
+					_ = os.Remove(filepath.Join(repoDir, "default.conf"))
+					_ = os.Remove(marker)
+				}
 				return nil
 			},
 		}, nil
@@ -8512,6 +8580,7 @@ func (s *Server) runDeploy(job DeployJob) {
 			_ = s.updateDeployStatus(d.ID, d.Status, d.Error, d.StartedAt, d.EndedAt, "", "")
 			return
 		}
+		defer cleanupGeneratedBuildpackFiles(projectRootDir)
 	}
 
 	dockerfilePath := filepath.Join(projectRootDir, "Dockerfile")
@@ -14446,6 +14515,8 @@ func rubyRunStep(cmd string) string {
 var (
 	nextConfigStandaloneLiteralRe   = regexp.MustCompile(`\boutput\s*:\s*(?:"standalone"|'standalone')`)
 	nextConfigStandaloneAssignVarRe = regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:"standalone"|'standalone')`)
+	nextConfigExportLiteralRe       = regexp.MustCompile(`\boutput\s*:\s*(?:"export"|'export')`)
+	nextConfigExportAssignVarRe     = regexp.MustCompile(`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:"export"|'export')`)
 )
 
 func nodePackageManager(repoDir string) string {
@@ -14628,6 +14699,16 @@ func cleanupRelayDockerignore(repoDir string) {
 	}
 }
 
+func cleanupGeneratedBuildpackFiles(repoDir string) {
+	cleanupRelayDockerignore(repoDir)
+	_ = os.Remove(filepath.Join(repoDir, "Dockerfile"))
+	marker := filepath.Join(repoDir, ".relay_default_conf_created")
+	if fileExists(marker) {
+		_ = os.Remove(filepath.Join(repoDir, "default.conf"))
+		_ = os.Remove(marker)
+	}
+}
+
 func isNextStandaloneEnabled(repoDir string) bool {
 	configs := []string{"next.config.js", "next.config.mjs", "next.config.cjs", "next.config.ts", "next.config.mts"}
 	for _, c := range configs {
@@ -14641,12 +14722,45 @@ func isNextStandaloneEnabled(repoDir string) bool {
 	return false
 }
 
+func isNextExportEnabled(repoDir string) bool {
+	configs := []string{"next.config.js", "next.config.mjs", "next.config.cjs", "next.config.ts", "next.config.mts"}
+	for _, c := range configs {
+		p := filepath.Join(repoDir, c)
+		if b, err := os.ReadFile(p); err == nil {
+			if nextConfigEnablesExport(string(b)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func nextConfigEnablesStandalone(src string) bool {
 	cleaned := stripJSComments(src)
 	if nextConfigStandaloneLiteralRe.MatchString(cleaned) {
 		return true
 	}
 	for _, match := range nextConfigStandaloneAssignVarRe.FindAllStringSubmatch(cleaned, -1) {
+		name := strings.TrimSpace(match[1])
+		if name == "" {
+			continue
+		}
+		if nextConfigUsesOutputVariable(cleaned, name) {
+			return true
+		}
+		if name == "output" && nextConfigHasOutputShorthand(cleaned) {
+			return true
+		}
+	}
+	return false
+}
+
+func nextConfigEnablesExport(src string) bool {
+	cleaned := stripJSComments(src)
+	if nextConfigExportLiteralRe.MatchString(cleaned) {
+		return true
+	}
+	for _, match := range nextConfigExportAssignVarRe.FindAllStringSubmatch(cleaned, -1) {
 		name := strings.TrimSpace(match[1])
 		if name == "" {
 			continue

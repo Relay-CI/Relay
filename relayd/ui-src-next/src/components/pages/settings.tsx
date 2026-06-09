@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { cn } from "@/lib/utils";
 import {
   buildSettingsConfig,
@@ -197,23 +197,32 @@ export function SettingsPage({
         text: `Failed to load settings: ${err instanceof Error ? err.message : "unknown error"}`,
       });
     }
-  }, [selectedEnv?.app, selectedEnv?.env, selectedEnv?.branch]);
+  }, [selectedEnv]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  const promotionTargets = (project?.envs ?? [])
-    .filter((envInfo) => {
-      if (!selectedEnv) return false;
-      return !(envInfo.env === selectedEnv.env && envInfo.branch === selectedEnv.branch);
-    })
-    .map((envInfo) => ({
-      key: `${envInfo.env}::${envInfo.branch}`,
-      env: envInfo.env,
-      branch: envInfo.branch,
-      label: `${envInfo.env}/${envInfo.branch}`,
-    }));
+  const promotionTargets = useMemo(
+    () =>
+      (project?.envs ?? [])
+        .filter((envInfo) => {
+          if (!selectedEnv) return false;
+          return !(envInfo.env === selectedEnv.env && envInfo.branch === selectedEnv.branch);
+        })
+        .map((envInfo) => ({
+          key: `${envInfo.env}::${envInfo.branch}`,
+          env: envInfo.env,
+          branch: envInfo.branch,
+          label: `${envInfo.env}/${envInfo.branch}`,
+        })),
+    [project?.envs, selectedEnv],
+  );
+
+  const promotionTargetKeys = useMemo(
+    () => promotionTargets.map((item) => item.key).join("|"),
+    [promotionTargets],
+  );
 
   useEffect(() => {
     if (!selectedEnv) {
@@ -234,7 +243,7 @@ export function SettingsPage({
       ) ??
       promotionTargets[0];
     setPromotionTargetKey(preferred?.key ?? "");
-  }, [selectedEnv?.env, selectedEnv?.branch, promotionTargets.map((item) => item.key).join("|")]);
+  }, [selectedEnv, promotionTargets, promotionTargetKey, promotionTargetKeys]);
 
   useEffect(() => {
     if (!selectedEnv) {
@@ -249,7 +258,7 @@ export function SettingsPage({
       return;
     }
     setManualDeployTargetKey(`${selectedEnv.env}::${selectedEnv.branch}`);
-  }, [selectedEnv?.env, selectedEnv?.branch, promotionTargets.map((item) => item.key).join("|"), manualDeployTargetKey]);
+  }, [selectedEnv, promotionTargets, promotionTargetKeys, manualDeployTargetKey]);
 
   function upd(patch: Partial<AppConfig>) {
     setConfig((c) => ({ ...c, ...patch }));

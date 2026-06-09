@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import {
   getUsers,
@@ -36,7 +36,7 @@ export function UsersPage({ currentUser }: UsersPageProps) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ tone: "ok" | "danger"; text: string } | null>(null);
 
-  async function load() {
+  const load = useCallback(async () => {
     if (!isOwner) return;
     try {
       const nextUsers = await getUsers();
@@ -55,11 +55,11 @@ export function UsersPage({ currentUser }: UsersPageProps) {
     } catch {
       // ignore; page already shows current state
     }
-  }
+  }, [isOwner]);
 
   useEffect(() => {
     void load();
-  }, [isOwner]);
+  }, [load]);
 
   if (!isOwner) {
     return <div className="flex items-center justify-center h-full text-white/30 text-sm">Owner access required</div>;

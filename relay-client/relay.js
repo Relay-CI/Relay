@@ -1276,6 +1276,15 @@ function defaultIgnore(rel) {
     "target",
   ]);
   if (ignoreTop.has(top)) return true;
+  if (
+    base === ".DS_Store" ||
+    base === "Thumbs.db" ||
+    base.startsWith("._") ||
+    base.startsWith(".__") ||
+    base.includes("..__")
+  ) {
+    return true;
+  }
   if (base === ".env") return true;
   if (base.startsWith(".env.")) {
     const suffix = base.slice(5).toLowerCase();
@@ -3034,6 +3043,12 @@ async function main() {
       warn(
         `deploy finished with status ${sc}${finalStatus}${c.reset} after ${totalElapsed}`,
       );
+      if (finalDeploy?.error) {
+        err(`reason: ${finalDeploy.error}`);
+      }
+      if (deploy.id) {
+        info(`logs: relay logs ${deploy.id}`);
+      }
       process.exitCode = 1;
     }
   } else {

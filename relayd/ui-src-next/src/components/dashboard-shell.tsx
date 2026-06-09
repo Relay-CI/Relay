@@ -60,7 +60,7 @@ export default function DashboardShell() {
 
   const projectOptions = useMemo<NormalizedProject[]>(() => {
     return normalizeProjects(dashboard.projects);
-  }, [dashboard.projects, deploysByContext]);
+  }, [dashboard.projects]);
 
   const envMap = useMemo(() => {
     const map = new Map<string, SelectedEnvMeta>();
