@@ -64,18 +64,19 @@ func normalizeIPAllowlist(raw string) string {
 }
 
 func requestRemoteIP(r *http.Request) net.IP {
+	// Prefer X-Real-Ip (set by the trusted reverse proxy) over X-Forwarded-For.
+	// When using X-Forwarded-For, take the LAST entry — that is the address
+	// appended by the closest trusted proxy, not the client-supplied first entry
+	// which an attacker can forge to bypass IP allowlist checks.
 	candidates := []string{
-		r.Header.Get("X-Forwarded-For"),
 		r.Header.Get("X-Real-Ip"),
+		lastForwardedFor(r.Header.Get("X-Forwarded-For")),
 		r.RemoteAddr,
 	}
 	for _, candidate := range candidates {
 		candidate = strings.TrimSpace(candidate)
 		if candidate == "" {
 			continue
-		}
-		if strings.Contains(candidate, ",") {
-			candidate = strings.TrimSpace(strings.Split(candidate, ",")[0])
 		}
 		if host, _, err := net.SplitHostPort(candidate); err == nil {
 			candidate = host
@@ -85,6 +86,17 @@ func requestRemoteIP(r *http.Request) net.IP {
 		}
 	}
 	return nil
+}
+
+// lastForwardedFor returns the last (rightmost) IP in an X-Forwarded-For
+// header value. The rightmost entry is appended by the closest trusted proxy
+// and cannot be spoofed by the client.
+func lastForwardedFor(header string) string {
+	if header == "" {
+		return ""
+	}
+	parts := strings.Split(header, ",")
+	return strings.TrimSpace(parts[len(parts)-1])
 }
 
 func ipAllowedByList(raw string, ip net.IP) bool {

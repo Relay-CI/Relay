@@ -120,6 +120,8 @@ function nowMs() {
   return Date.now();
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 function formatDuration(ms) {
   if (!Number.isFinite(ms) || ms < 0) return "0ms";
   if (ms < 1000) return `${ms}ms`;
@@ -258,7 +260,11 @@ function isOlderVersion(installed, latest) {
 
 function httpsGet(url) {
   return new Promise((resolve, reject) => {
-    const follow = (u) => {
+    const follow = (u, redirects) => {
+      if (redirects > 10) {
+        reject(new Error("Too many redirects"));
+        return;
+      }
       https
         .get(
           u,
@@ -273,7 +279,8 @@ function httpsGet(url) {
               (res.statusCode === 301 || res.statusCode === 302) &&
               res.headers.location
             ) {
-              follow(res.headers.location);
+              res.resume(); // drain so socket is released
+              follow(res.headers.location, redirects + 1);
               return;
             }
             const chunks = [];
@@ -286,23 +293,29 @@ function httpsGet(url) {
         )
         .on("error", reject);
     };
-    follow(url);
+    follow(url, 0);
   });
 }
 
 function httpsDownload(url, dest) {
   return new Promise((resolve, reject) => {
-    const follow = (u) => {
+    const follow = (u, redirects) => {
+      if (redirects > 10) {
+        reject(new Error("Too many redirects"));
+        return;
+      }
       https
         .get(u, { headers: { "User-Agent": "relay-cli" } }, (res) => {
           if (
             (res.statusCode === 301 || res.statusCode === 302) &&
             res.headers.location
           ) {
-            follow(res.headers.location);
+            res.resume(); // drain so socket is released
+            follow(res.headers.location, redirects + 1);
             return;
           }
           if (res.statusCode !== 200) {
+            res.resume(); // drain so socket is released
             reject(new Error(`HTTP ${res.statusCode}`));
             return;
           }
@@ -313,7 +326,7 @@ function httpsDownload(url, dest) {
         })
         .on("error", reject);
     };
-    follow(url);
+    follow(url, 0);
   });
 }
 
@@ -2448,6 +2461,10 @@ async function main() {
         return { tarball: "relay-linux-amd64.tar.gz", zip: false };
       if (p === "linux" && a === "arm64")
         return { tarball: "relay-linux-arm64.tar.gz", zip: false };
+      if (p === "darwin" && a === "x64")
+        return { tarball: "relay-darwin-amd64.tar.gz", zip: false };
+      if (p === "darwin" && a === "arm64")
+        return { tarball: "relay-darwin-arm64.tar.gz", zip: false };
       if (p === "win32" && a === "x64")
         return { tarball: "relay-windows-amd64.zip", zip: true };
       die(

@@ -762,9 +762,9 @@ type RelayConfig struct {
 	InstallCmd   string   `json:"install_cmd"`
 	BuildCmd     string   `json:"build_cmd"`
 	StartCmd     string   `json:"start_cmd"`
-	ProjectRoot  string   `json:"project_root"`  // repo-relative app root for monorepos
-	BuildContext string   `json:"build_context"` // repo-relative docker build context
-	Dockerfile   string   `json:"dockerfile"`    // repo-relative dockerfile path
+	ProjectRoot  string   `json:"project_root"`      // repo-relative app root for monorepos
+	BuildContext string   `json:"build_context"`     // repo-relative docker build context
+	Dockerfile   string   `json:"dockerfile"`        // repo-relative dockerfile path
 	Volumes      []string `json:"volumes,omitempty"` // persistent volume mounts e.g. ["/data"]
 }
 
@@ -5290,6 +5290,10 @@ func (s *Server) handleDeployByID(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogsByID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, 405, "method not allowed")
+		return
+	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/logs/")
 	if id == "" {
 		httpError(w, 400, "missing id")
@@ -8591,7 +8595,11 @@ func (s *Server) runDeploy(job DeployJob) {
 			end := time.Now()
 			d.Status = StatusFailed
 			d.EndedAt = &end
-			d.Error = "docker build failed: " + err.Error()
+			errMsg := err.Error()
+			if strings.Contains(strings.ToLower(errMsg), "no space left on device") {
+				log("hint: the build host is out of disk space — run 'docker system prune -f' to free space from dangling images and build cache")
+			}
+			d.Error = "docker build failed: " + errMsg
 			_ = s.updateDeployStatus(d.ID, d.Status, d.Error, d.StartedAt, d.EndedAt, "", "")
 			return
 		}
