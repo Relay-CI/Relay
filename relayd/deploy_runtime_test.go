@@ -88,6 +88,19 @@ func TestShouldAutoAssignPreviewHostPort(t *testing.T) {
 	}
 }
 
+func TestDeployLogLooksLikeOOMKillDetectsExit137(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "deploy.log")
+	if err := os.WriteFile(logPath, []byte("Creating an optimized production build ...\n94.63 Killed\nexit code: 137\n"), 0644); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+	if !deployLogLooksLikeOOMKill(logPath, "exit status 1") {
+		t.Fatal("expected exit 137 log to be classified as likely OOM kill")
+	}
+	if deployLogLooksLikeOOMKill("", "exit status 1") {
+		t.Fatal("plain exit status 1 should not be classified as OOM kill")
+	}
+}
+
 func TestHostPortAvailable(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

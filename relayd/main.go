@@ -1179,7 +1179,7 @@ func (b *NodeNextBuildpack) Plan(req DeployRequest, repoDir string, cfg *RelayCo
 
 	port := 3000
 	install := firstNonEmpty(req.InstallCmd, nodeInstallCmd(repoDir))
-	build := firstNonEmpty(req.BuildCmd, nodeDefaultBuildCmd(repoDir))
+	build := nodeBuildCmdWithMemoryGuard(firstNonEmpty(req.BuildCmd, nodeDefaultBuildCmd(repoDir)))
 	// Unique ID per deployment lane so each app's .next/cache stays isolated.
 	laneID := fmt.Sprintf("%s-%s-%s", safe(req.App), safe(string(req.Env)), safe(req.Branch))
 
@@ -8668,6 +8668,12 @@ func (s *Server) runDeploy(job DeployJob) {
 			if strings.Contains(strings.ToLower(errMsg), "no space left on device") {
 				log("hint: the build host is out of disk space — run 'docker system prune -f' to free space from dangling images and build cache")
 			}
+			if deployLogLooksLikeOOMKill(d.LogPath, errMsg) {
+				heapMB := nodeBuildHeapMB()
+				log("hint: build exited 137/SIGKILL. This is usually the kernel or Docker killing the build for memory pressure.")
+				log("hint: Relay caps Node build heap at %s MB by default; lower RELAY_NODE_BUILD_HEAP_MB or add swap/use a larger host if Next still gets killed.", heapMB)
+				errMsg = "build process killed with exit 137 (likely out of memory): " + errMsg
+			}
 			d.Error = "docker build failed: " + errMsg
 			_ = s.updateDeployStatus(d.ID, d.Status, d.Error, d.StartedAt, d.EndedAt, "", "")
 			return
@@ -11602,6 +11608,44 @@ func runCmdLoggedEnvCtx(ctx context.Context, dir string, logw io.Writer, extraEn
 	cmd.Stdout = logw
 	cmd.Stderr = logw
 	return cmd.Run()
+}
+
+func deployLogLooksLikeOOMKill(logPath string, errMsg string) bool {
+	combined := strings.ToLower(errMsg)
+	if logPath != "" {
+		if tail, err := readFileTail(logPath, 256*1024); err == nil {
+			combined += "\n" + strings.ToLower(tail)
+		}
+	}
+	return strings.Contains(combined, "exit code: 137") ||
+		strings.Contains(combined, "exit status 137") ||
+		strings.Contains(combined, "\nkilled\n") ||
+		strings.Contains(combined, " killed\n") ||
+		strings.Contains(combined, "\nkilled")
+}
+
+func readFileTail(path string, maxBytes int64) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	offset := int64(0)
+	if st.Size() > maxBytes {
+		offset = st.Size() - maxBytes
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return "", err
+	}
+	b, err := io.ReadAll(f)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 // ---------------------- Auth + CORS ----------------------
@@ -14634,6 +14678,31 @@ func nodeDefaultBuildCmd(repoDir string) string {
 		return "yarn build"
 	}
 	return "npm run build"
+}
+
+func nodeBuildHeapMB() string {
+	value := strings.TrimSpace(os.Getenv("RELAY_NODE_BUILD_HEAP_MB"))
+	if value == "" {
+		value = "1024"
+	}
+	if _, err := strconv.Atoi(value); err != nil {
+		return "1024"
+	}
+	return value
+}
+
+func nodeBuildCmdWithMemoryGuard(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return ""
+	}
+	if strings.TrimSpace(os.Getenv("RELAY_NODE_BUILD_MEMORY_GUARD")) == "0" {
+		return cmd
+	}
+	if strings.Contains(cmd, "NODE_OPTIONS=") {
+		return cmd
+	}
+	return fmt.Sprintf(`NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=%s" NEXT_TELEMETRY_DISABLED=1 %s`, nodeBuildHeapMB(), cmd)
 }
 
 func nodeDefaultStartCmd(repoDir string) string {

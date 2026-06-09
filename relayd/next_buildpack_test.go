@@ -81,6 +81,28 @@ func TestNodeNextBuildpackExportUsesStaticRuntime(t *testing.T) {
 	}
 }
 
+func TestNodeNextBuildpackAddsBuildMemoryGuard(t *testing.T) {
+	repoDir := t.TempDir()
+	mustWriteTestFile(t, filepath.Join(repoDir, "next.config.ts"), `export default { reactCompiler: true }`)
+	mustWriteTestFile(t, filepath.Join(repoDir, "package.json"), `{
+		"name":"demo",
+		"scripts":{"build":"next build"},
+		"dependencies":{"next":"16.1.6"}
+	}`)
+
+	t.Setenv("RELAY_NODE_BUILD_HEAP_MB", "768")
+	plan, err := (&NodeNextBuildpack{}).Plan(DeployRequest{}, repoDir, nil)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if !strings.Contains(plan.BuildCmd, `--max-old-space-size=768`) {
+		t.Fatalf("expected build heap cap, got %q", plan.BuildCmd)
+	}
+	if !strings.Contains(plan.BuildCmd, "NEXT_TELEMETRY_DISABLED=1") {
+		t.Fatalf("expected telemetry to be disabled, got %q", plan.BuildCmd)
+	}
+}
+
 func TestIsNextStandaloneEnabledIgnoresComments(t *testing.T) {
 	repoDir := t.TempDir()
 	mustWriteTestFile(t, filepath.Join(repoDir, "next.config.ts"), `// output: "standalone"
