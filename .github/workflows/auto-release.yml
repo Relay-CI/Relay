@@ -220,7 +220,8 @@ jobs:
 
       - name: Publish relay-client
         working-directory: relay-client
-        run: npm publish --access public --provenance
+        # Trusted publishing generates provenance automatically via OIDC.
+        run: npm publish --access public
 
       - name: Install relay-mcp dependencies
         working-directory: relay-mcp
@@ -228,4 +229,5 @@ jobs:
 
       - name: Publish relay-mcp
         working-directory: relay-mcp
-        run: npm publish --access public --provenance
+        # Trusted publishing generates provenance automatically via OIDC.
+        run: npm publish --access public
