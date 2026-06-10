@@ -26,8 +26,25 @@ e2-small) the defaults below apply with no configuration.
   30 days and relay-built images beyond the newest 3 per lane (current and
   rollback images are never touched), so disks don't fill up and evict the
   build cache.
+- **Auto-swap on small hosts** — on Linux hosts with ≤ 2 GB RAM, no existing
+  swap, and relayd running as root, a 2 GB swapfile is created and enabled at
+  startup. This is the only protection that holds for Turbopack builds (see
+  below). `RELAY_AUTO_SWAP=0` opts out; `RELAY_AUTO_SWAP=1` forces it on
+  larger hosts.
 - **Low-memory warning** — when a build starts on a host with ≤ 2 GB RAM and
   no swap, the deploy log prints a warning with the one-liner to add swap.
+
+## Why swap is non-negotiable for Next.js 15/16 (Turbopack)
+
+`next build` uses Turbopack by default in Next 15.5+/16. Turbopack is a native
+Rust engine: its memory is allocated **outside the V8 heap**, so
+`NODE_OPTIONS=--max-old-space-size` cannot bound it, and Next's
+`turbopackMemoryLimit` option is currently not wired to the native binary.
+A Turbopack production build routinely peaks at 1.5–2 GB+ RSS regardless of
+Node flags. On a 2 GB host with no swap, the kernel kills it (exit 137) every
+time. With swap, the build slows down at the peak and completes. The
+alternatives are building with `next build --webpack` (where the heap cap does
+apply) or a larger build host.
 
 ## Observability
 
@@ -46,7 +63,7 @@ owner-authenticated Go profiling endpoints under `/debug/pprof/`.
 | `RELAY_APP_MEM_LIMIT_MB` | Default app container memory cap (MB); `0` disables. |
 | `RELAY_GOMEMLIMIT_MB` | Explicit soft memory limit for the relayd daemon (MB). |
 | `GOMEMLIMIT` / `GOGC` | Standard Go runtime knobs; when set, relayd does not override them. |
-| `RELAY_AUTO_SWAP=1` | Create and enable a swapfile at startup (root, Linux, no existing swap). |
+| `RELAY_AUTO_SWAP` | `0` disables auto-swap; `1` forces it on hosts > 2 GB. Default: on for ≤ 2 GB hosts (root, Linux, no existing swap). |
 | `RELAY_AUTO_SWAP_MB` / `RELAY_AUTO_SWAP_PATH` | Swapfile size (default 2048) and location (default `/swapfile`). |
 | `RELAY_LOG_RETENTION_DAYS` | Deploy log retention (default 30); `0` disables pruning. |
 | `RELAY_IMAGE_RETENTION_PER_LANE` | Built images kept per lane (default 3); `0` disables pruning. |

@@ -25,39 +25,47 @@ var (
 	hostMem     hostMemInfo
 )
 
-func readHostMemInfo() hostMemInfo {
-	hostMemOnce.Do(func() {
-		f, err := os.Open("/proc/meminfo")
-		if err != nil {
-			return
+func readMeminfoMB() hostMemInfo {
+	var info hostMemInfo
+	f, err := os.Open("/proc/meminfo")
+	if err != nil {
+		return info
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		var dst *int
+		switch {
+		case strings.HasPrefix(line, "MemTotal:"):
+			dst = &info.totalMB
+		case strings.HasPrefix(line, "SwapTotal:"):
+			dst = &info.swapMB
+		default:
+			continue
 		}
-		defer f.Close()
-		sc := bufio.NewScanner(f)
-		for sc.Scan() {
-			line := sc.Text()
-			var dst *int
-			switch {
-			case strings.HasPrefix(line, "MemTotal:"):
-				dst = &hostMem.totalMB
-			case strings.HasPrefix(line, "SwapTotal:"):
-				dst = &hostMem.swapMB
-			default:
-				continue
-			}
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				if kb, err := strconv.Atoi(fields[1]); err == nil {
-					*dst = kb / 1024
-				}
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			if kb, err := strconv.Atoi(fields[1]); err == nil {
+				*dst = kb / 1024
 			}
 		}
-	})
-	return hostMem
+	}
+	return info
 }
 
-func hostTotalMemMB() int { return readHostMemInfo().totalMB }
+func hostTotalMemMB() int {
+	hostMemOnce.Do(func() { hostMem = readMeminfoMB() })
+	return hostMem.totalMB
+}
 
-func hostSwapTotalMB() int { return readHostMemInfo().swapMB }
+// hostSwapTotalMB reads /proc/meminfo fresh on every call: swap can be
+// enabled while relayd is running (auto-swap, manual swapon), and a stale
+// "no swap" answer would mis-gate the OOM warnings and the build-time
+// swap retry.
+func hostSwapTotalMB() int {
+	return readMeminfoMB().swapMB
+}
 
 // setupMemoryLimits keeps the daemon's own footprint predictable on small
 // hosts. Go's default GC lets the heap grow to ~2x its live size before

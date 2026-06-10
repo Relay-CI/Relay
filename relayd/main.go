@@ -4698,8 +4698,6 @@ func sqliteDSN(path string) string {
 
 func main() {
 	setupMemoryLimits()
-	maybeEnableAutoSwap()
-	startMemorySampler()
 
 	runArgs := os.Args[1:]
 	if len(os.Args) > 1 {
@@ -4730,6 +4728,12 @@ func main() {
 		fmt.Println(relaydVersionLine())
 		return
 	}
+
+	// Only the long-running server should have startup side effects —
+	// `relayd version`/`relayd service` must not provision swapfiles or
+	// spawn samplers.
+	_ = maybeEnableAutoSwap()
+	startMemorySampler()
 
 	dataDir := getenv("RELAY_DATA_DIR", "./data")
 	if runCfg.DataDir != "" {
@@ -8681,8 +8685,22 @@ func (s *Server) runDeploy(job DeployJob) {
 		// pass it to the build so advanced users can provide custom files.
 		log("docker build starting...")
 		if total := hostTotalMemMB(); total > 0 && total <= 2200 && hostSwapTotalMB() == 0 {
-			log("warning: host has %d MB RAM and no swap — Node build heap is capped at %s MB, but heavy builds can still be OOM-killed under pressure", total, nodeBuildHeapMB())
-			log("hint: add a 2 GB swapfile to make OOM kills effectively impossible: fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile")
+			// Last-chance swap provisioning: covers hosts where startup ran
+			// before the operator fixed permissions or where the swapfile
+			// was removed since. Failures are remembered, so this does not
+			// redo expensive work on every build.
+			swapErr := maybeEnableAutoSwap()
+			if swapMB := hostSwapTotalMB(); swapMB > 0 {
+				log("auto-swap: %d MB of swap active before build", swapMB)
+			} else {
+				if swapErr != nil {
+					log("auto-swap: %v", swapErr)
+				}
+				// Wording must not contain the literal "(Turbopack)" — the
+				// OOM hint below greps this same log for that marker.
+				log("warning: host has %d MB RAM and no swap — Node build heap is capped at %s MB, but native bundler memory ignores that cap and can be OOM-killed", total, nodeBuildHeapMB())
+				log("hint: add a 2 GB swapfile to make OOM kills effectively impossible: fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile")
+			}
 		}
 
 		artifactRef = fmt.Sprintf("relay/%s:%s-%s-%s",
@@ -8722,6 +8740,17 @@ func (s *Server) runDeploy(job DeployJob) {
 				heapMB := nodeBuildHeapMB()
 				log("hint: build exited 137/SIGKILL. This is usually the kernel or Docker killing the build for memory pressure.")
 				log("hint: Relay caps Node build heap at %s MB by default; lower RELAY_NODE_BUILD_HEAP_MB or add swap/use a larger host if Next still gets killed.", heapMB)
+				// "(Turbopack)" is Next's own banner ("▲ Next.js 16.x (Turbopack)").
+				// Matching the parenthesized form avoids false positives from
+				// relayd's own warning lines in the same log.
+				if tail, _ := readFileTail(d.LogPath, 256*1024); strings.Contains(tail, "(Turbopack)") {
+					// Turbopack allocates in a native Rust binary outside the
+					// V8 heap, so NODE_OPTIONS caps cannot bound it.
+					log("hint: this build uses Next's Turbopack engine, whose native memory ignores Node heap caps. Swap is the reliable fix (relayd enables it automatically on small hosts when running as root), or build with `next build --webpack`.")
+				}
+				if hostSwapTotalMB() == 0 {
+					log("hint: this host has no swap configured — see docs/small-host-memory.md")
+				}
 				errMsg = "build process killed with exit 137 (likely out of memory): " + errMsg
 			}
 			d.Error = "docker build failed: " + errMsg

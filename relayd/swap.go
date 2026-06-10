@@ -1,35 +1,80 @@
-// swap.go — opt-in swapfile provisioning for small hosts.
+// swap.go — automatic swapfile provisioning for small hosts.
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 )
 
-// maybeEnableAutoSwap creates and enables a swapfile at startup when
-// RELAY_AUTO_SWAP=1, the daemon runs as root on Linux, and the host has no
-// swap configured. Swap turns "the kernel killed the build" into "the build
-// ran a little slower" — on 2 GB hosts that is the difference between OOM
-// kills being rare and being impossible. relayd re-runs this on every boot
-// (via systemd), so no fstab entry is needed.
-func maybeEnableAutoSwap() {
-	if !getenvBool("RELAY_AUTO_SWAP", false) {
-		return
+var (
+	// autoSwapMu serializes provisioning: deploys run on a concurrent worker
+	// pool and each build retries auto-swap, so without this two builds could
+	// interleave dd/mkswap/swapon and re-signature a file that is already
+	// active kernel swap.
+	autoSwapMu      sync.Mutex
+	autoSwapTried   bool
+	autoSwapLastErr error
+)
+
+// shouldAutoSwap decides whether to provision a swapfile. Defaults to ON for
+// small hosts (≤ 2.2 GB RAM) because swap is the only protection that holds
+// for native build tooling: Next 16 builds with Turbopack allocate in a Rust
+// binary outside the V8 heap, so NODE_OPTIONS caps cannot bound them and the
+// kernel OOM-kills the build (exit 137). RELAY_AUTO_SWAP=0 opts out;
+// RELAY_AUTO_SWAP=1 forces it on for any host size. A malformed value is
+// treated as opt-out — never provision on ambiguous instructions.
+func shouldAutoSwap(envVal string, totalMB, swapMB int) bool {
+	if swapMB > 0 {
+		return false
 	}
+	v := strings.ToLower(strings.TrimSpace(envVal))
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	}
+	if v != "" {
+		return false
+	}
+	return totalMB > 0 && totalMB <= 2200
+}
+
+// maybeEnableAutoSwap creates and enables a swapfile (root on Linux, no
+// existing swap; see shouldAutoSwap for the policy). Swap turns "the kernel
+// killed the build" into "the build ran a little slower" — on 2 GB hosts that
+// is the difference between OOM kills being rare and being impossible. relayd
+// re-runs this on every boot (via systemd), so no fstab entry is needed.
+//
+// Creation is attempted at most once per process: a failure is remembered and
+// returned to later callers (e.g. the per-build retry) without redoing the
+// expensive dd/fallocate work. Returns nil when swap is already active or was
+// just enabled.
+func maybeEnableAutoSwap() error {
 	if runtime.GOOS != "linux" {
-		return
+		return nil
+	}
+	autoSwapMu.Lock()
+	defer autoSwapMu.Unlock()
+	if !shouldAutoSwap(os.Getenv("RELAY_AUTO_SWAP"), hostTotalMemMB(), hostSwapTotalMB()) {
+		return nil
 	}
 	if os.Geteuid() != 0 {
-		fmt.Fprintln(os.Stderr, "auto-swap: RELAY_AUTO_SWAP=1 ignored — relayd is not running as root")
-		return
+		err := errors.New("relayd is not running as root; add swap manually to protect builds from OOM kills")
+		fmt.Fprintln(os.Stderr, "auto-swap: skipped —", err)
+		return err
 	}
-	if hostSwapTotalMB() > 0 {
-		return
+	if autoSwapTried {
+		return autoSwapLastErr
 	}
+	autoSwapTried = true
 	sizeMB := 2048
 	if v := strings.TrimSpace(os.Getenv("RELAY_AUTO_SWAP_MB")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -38,10 +83,12 @@ func maybeEnableAutoSwap() {
 	}
 	path := getenv("RELAY_AUTO_SWAP_PATH", "/swapfile")
 	if err := enableSwapfile(path, sizeMB); err != nil {
+		autoSwapLastErr = err
 		fmt.Fprintf(os.Stderr, "auto-swap: %v\n", err)
-		return
+		return err
 	}
 	fmt.Printf("auto-swap: enabled %d MB swapfile at %s\n", sizeMB, path)
+	return nil
 }
 
 func enableSwapfile(path string, sizeMB int) error {
@@ -53,9 +100,15 @@ func enableSwapfile(path string, sizeMB int) error {
 			return fmt.Errorf("%s exists but could not be activated (%v — %s); remove it or point RELAY_AUTO_SWAP_PATH elsewhere", path, err, strings.TrimSpace(string(out)))
 		}
 		return nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		// Unknown stat failure (EIO, symlink loop, ...): do not risk the
+		// creation path overwriting whatever is there.
+		return fmt.Errorf("stat %s: %w", path, err)
 	}
 
 	// fallocate is instant; dd is the fallback for filesystems without it.
+	// From here on the file is ours: clean it up on any failure so a partial
+	// attempt doesn't strand a dead multi-GB file that can never activate.
 	if out, err := exec.Command("fallocate", "-l", fmt.Sprintf("%dM", sizeMB), path).CombinedOutput(); err != nil {
 		if out2, err2 := exec.Command("dd", "if=/dev/zero", "of="+path, "bs=1M", fmt.Sprintf("count=%d", sizeMB)).CombinedOutput(); err2 != nil {
 			_ = os.Remove(path)
@@ -63,12 +116,15 @@ func enableSwapfile(path string, sizeMB int) error {
 		}
 	}
 	if err := os.Chmod(path, 0600); err != nil {
+		_ = os.Remove(path)
 		return fmt.Errorf("chmod %s: %w", path, err)
 	}
 	if out, err := exec.Command("mkswap", path).CombinedOutput(); err != nil {
+		_ = os.Remove(path)
 		return fmt.Errorf("mkswap %s: %v — %s", path, err, strings.TrimSpace(string(out)))
 	}
 	if out, err := exec.Command("swapon", path).CombinedOutput(); err != nil {
+		_ = os.Remove(path)
 		return fmt.Errorf("swapon %s: %v — %s", path, err, strings.TrimSpace(string(out)))
 	}
 	return nil

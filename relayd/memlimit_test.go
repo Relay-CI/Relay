@@ -35,6 +35,32 @@ func TestNodeBuildHeapMBEnvOverrideWins(t *testing.T) {
 	}
 }
 
+func TestShouldAutoSwap(t *testing.T) {
+	cases := []struct {
+		env     string
+		totalMB int
+		swapMB  int
+		want    bool
+	}{
+		{"", 2048, 0, true},       // small host, no swap: default ON
+		{"", 1024, 0, true},       // tiny host: default ON
+		{"", 4096, 0, false},      // big host: default OFF
+		{"", 0, 0, false},         // unknown RAM: stay hands-off
+		{"", 2048, 2048, false},   // swap already present: never touch
+		{"0", 2048, 0, false},     // explicit opt-out wins
+		{"1", 8192, 0, true},      // explicit opt-in works on any size
+		{"1", 8192, 1024, false},  // existing swap always wins
+		{"OFF", 2048, 0, false},   // case-insensitive opt-out
+		{"  On ", 2048, 0, true},  // whitespace + case tolerated
+		{"maybe", 2048, 0, false}, // malformed value: never provision
+	}
+	for _, tc := range cases {
+		if got := shouldAutoSwap(tc.env, tc.totalMB, tc.swapMB); got != tc.want {
+			t.Errorf("shouldAutoSwap(%q, %d, %d) = %v, want %v", tc.env, tc.totalMB, tc.swapMB, got, tc.want)
+		}
+	}
+}
+
 func TestWebhookAllowedPrunesStaleRepos(t *testing.T) {
 	s := &Server{webhookHits: make(map[string][]time.Time)}
 	stale := time.Now().Add(-10 * time.Minute)
