@@ -432,7 +432,7 @@ func (s *Server) invokeLocalAgentAPI(method string, path string, payload []byte)
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	resBody, _ := io.ReadAll(resp.Body)
+	resBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	return resBody, resp.StatusCode, nil
 }
 
@@ -481,7 +481,7 @@ func (s *Server) cloudJSONRequest(method string, endpoint string, payload []byte
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	resBody, _ := io.ReadAll(resp.Body)
+	resBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	return resBody, resp.StatusCode, nil
 }
 

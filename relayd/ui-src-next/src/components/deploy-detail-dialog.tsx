@@ -1,14 +1,14 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
+import { VirtualLogView } from "@/components/virtual-log-view";
 import {
   deployDurationLabel,
   deployPhaseText,
   deployStatusClass,
   formatCommitSHA,
   formatDateTime,
-  logLineTone,
   buildLogStats,
   operationClass,
   operationLabel,
@@ -36,7 +36,6 @@ interface DeployDetailDialogProps {
 export function DeployDetailDialog({ deploy, envInfo, services, onClose, onCancel }: DeployDetailDialogProps) {
   const [lines, setLines] = useState<string[]>([]);
   const [status, setStatus] = useState("connecting");
-  const logRef = useRef<HTMLDivElement>(null);
 
   const logStats = buildLogStats(lines);
   const preview = envInfo ? computePreviewURL(envInfo, deploy) : "";
@@ -62,10 +61,15 @@ export function DeployDetailDialog({ deploy, envInfo, services, onClose, onCance
         const decoder = new TextDecoder("utf-8");
         let buffer = "";
 
+        // Bound retention and batch state updates: appending one line per
+        // setState made very long build logs both re-render thousands of
+        // times and grow tab memory without limit.
+        const MAX_LOG_LINES = 4000;
         while (!cancelled) {
           const { value, done } = await reader.read();
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
+          const batch: string[] = [];
           let idx: number;
           while ((idx = buffer.indexOf("\n\n")) >= 0) {
             const frame = buffer.slice(0, idx);
@@ -87,14 +91,12 @@ export function DeployDetailDialog({ deploy, envInfo, services, onClose, onCance
               }
               continue;
             }
+            batch.push(payload);
+          }
+          if (batch.length) {
             setLines((prev) => {
-              const next = [...prev, payload];
-              if (logRef.current) {
-                requestAnimationFrame(() => {
-                  if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-                });
-              }
-              return next;
+              const next = [...prev, ...batch];
+              return next.length > MAX_LOG_LINES ? next.slice(-MAX_LOG_LINES) : next;
             });
           }
         }
@@ -218,22 +220,11 @@ export function DeployDetailDialog({ deploy, envInfo, services, onClose, onCance
                 {logStats.errors > 0 && <span className="bg-red-500/10 border border-red-500/20 px-2 py-0.5 rounded text-red-400">{logStats.errors} errors</span>}
               </div>
             </div>
-            <div
-              ref={logRef}
-              className="flex-1 min-h-0 overflow-y-auto p-4 font-mono text-xs leading-relaxed space-y-0.5 bg-[#040404]"
-            >
-              {!lines.length && (
-                <div className="text-white/30">Connecting to log stream…</div>
-              )}
-              {lines.map((line, index) => (
-                <div
-                  key={`${index}-${line.slice(0, 8)}`}
-                  className={cn("log-line", `log-line--${logLineTone(line)}`)}
-                >
-                  {line}
-                </div>
-              ))}
-            </div>
+            <VirtualLogView
+              lines={lines}
+              className="flex-1 min-h-0 p-4 font-mono text-xs bg-[#040404]"
+              emptyText="Connecting to log stream…"
+            />
           </div>
         </div>
       </div>

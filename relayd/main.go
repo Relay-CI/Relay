@@ -23,6 +23,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	nhpprof "net/http/pprof"
 	"net/url"
 	"os"
 	"os/exec"
@@ -1364,7 +1365,7 @@ func (b *NodeViteBuildpack) Plan(req DeployRequest, repoDir string, cfg *RelayCo
 	buildImg := getenv("RELAY_NODE_IMAGE", "node:22")
 	runImg := getenv("RELAY_NGINX_IMAGE", "nginx:alpine")
 	install := firstNonEmpty(req.InstallCmd, nodeInstallCmd(repoDir))
-	build := firstNonEmpty(req.BuildCmd, nodeDefaultBuildCmd(repoDir))
+	build := nodeBuildCmdWithMemoryGuard(firstNonEmpty(req.BuildCmd, nodeDefaultBuildCmd(repoDir)))
 
 	return BuildPlan{
 		Kind:        "vite-static",
@@ -1646,7 +1647,7 @@ func (b *NodeGenericBuildpack) Plan(req DeployRequest, repoDir string, cfg *Rela
 	buildImg := getenv("RELAY_NODE_IMAGE", "node:22")
 	runImg := getenv("RELAY_NODE_RUN_IMAGE", "node:22-slim")
 	install := firstNonEmpty(req.InstallCmd, nodeInstallCmd(repoDir))
-	build := firstNonEmpty(req.BuildCmd, nodeDefaultBuildCmd(repoDir))
+	build := nodeBuildCmdWithMemoryGuard(firstNonEmpty(req.BuildCmd, nodeDefaultBuildCmd(repoDir)))
 	start := firstNonEmpty(req.StartCmd, nodeDefaultStartCmd(repoDir))
 	port := firstNonZero(req.ServicePort, 3000)
 
@@ -4685,7 +4686,21 @@ func (s *Server) deleteProjectData(app string) (map[string]int64, []string, erro
 
 // ---------------------- Main ----------------------
 
+// sqliteDSN builds a DSN that applies pragmas on every pooled connection
+// (Exec-based PRAGMAs only reach one connection of the pool).
+func sqliteDSN(path string) string {
+	return "file:" + path +
+		"?_pragma=busy_timeout(10000)" +
+		"&_pragma=journal_mode(WAL)" +
+		"&_pragma=synchronous(NORMAL)" +
+		"&_pragma=cache_size(-4096)"
+}
+
 func main() {
+	setupMemoryLimits()
+	maybeEnableAutoSwap()
+	startMemorySampler()
+
 	runArgs := os.Args[1:]
 	if len(os.Args) > 1 {
 		switch runArgs[0] {
@@ -4741,27 +4756,33 @@ func main() {
 	}
 
 	dbPath := filepath.Join(dataDir, "relay.db")
-	db, err := sql.Open("sqlite", dbPath)
+	// Pragmas in the DSN apply to every pooled connection. PRAGMA via Exec
+	// only configures whichever single connection the pool hands out, so
+	// busy_timeout/synchronous silently didn't apply to the rest.
+	// synchronous=NORMAL is the recommended (and safe) level under WAL and
+	// skips an fsync per transaction; cache_size is negative KB per
+	// connection, bounding pool memory at 8×4 MB.
+	db, err := sql.Open("sqlite", sqliteDSN(dbPath))
 	if err != nil {
 		panic(err)
 	}
 	_, _ = db.Exec("PRAGMA journal_mode=WAL;")
-	_, _ = db.Exec("PRAGMA busy_timeout=10000;")
 	// WAL mode supports multiple concurrent readers alongside a single writer.
 	// Keeping MaxOpenConns=1 would serialize every DB call through a single Go
 	// connection, so any slow query (e.g. analytics UPDATE) blocks login/session
-	// checks indefinitely. Allow multiple connections; SQLite serialises writes.
-	db.SetMaxOpenConns(0) // unlimited — WAL handles concurrency
-	db.SetMaxIdleConns(5)
+	// checks indefinitely. But unlimited connections each carry their own pager
+	// cache, so a request burst permanently inflates RSS on small hosts — a
+	// small pool keeps concurrency without the memory cliff.
+	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(4)
 	if err := migrateDB(db); err != nil {
 		panic(err)
 	}
-	analyticsDB, err := sql.Open("sqlite", dbPath)
+	analyticsDB, err := sql.Open("sqlite", sqliteDSN(dbPath))
 	if err != nil {
 		panic(err)
 	}
 	_, _ = analyticsDB.Exec("PRAGMA journal_mode=WAL;")
-	_, _ = analyticsDB.Exec("PRAGMA busy_timeout=10000;")
 	analyticsDB.SetMaxOpenConns(2)
 	analyticsDB.SetMaxIdleConns(2)
 
@@ -4822,6 +4843,7 @@ func main() {
 	// Restore global domain proxy state from DB
 	go func() { _ = s.ensureGlobalProxy() }()
 	go s.runLaneExpiryWorker()
+	go s.runHousekeepingWorker()
 
 	// Start worker pool: deploy jobs are I/O-bound (git, image pull/push, container
 	// start), so use all available CPUs with a minimum of 2.
@@ -4841,7 +4863,7 @@ func main() {
 
 	// UI
 	uiRoot, _ := fs.Sub(uiFS, "ui")
-	uiHandler := http.FileServer(http.FS(uiRoot))
+	uiHandler := uiAssetHandler(uiRoot)
 	mux.Handle("/dashboard/", http.StripPrefix("/dashboard/", uiHandler))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
@@ -4883,6 +4905,15 @@ func main() {
 	mux.HandleFunc("/api/plugins/buildpacks/install-url", authOwner(s.handleBuildpackPluginInstallURL))
 	mux.HandleFunc("/api/plugins/catalog", authOwner(s.handleBuildpackPluginCatalog))
 	mux.HandleFunc("/api/admin/ops", authOwner(s.handleAdminOps))
+	if getenvBool("RELAY_PPROF", false) {
+		// Profiling endpoints for diagnosing CPU/memory issues in the field.
+		// Owner-gated and off by default.
+		mux.HandleFunc("/debug/pprof/", authOwner(nhpprof.Index))
+		mux.HandleFunc("/debug/pprof/cmdline", authOwner(nhpprof.Cmdline))
+		mux.HandleFunc("/debug/pprof/profile", authOwner(nhpprof.Profile))
+		mux.HandleFunc("/debug/pprof/symbol", authOwner(nhpprof.Symbol))
+		mux.HandleFunc("/debug/pprof/trace", authOwner(nhpprof.Trace))
+	}
 
 	mux.HandleFunc("/api/logs/", authAny(s.handleLogsByID))
 	mux.HandleFunc("/api/logs/stream/", authAny(s.handleLogsStream))
@@ -6758,6 +6789,18 @@ func (s *Server) webhookAllowed(repoURL string) bool {
 	cutoff := now.Add(-60 * time.Second)
 	s.webhookRateMu.Lock()
 	defer s.webhookRateMu.Unlock()
+	// Drop repos whose hits have all aged out, so the map never accumulates
+	// one permanent entry per repo URL ever seen.
+	if len(s.webhookHits) > 64 {
+		for k, v := range s.webhookHits {
+			if k == repoURL {
+				continue
+			}
+			if len(v) == 0 || !v[len(v)-1].After(cutoff) {
+				delete(s.webhookHits, k)
+			}
+		}
+	}
 	hits := s.webhookHits[repoURL]
 	var recent []time.Time
 	for _, t := range hits {
@@ -6779,13 +6822,16 @@ func (s *Server) handleGithubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read body once for signature verification and JSON decode.
+	// Read body once for signature verification and JSON decode. Bound the
+	// read so a hostile or misbehaving sender can't balloon the daemon's heap;
+	// GitHub itself caps hook payloads at 25 MB and real ones are far smaller.
+	r.Body = http.MaxBytesReader(w, r.Body, 10<<20)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		httpError(w, 400, "failed to read body")
 		return
 	}
-	r.Body = io.NopCloser(strings.NewReader(string(body)))
+	r.Body = io.NopCloser(bytes.NewReader(body))
 
 	// Global webhook secret (fallback if no per-app secret matches).
 	globalSecret := strings.TrimSpace(os.Getenv("RELAY_GITHUB_WEBHOOK_SECRET"))
@@ -8634,6 +8680,10 @@ func (s *Server) runDeploy(job DeployJob) {
 		// Build step. If relay.config.json specified a Dockerfile path,
 		// pass it to the build so advanced users can provide custom files.
 		log("docker build starting...")
+		if total := hostTotalMemMB(); total > 0 && total <= 2200 && hostSwapTotalMB() == 0 {
+			log("warning: host has %d MB RAM and no swap — Node build heap is capped at %s MB, but heavy builds can still be OOM-killed under pressure", total, nodeBuildHeapMB())
+			log("hint: add a 2 GB swapfile to make OOM kills effectively impossible: fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile")
+		}
 
 		artifactRef = fmt.Sprintf("relay/%s:%s-%s-%s",
 			safe(req.App),
@@ -9655,6 +9705,15 @@ func (s *Server) runSlotContainerWithRuntime(runtime ContainerRuntime, log func(
 			}
 		}
 	}
+	if spec.MemLimit == "" {
+		// No explicit limit: cap the container to a host-sized default so one
+		// leaky app can't OOM the whole host (relayd, builds, and the other
+		// apps included). Docker's default memory-swap allowance (2x the cap)
+		// lets the app spill to swap before the kernel kills anything.
+		if mb := defaultAppMemLimitMB(); mb > 0 {
+			spec.MemLimit = fmt.Sprintf("%dm", mb)
+		}
+	}
 	if log != nil {
 		log("runtime run candidate: %s on %s", containerName, networkName)
 	}
@@ -10438,6 +10497,7 @@ type adminOpsResponse struct {
 	GeneratedAt int64           `json:"generated_at"`
 	Summary     adminOpsSummary `json:"summary"`
 	Apps        []adminOpsApp   `json:"apps"`
+	Daemon      adminOpsDaemon  `json:"daemon"`
 }
 
 func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
@@ -10890,6 +10950,7 @@ func (s *Server) buildAdminOpsResponse() adminOpsResponse {
 	resp := adminOpsResponse{
 		GeneratedAt: time.Now().UnixMilli(),
 		Apps:        []adminOpsApp{},
+		Daemon:      collectDaemonStats(),
 	}
 	rows, err := s.db.Query(`SELECT app, env, branch FROM app_state ORDER BY app, env, branch`)
 	if err != nil {
@@ -14682,13 +14743,30 @@ func nodeDefaultBuildCmd(repoDir string) string {
 
 func nodeBuildHeapMB() string {
 	value := strings.TrimSpace(os.Getenv("RELAY_NODE_BUILD_HEAP_MB"))
-	if value == "" {
-		value = "1024"
+	if value != "" {
+		if _, err := strconv.Atoi(value); err == nil {
+			return value
+		}
 	}
-	if _, err := strconv.Atoi(value); err != nil {
-		return "1024"
+	// No explicit setting: size the V8 heap to the host. V8's RSS overshoots
+	// old-space by 30-50%, and Docker, relayd, and the apps being hosted all
+	// share the same machine — so a fixed 1024 MB heap still OOM-killed builds
+	// on 2 GB instances. Stay well under half of physical RAM.
+	if total := hostTotalMemMB(); total > 0 {
+		return strconv.Itoa(adaptiveNodeBuildHeapMB(total))
 	}
-	return value
+	return "1024"
+}
+
+func adaptiveNodeBuildHeapMB(totalMB int) int {
+	heap := totalMB/2 - 256
+	if heap < 384 {
+		heap = 384
+	}
+	if heap > 2048 {
+		heap = 2048
+	}
+	return heap
 }
 
 func nodeBuildCmdWithMemoryGuard(cmd string) string {
@@ -14702,7 +14780,15 @@ func nodeBuildCmdWithMemoryGuard(cmd string) string {
 	if strings.Contains(cmd, "NODE_OPTIONS=") {
 		return cmd
 	}
-	return fmt.Sprintf(`NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=%s" NEXT_TELEMETRY_DISABLED=1 %s`, nodeBuildHeapMB(), cmd)
+	// The nice prefix deprioritizes the build relative to the apps already
+	// serving traffic on the same host — container processes all share the
+	// kernel scheduler, so niceness works across container boundaries. The
+	// command substitution degrades to a no-op on images without `nice`.
+	nice := ""
+	if strings.TrimSpace(os.Getenv("RELAY_BUILD_NICE")) != "0" {
+		nice = `$(command -v nice >/dev/null 2>&1 && echo nice -n 10) `
+	}
+	return fmt.Sprintf(`NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=%s" NEXT_TELEMETRY_DISABLED=1 %s%s`, nodeBuildHeapMB(), nice, cmd)
 }
 
 func nodeDefaultStartCmd(repoDir string) string {

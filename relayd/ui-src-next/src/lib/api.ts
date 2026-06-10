@@ -685,6 +685,23 @@ export interface AdminOpsApp {
   lanes: AdminOpsLane[];
 }
 
+export interface AdminOpsMemSample {
+  at_ms: number;
+  rss_bytes: number;
+  heap_bytes: number;
+}
+
+export interface AdminOpsDaemon {
+  rss_bytes: number;
+  heap_alloc_bytes: number;
+  heap_sys_bytes: number;
+  go_mem_limit_bytes?: number;
+  goroutines: number;
+  host_mem_total_mb?: number;
+  host_swap_mb: number;
+  samples: AdminOpsMemSample[];
+}
+
 export interface AdminOpsResponse {
   generated_at: number;
   summary: {
@@ -698,6 +715,7 @@ export interface AdminOpsResponse {
     storage_bytes: number;
   };
   apps: AdminOpsApp[];
+  daemon?: AdminOpsDaemon;
 }
 
 export interface DoctorCheck {

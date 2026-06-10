@@ -6,8 +6,10 @@ import {
   getAdminOps,
   type AdminOpsApp,
   type AdminOpsContainerUsage,
+  type AdminOpsDaemon,
   type AdminOpsDeployDelta,
   type AdminOpsLane,
+  type AdminOpsMemSample,
   type AdminOpsResponse,
 } from "@/lib/api";
 
@@ -169,6 +171,8 @@ export function OperationsPage() {
             </div>
           )}
 
+          {data.daemon && <DaemonPanel daemon={data.daemon} />}
+
           <div className="space-y-4">
             {data.apps.map((app) => (
               <AppSection key={app.app} app={app} />
@@ -186,6 +190,61 @@ function SummaryCard({ label, value, meta }: { label: string; value: string; met
       <div className="eyebrow mb-1">{label}</div>
       <div className="text-2xl font-semibold text-white">{value}</div>
       <div className="text-xs text-white/38 mt-1">{meta}</div>
+    </div>
+  );
+}
+
+function MemorySparkline({ samples }: { samples: AdminOpsMemSample[] }) {
+  if (samples.length < 2) {
+    return <div className="text-xs text-white/30">Collecting samples…</div>;
+  }
+  const w = 240;
+  const h = 48;
+  const values = samples.map((s) => (s.rss_bytes > 0 ? s.rss_bytes : s.heap_bytes));
+  const max = Math.max(...values, 1);
+  const points = values
+    .map((v, i) => `${((i / (values.length - 1)) * w).toFixed(1)},${(h - 2 - (v / max) * (h - 6)).toFixed(1)}`)
+    .join(" ");
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="block" aria-label="Daemon memory, last hour">
+      <polyline points={points} fill="none" stroke="rgba(0,188,212,0.85)" strokeWidth="1.5" />
+    </svg>
+  );
+}
+
+function DaemonPanel({ daemon }: { daemon: AdminOpsDaemon }) {
+  return (
+    <div className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-5">
+      <div className="flex items-center justify-between gap-3 mb-4">
+        <div>
+          <div className="eyebrow mb-0.5">Relay daemon</div>
+          <div className="text-base font-semibold text-white">relayd memory footprint</div>
+        </div>
+        <div className="text-right">
+          <MemorySparkline samples={daemon.samples} />
+          <div className="text-[10px] text-white/35 mt-1">RSS, last hour</div>
+        </div>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+        <MiniMetric label="RSS" value={daemon.rss_bytes > 0 ? formatBytes(daemon.rss_bytes) : "n/a"} sub="resident memory" />
+        <MiniMetric label="Go heap" value={formatBytes(daemon.heap_alloc_bytes)} sub={`${formatBytes(daemon.heap_sys_bytes)} reserved`} />
+        <MiniMetric
+          label="Memory limit"
+          value={daemon.go_mem_limit_bytes ? formatBytes(daemon.go_mem_limit_bytes) : "none"}
+          sub="GC soft limit"
+        />
+        <MiniMetric label="Goroutines" value={String(daemon.goroutines)} sub="concurrent tasks" />
+        <MiniMetric
+          label="Host RAM"
+          value={daemon.host_mem_total_mb ? formatBytes(daemon.host_mem_total_mb * 1024 * 1024) : "unknown"}
+          sub="physical memory"
+        />
+        <MiniMetric
+          label="Swap"
+          value={daemon.host_swap_mb > 0 ? formatBytes(daemon.host_swap_mb * 1024 * 1024) : "none"}
+          sub={daemon.host_swap_mb > 0 ? "configured" : "consider adding swap"}
+        />
+      </div>
     </div>
   );
 }
