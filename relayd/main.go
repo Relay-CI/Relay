@@ -641,6 +641,19 @@ func (r *DockerRuntime) Build(ctx context.Context, tag, contextDir, dockerfilePa
 	if dockerfilePath != "" {
 		args = append(args, "-f", dockerfilePath)
 	}
+	// Limit build memory on constrained hosts so a heavy build stage can't
+	// OOM-kill the relay daemon, Caddy, or other running app containers.
+	// RELAY_BUILD_MEMORY_LIMIT overrides; otherwise 60% of host RAM is used
+	// (leaves headroom for daemon + Caddy + the live app).
+	if mem := strings.TrimSpace(os.Getenv("RELAY_BUILD_MEMORY_LIMIT")); mem != "" {
+		args = append(args, "--memory="+mem)
+	} else if total := hostTotalMemMB(); total > 0 && total <= 4096 {
+		buildMB := total * 3 / 5
+		if buildMB < 512 {
+			buildMB = 512
+		}
+		args = append(args, fmt.Sprintf("--memory=%dm", buildMB))
+	}
 	if len(buildArgs) > 0 {
 		keys := make([]string, 0, len(buildArgs))
 		for key := range buildArgs {
@@ -9237,11 +9250,20 @@ func (s *Server) resolvePortConflict(runtime ContainerRuntime, req *DeployReques
 	if preferred <= 0 {
 		return
 	}
-	// If our own edge proxy already owns this port, no conflict.
+	// If our own edge proxy already owns a port, preserve it to avoid
+	// recreating the nginx container (which causes a brief traffic gap).
 	edgeContainer := appBaseContainerName(req.App, req.Env, req.Branch)
-	if runtime != nil && runtime.IsRunning(edgeContainer) &&
-		runtime.PublishedPort(edgeContainer, 3000) == preferred {
-		return
+	if runtime != nil && runtime.IsRunning(edgeContainer) {
+		existingPort := runtime.PublishedPort(edgeContainer, 3000)
+		if existingPort == preferred {
+			return // Our proxy already owns the preferred port.
+		}
+		if existingPort > 0 {
+			// Our proxy is live on a different port; keep it to avoid a
+			// recreate-induced downtime window while nginx restarts.
+			req.HostPort = existingPort
+			return
+		}
 	}
 	if hostPortAvailable(preferred) {
 		req.HostPort = preferred
