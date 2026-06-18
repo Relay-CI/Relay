@@ -672,7 +672,7 @@ func (m *mockRuntime) EnsureNetwork(string) error            { return nil }
 func (m *mockRuntime) RemoveNetwork(string)                  {}
 func (m *mockRuntime) RemoveVolume(string)                   {}
 func (m *mockRuntime) Pull(string) error                     { return nil }
-func (m *mockRuntime) Build(context.Context, string, string, string, map[string]string, io.Writer) error {
+func (m *mockRuntime) Build(context.Context, string, string, string, map[string]string, io.Writer, string) error {
 	return nil
 }
 func (m *mockRuntime) RemoveImage(string)                  {}

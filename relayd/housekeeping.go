@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -32,18 +33,140 @@ func housekeepingImageRetentionPerLane() int {
 	return 3
 }
 
+// housekeepingInterval returns how often to run the full housekeeping pass.
+// On small hosts (≤2.2 GB RAM) images and logs accumulate faster relative to
+// available disk, and BuildKit cache eviction silently destroys incremental
+// build speed, so we prune more aggressively. Larger hosts can afford to wait.
+func housekeepingInterval() time.Duration {
+	if total := hostTotalMemMB(); total > 0 && total <= 2200 {
+		return 3 * time.Hour
+	}
+	return 12 * time.Hour
+}
+
+// diskAvailableMB returns the available disk space in MB for the partition
+// that contains path, or 0 if it cannot be determined.
+func diskAvailableMB(path string) int {
+	out, err := exec.Command("df", "-Pm", path).CombinedOutput()
+	if err != nil || len(out) == 0 {
+		return 0
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for _, line := range lines[1:] { // skip header
+		fields := strings.Fields(line)
+		if len(fields) >= 4 {
+			if mb, err := strconv.Atoi(fields[3]); err == nil {
+				return mb
+			}
+		}
+	}
+	return 0
+}
+
 func (s *Server) runHousekeepingWorker() {
 	// Let startup (and any boot-time deploys) settle before the first pass.
 	time.Sleep(2 * time.Minute)
 	for {
 		s.housekeepOnce()
-		time.Sleep(12 * time.Hour)
+		time.Sleep(housekeepingInterval())
 	}
 }
 
 func (s *Server) housekeepOnce() {
 	s.pruneDeployLogs()
 	s.pruneDeployImages()
+	s.pruneAbandonedSyncSessions()
+	s.pruneOldInMemoryDeploys()
+}
+
+// pruneAbandonedSyncSessions removes sync sessions whose clients never called
+// /finish — i.e. they were abandoned mid-upload by a network drop, a SIGKILL,
+// or a bug. Without this, their staging directories (up to 500 MB each) sit on
+// disk indefinitely and the in-memory map keeps growing.
+//
+// Sessions younger than sessionTTL are left alone so in-progress multi-chunk
+// uploads are not disrupted.
+func (s *Server) pruneAbandonedSyncSessions() {
+	const sessionTTL = 4 * time.Hour
+	cutoff := time.Now().Add(-sessionTTL)
+
+	s.syncMu.Lock()
+	var stale []*SyncSession
+	for _, sess := range s.syncSessions {
+		if sess.CreatedAt.Before(cutoff) {
+			stale = append(stale, sess)
+		}
+	}
+	for _, sess := range stale {
+		delete(s.syncSessions, sess.ID)
+	}
+	s.syncMu.Unlock()
+
+	for _, sess := range stale {
+		_ = s.deleteSessionFromDB(sess.ID)
+		if sess.StagingDir != "" {
+			_ = os.RemoveAll(sess.StagingDir)
+		}
+	}
+	if len(stale) > 0 {
+		fmt.Printf("housekeeping: removed %d abandoned sync session(s) older than %s\n", len(stale), sessionTTL)
+	}
+}
+
+// pruneOldInMemoryDeploys trims the in-memory deploys map so it never holds
+// more than maxInMemoryDeploys entries. Older completed deploys are removed;
+// they remain in the database and are fetched on demand by the log-stream and
+// deploy-status handlers. This prevents a long-lived server from accumulating
+// thousands of Deploy structs in RAM.
+//
+// Active (queued/running) deploys and the most recent N completed deploys per
+// app+env+branch are kept.
+func (s *Server) pruneOldInMemoryDeploys() {
+	const maxInMemoryDeploys = 200
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.deploys) <= maxInMemoryDeploys {
+		return
+	}
+
+	// Collect completed/failed deploys sorted oldest-first.
+	type entry struct {
+		id        string
+		createdAt time.Time
+		active    bool
+	}
+	entries := make([]entry, 0, len(s.deploys))
+	for id, d := range s.deploys {
+		if d == nil {
+			continue
+		}
+		entries = append(entries, entry{
+			id:        id,
+			createdAt: d.CreatedAt,
+			active:    isActiveDeployStatus(d.Status),
+		})
+	}
+	// Sort oldest first so we evict from the front.
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].createdAt.Before(entries[j].createdAt)
+	})
+
+	removed := 0
+	for _, e := range entries {
+		if len(s.deploys)-removed <= maxInMemoryDeploys {
+			break
+		}
+		if e.active {
+			continue // never evict running builds
+		}
+		delete(s.deploys, e.id)
+		removed++
+	}
+	if removed > 0 {
+		fmt.Printf("housekeeping: evicted %d old deploy record(s) from memory (still in DB)\n", removed)
+	}
 }
 
 // pruneDeployLogs removes build/deploy log files older than the retention

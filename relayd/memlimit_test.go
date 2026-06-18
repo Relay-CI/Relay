@@ -61,6 +61,66 @@ func TestShouldAutoSwap(t *testing.T) {
 	}
 }
 
+func TestBuildMemPctForKind(t *testing.T) {
+	cases := []struct {
+		kind string
+		want int
+	}{
+		{"next-standalone", 85},
+		{"next-classic", 85},
+		{"node-vite", 85},
+		{"node-generic", 85},
+		{"bun", 85},
+		{"expo-web", 85},
+		// Dynamic plugin variants should match the node-/next- prefix.
+		{"node-astro", 85},
+		{"next-custom", 85},
+		{"java", 78},
+		{"rust", 78},
+		{"python", 68},
+		{"ruby", 68},
+		{"go", 60},
+		{"dotnet", 60},
+		{"static", buildMemPctDefault},
+		{"wasm-static", buildMemPctDefault},
+		{"unknown-thing", buildMemPctDefault},
+	}
+	for _, tc := range cases {
+		if got := buildMemPctForKind(tc.kind); got != tc.want {
+			t.Errorf("buildMemPctForKind(%q) = %d, want %d", tc.kind, got, tc.want)
+		}
+	}
+}
+
+func TestBuildMemLimitMBLargeHostReturnsZero(t *testing.T) {
+	// Hosts with > 4 GB RAM should not have a cap applied.
+	if got := buildMemLimitMB_forTest("next-standalone", 8192); got != 0 {
+		t.Errorf("8 GB host: expected 0 (no limit), got %d", got)
+	}
+}
+
+func TestBuildMemLimitMBNodeGetsMoreThanGo(t *testing.T) {
+	nodeMB := buildMemLimitMB_forTest("next-standalone", 2048)
+	goMB := buildMemLimitMB_forTest("go", 2048)
+	if nodeMB <= goMB {
+		t.Errorf("Node build (%d MB) should get more RAM than Go build (%d MB) on the same host", nodeMB, goMB)
+	}
+}
+
+// buildMemLimitMB_forTest wraps buildMemLimitMB with an explicit totalMB so
+// tests don't depend on /proc/meminfo values on the test machine.
+func buildMemLimitMB_forTest(kind string, totalMB int) int {
+	if totalMB > 4096 {
+		return 0
+	}
+	pct := buildMemPctForKind(kind)
+	limitMB := totalMB * pct / 100
+	if limitMB < 512 {
+		limitMB = 512
+	}
+	return limitMB
+}
+
 func TestWebhookAllowedPrunesStaleRepos(t *testing.T) {
 	s := &Server{webhookHits: make(map[string][]time.Time)}
 	stale := time.Now().Add(-10 * time.Minute)

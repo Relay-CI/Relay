@@ -138,6 +138,85 @@ func defaultAppMemLimitMB() int {
 	return limit
 }
 
+// buildMemLimitMB returns the Docker --memory cap in MB appropriate for a
+// build of the given buildpack kind. The old flat 60% caused npm install to
+// hit the cap and fail with spawn ENOMEM on 2 GB hosts because the install
+// stage forks many child processes — each one counts against the cgroup limit
+// even before it executes. Different buildpacks have very different memory
+// profiles so the limit is now sized per-family.
+//
+// Returns 0 (no limit) on hosts with more than 4 GB of RAM — they have
+// enough headroom that capping is more likely to cause trouble than help.
+// RELAY_BUILD_MEMORY_LIMIT still overrides everything.
+func buildMemLimitMB(kind string) int {
+	total := hostTotalMemMB()
+	if total <= 0 || total > 4096 {
+		return 0
+	}
+
+	// Percentage of host RAM to allow the build container.
+	// The remainder keeps relayd, Caddy, and running app containers alive.
+	pct := buildMemPctForKind(kind)
+
+	limitMB := total * pct / 100
+	// Never go below 512 MB — builds will just OOM-fail trying to spawn
+	// the package manager if we hand them less.
+	if limitMB < 512 {
+		limitMB = 512
+	}
+	return limitMB
+}
+
+// buildKindMemPct maps known buildpack kinds to a RAM percentage for the
+// Docker build container. Families not listed fall back to the default below.
+// npm install forks heavily and Turbopack allocates in a native Rust binary
+// outside the V8 heap, so Node builds get the largest slice. Heavy JVM/Rust
+// compilers come next; Go/.NET are memory-efficient and need less.
+var buildKindMemPct = map[string]int{
+	// Node / Next / Vite / Bun / Expo — npm install + bundler peak can hit 2 GB.
+	"next-standalone": 85,
+	"next-classic":    85,
+	"next-export":     85,
+	"node-vite":       85,
+	"node-generic":    85,
+	"expo-web":        85,
+	"sprint-ui":       85,
+	"bun":             85,
+	// JVM and Rust — compiler memory spikes but no npm install overhead.
+	"java": 78,
+	"rust": 78,
+	// Scripting languages — pip/bundle is lightweight; build step is modest.
+	"python": 68,
+	"ruby":   68,
+	// Compiled, memory-efficient toolchains.
+	"go":     60,
+	"dotnet": 60,
+}
+
+const buildMemPctDefault = 55 // static, WASM, or unrecognised
+
+// buildMemPctForKind returns the fraction of host RAM (as an integer percent)
+// to allocate to the Docker build container for this buildpack family.
+func buildMemPctForKind(kind string) int {
+	if pct, ok := buildKindMemPct[kind]; ok {
+		return pct
+	}
+	// Catch dynamic variants like "node-*" or "next-*" from plugins.
+	if strings.HasPrefix(kind, "node-") || strings.HasPrefix(kind, "next-") {
+		return 85
+	}
+	return buildMemPctDefault
+}
+
+// isNodeBuildKind reports whether kind belongs to the Node/npm family.
+func isNodeBuildKind(kind string) bool {
+	_, ok := buildKindMemPct[kind]
+	if ok {
+		return buildKindMemPct[kind] == 85
+	}
+	return strings.HasPrefix(kind, "node-") || strings.HasPrefix(kind, "next-")
+}
+
 // daemonRSSBytes returns the daemon's resident set size, or 0 if unknown.
 func daemonRSSBytes() int64 {
 	f, err := os.Open("/proc/self/status")

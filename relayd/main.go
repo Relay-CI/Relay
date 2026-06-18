@@ -492,7 +492,9 @@ type ContainerRuntime interface {
 	Pull(image string) error
 	// Build builds an image from contextDir tagged as tag.
 	// dockerfilePath may be "" to use the default Dockerfile in contextDir.
-	Build(ctx context.Context, tag, contextDir, dockerfilePath string, buildArgs map[string]string, logw io.Writer) error
+	// kind is the buildpack kind (e.g. "next-standalone", "go") used to pick
+	// an appropriate memory limit for the build container on small hosts.
+	Build(ctx context.Context, tag, contextDir, dockerfilePath string, buildArgs map[string]string, logw io.Writer, kind string) error
 	// RemoveImage removes an image by reference (ignores errors).
 	RemoveImage(ref string)
 	// ListImages returns all image refs matching the given repository name.
@@ -636,23 +638,26 @@ func (r *DockerRuntime) Pull(image string) error {
 	return exec.Command("docker", "pull", image).Run()
 }
 
-func (r *DockerRuntime) Build(ctx context.Context, tag, contextDir, dockerfilePath string, buildArgs map[string]string, logw io.Writer) error {
+func (r *DockerRuntime) Build(ctx context.Context, tag, contextDir, dockerfilePath string, buildArgs map[string]string, logw io.Writer, kind string) error {
 	args := []string{"build", "-t", tag}
 	if dockerfilePath != "" {
 		args = append(args, "-f", dockerfilePath)
 	}
-	// Limit build memory on constrained hosts so a heavy build stage can't
-	// OOM-kill the relay daemon, Caddy, or other running app containers.
-	// RELAY_BUILD_MEMORY_LIMIT overrides; otherwise 60% of host RAM is used
-	// (leaves headroom for daemon + Caddy + the live app).
+	// Buildpack-aware memory limit: Node/Next builds fork heavily during npm
+	// install and Turbopack allocates outside the V8 heap, so they get 85% of
+	// host RAM on small hosts. Other buildpacks are sized proportionally. A flat
+	// 60% was causing spawn ENOMEM on 2 GB hosts because the container hit its
+	// cgroup limit while forking npm child processes.
+	// --memory-swap=-1 lets the build spill into any swap the host has instead
+	// of hard-failing at the RAM cap; swap is provisioned automatically by
+	// maybeEnableAutoSwap before the build starts.
+	// RELAY_BUILD_MEMORY_LIMIT overrides the automatic sizing.
 	if mem := strings.TrimSpace(os.Getenv("RELAY_BUILD_MEMORY_LIMIT")); mem != "" {
 		args = append(args, "--memory="+mem)
-	} else if total := hostTotalMemMB(); total > 0 && total <= 4096 {
-		buildMB := total * 3 / 5
-		if buildMB < 512 {
-			buildMB = 512
-		}
-		args = append(args, fmt.Sprintf("--memory=%dm", buildMB))
+		args = append(args, "--memory-swap=-1")
+	} else if limitMB := buildMemLimitMB(kind); limitMB > 0 {
+		args = append(args, fmt.Sprintf("--memory=%dm", limitMB))
+		args = append(args, "--memory-swap=-1")
 	}
 	if len(buildArgs) > 0 {
 		keys := make([]string, 0, len(buildArgs))
@@ -4790,8 +4795,11 @@ func main() {
 	// checks indefinitely. But unlimited connections each carry their own pager
 	// cache, so a request burst permanently inflates RSS on small hosts — a
 	// small pool keeps concurrency without the memory cliff.
-	db.SetMaxOpenConns(8)
-	db.SetMaxIdleConns(4)
+	db.SetMaxOpenConns(12)
+	db.SetMaxIdleConns(6)
+	// Recycle connections after 30 minutes so long-lived idle goroutines do
+	// not hold pager-cache memory that could be returned to the OS.
+	db.SetConnMaxLifetime(30 * time.Minute)
 	if err := migrateDB(db); err != nil {
 		panic(err)
 	}
@@ -4800,8 +4808,9 @@ func main() {
 		panic(err)
 	}
 	_, _ = analyticsDB.Exec("PRAGMA journal_mode=WAL;")
-	analyticsDB.SetMaxOpenConns(2)
+	analyticsDB.SetMaxOpenConns(3)
 	analyticsDB.SetMaxIdleConns(2)
+	analyticsDB.SetConnMaxLifetime(30 * time.Minute)
 
 	// Derive a 32-byte AES-256 key from RELAY_SECRET_KEY for encrypting secrets at rest.
 	var secretKey []byte
@@ -4862,11 +4871,18 @@ func main() {
 	go s.runLaneExpiryWorker()
 	go s.runHousekeepingWorker()
 
-	// Start worker pool: deploy jobs are I/O-bound (git, image pull/push, container
-	// start), so use all available CPUs with a minimum of 2.
+	// Start worker pool: deploy jobs are I/O-bound (git, image pull/push,
+	// container ops), so we can run more workers than CPU cores. On very small
+	// hosts, cap the pool so two simultaneous Docker builds don't race for the
+	// same RAM budget and OOM-kill each other.
 	n := runtime.NumCPU()
 	if n < 2 {
 		n = 2
+	}
+	if total := hostTotalMemMB(); total > 0 && total <= 1024 {
+		n = 1 // single build at a time on hosts ≤ 1 GB
+	} else if total > 0 && total <= 2200 && n > 2 {
+		n = 2 // cap at 2 on small hosts so builds don't race for RAM
 	}
 	s.worker(n)
 
@@ -8696,6 +8712,19 @@ func (s *Server) runDeploy(job DeployJob) {
 	} else {
 		// Build step. If relay.config.json specified a Dockerfile path,
 		// pass it to the build so advanced users can provide custom files.
+
+		// Pre-build disk check: if available space is below 2 GB, trigger an
+		// immediate housekeeping pass before the build fills the disk. Docker
+		// image layers can quietly consume tens of GB without an explicit prune,
+		// and a full disk turns a successful build into a hard failure.
+		if avail := diskAvailableMB(s.dataDir); avail > 0 && avail < 2048 {
+			log("pre-build: only %d MB disk available — running housekeeping pass", avail)
+			s.pruneDeployImages()
+			if after := diskAvailableMB(s.dataDir); after > 0 {
+				log("pre-build: %d MB available after prune", after)
+			}
+		}
+
 		log("docker build starting...")
 		if total := hostTotalMemMB(); total > 0 && total <= 2200 && hostSwapTotalMB() == 0 {
 			// Last-chance swap provisioning: covers hosts where startup ran
@@ -8741,7 +8770,7 @@ func (s *Server) runDeploy(job DeployJob) {
 		if buildEnvB64 != "" {
 			buildArgs = map[string]string{relayBuildEnvArg: buildEnvB64}
 		}
-		if err := s.runtime.Build(buildCtx, artifactRef, buildContextDir, wrappedDockerfilePath, buildArgs, logf); err != nil {
+		if err := s.runtime.Build(buildCtx, artifactRef, buildContextDir, wrappedDockerfilePath, buildArgs, logf, plan.Kind); err != nil {
 			end := time.Now()
 			d.Status = StatusFailed
 			d.EndedAt = &end
@@ -9368,13 +9397,21 @@ func edgeProxyPublishedPortChanged(runtime ContainerRuntime, app string, env Dep
 }
 
 func (s *Server) requeueDeployLater(job DeployJob, delay time.Duration) {
-	time.AfterFunc(delay, func() {
-		select {
-		case s.queue <- job:
-		default:
-			s.requeueDeployLater(job, delay)
+	// One goroutine per requeue attempt; retries up to 10 times with the same
+	// delay before giving up. The old recursive time.AfterFunc approach spawned
+	// a new timer on every queue-full check — creating an unbounded chain of
+	// goroutines if the queue stayed saturated for a long time.
+	go func() {
+		for attempt := 0; attempt < 10; attempt++ {
+			time.Sleep(delay)
+			select {
+			case s.queue <- job:
+				return
+			default:
+			}
 		}
-	})
+		fmt.Printf("deploy %s: requeue abandoned after 10 attempts — queue saturated\n", job.ID)
+	}()
 }
 
 func (s *Server) workspaceRepoDir(app string, env DeployEnv, branch string) string {
@@ -14692,7 +14729,12 @@ func nodeInstallCmd(repoDir string) string {
 	case "yarn":
 		return "corepack enable && yarn install --frozen-lockfile --silent"
 	default:
-		return "npm ci --prefer-offline --no-audit --no-fund"
+		// --no-optional skips packages listed under optionalDependencies (native
+		// speed-up modules, platform-specific binaries, etc.) which are the
+		// heaviest to install and the first to exhaust memory during post-install
+		// scripts. Apps that genuinely need an optional dep can override via
+		// relay.config.json install_cmd.
+		return "npm ci --prefer-offline --no-audit --no-fund --no-optional"
 	}
 }
 
@@ -14703,7 +14745,7 @@ func nodeProdInstallCmd(repoDir string) string {
 	case "yarn":
 		return "corepack enable && yarn install --frozen-lockfile --production=true --silent"
 	default:
-		return "npm ci --omit=dev --prefer-offline --no-audit --no-fund"
+		return "npm ci --omit=dev --prefer-offline --no-audit --no-fund --no-optional"
 	}
 }
 
