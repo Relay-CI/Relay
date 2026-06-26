@@ -238,6 +238,7 @@ type DeployRequest struct {
 
 	CommitMessage string `json:"commit_message,omitempty"`
 	DeployedBy    string `json:"-"` // username of the user who triggered the deploy
+	GitToken      string `json:"-"` // injected at clone time, never serialized
 }
 
 type Deploy struct {
@@ -309,6 +310,7 @@ type AppState struct {
 	MemLimit             string    `json:"mem_limit,omitempty"`
 	ResourceMode         string    `json:"resource_mode,omitempty"`
 	Volumes              []string  `json:"volumes,omitempty"`
+	GitToken             string    `json:"-"` // stored in DB but never in API responses
 }
 
 // ---------------------- Multi-service / Project config ----------------------
@@ -6531,7 +6533,9 @@ func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sess.UploadedBytes += n
-	_ = s.saveSessionToDB(sess)
+	if err := s.saveSessionToDB(sess); err != nil {
+		fmt.Fprintf(os.Stderr, "saveSessionToDB %s: %v\n", sess.ID, err)
+	}
 
 	writeJSON(w, 200, map[string]string{"ok": "true"})
 }
@@ -6733,7 +6737,9 @@ func (s *Server) handleSyncFinish(w http.ResponseWriter, r *http.Request) {
 				st = &AppState{App: sess.App, Env: sess.Env, Branch: sess.Branch}
 			}
 			st.Engine = eng
-			_ = s.saveAppState(st)
+			if err := s.saveAppState(st); err != nil {
+				fmt.Fprintf(os.Stderr, "handleSyncComplete saveAppState %s: %v\n", sess.App, err)
+			}
 		}
 	}
 
@@ -6792,7 +6798,9 @@ func (s *Server) handleSyncFinish(w http.ResponseWriter, r *http.Request) {
 	s.deploys[deployID] = deploy
 	s.mu.Unlock()
 
-	_ = s.saveDeployToDB(deploy, req)
+	if err := s.saveDeployToDB(deploy, req); err != nil {
+		fmt.Fprintf(os.Stderr, "saveDeployToDB %s: %v\n", deployID, err)
+	}
 	s.emitDeployNotificationsByID(deployID)
 	s.auditLog(deployedBy, "deploy.trigger", sess.App, fmt.Sprintf("build #%d env=%s branch=%s", buildNum, sess.Env, sess.Branch))
 	s.queue <- DeployJob{ID: deployID, Req: req}
@@ -6801,7 +6809,9 @@ func (s *Server) handleSyncFinish(w http.ResponseWriter, r *http.Request) {
 	s.syncMu.Lock()
 	delete(s.syncSessions, sessionID)
 	s.syncMu.Unlock()
-	_ = s.deleteSessionFromDB(sessionID)
+	if err := s.deleteSessionFromDB(sessionID); err != nil {
+		fmt.Fprintf(os.Stderr, "deleteSessionFromDB %s: %v\n", sessionID, err)
+	}
 
 	writeJSON(w, 200, map[string]any{
 		"id":                deploy.ID,
@@ -6915,8 +6925,8 @@ func (s *Server) handleGithubWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	query := `SELECT app, env, branch, mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(webhook_secret,'') FROM app_state WHERE repo_url IN (` +
-		strings.Repeat("?,", len(repoURLs)-1) + `?) AND branch=?`
+	query := `SELECT app, env, branch, mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(webhook_secret,''), COALESCE(git_token,'') FROM app_state WHERE repo_url IN (` +
+		strings.Repeat("?,", len(repoURLs)-1) + `?) AND branch=? AND (stopped IS NULL OR stopped=0)`
 	args := make([]any, 0, len(repoURLs)+1)
 	for _, u := range repoURLs {
 		args = append(args, u)
@@ -6937,8 +6947,8 @@ func (s *Server) handleGithubWebhook(w http.ResponseWriter, r *http.Request) {
 	secretProtected := 0
 	for rows.Next() {
 		var st AppState
-		var envS, webhookSecret string
-		if err := rows.Scan(&st.App, &envS, &st.Branch, &st.Mode, &st.HostPort, &st.HostPortExplicit, &st.ServicePort, &st.PublicHost, &webhookSecret); err != nil {
+		var envS, webhookSecret, gitToken string
+		if err := rows.Scan(&st.App, &envS, &st.Branch, &st.Mode, &st.HostPort, &st.HostPortExplicit, &st.ServicePort, &st.PublicHost, &webhookSecret, &gitToken); err != nil {
 			continue
 		}
 		st.Env = DeployEnv(envS)
@@ -6954,6 +6964,11 @@ func (s *Server) handleGithubWebhook(w http.ResponseWriter, r *http.Request) {
 			if !verifyGithubSig256([]byte(webhookSecret), body, sig) {
 				continue
 			}
+		}
+
+		if !s.webhookAllowed(payload.Repository.CloneURL) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{"status": "rate_limited", "triggered": 0})
+			return
 		}
 
 		deployID := newID()
@@ -6986,21 +7001,20 @@ func (s *Server) handleGithubWebhook(w http.ResponseWriter, r *http.Request) {
 			ServicePort:      st.ServicePort,
 			PublicHost:       st.PublicHost,
 			CommitMessage:    commitMsg,
+			GitToken:         gitToken,
 		}
 
 		s.mu.Lock()
 		s.deploys[deployID] = deploy
 		s.mu.Unlock()
 
-		_ = s.saveDeployToDB(deploy, req)
+		if err := s.saveDeployToDB(deploy, req); err != nil {
+			fmt.Fprintf(os.Stderr, "saveDeployToDB %s: %v\n", deployID, err)
+		}
 		s.emitDeployNotificationsByID(deployID)
 		shortSHA := payload.After
 		if len(shortSHA) > 7 {
 			shortSHA = shortSHA[:7]
-		}
-		if !s.webhookAllowed(payload.Repository.CloneURL) {
-			writeJSON(w, http.StatusTooManyRequests, map[string]any{"status": "rate_limited", "triggered": 0})
-			return
 		}
 		s.auditLog("github", "deploy.trigger", st.App, fmt.Sprintf("build #%d commit=%s env=%s", buildNum, shortSHA, st.Env))
 		s.queue <- DeployJob{ID: deployID, Req: req}
@@ -7410,6 +7424,8 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 			CPULimit             *string   `json:"cpu_limit"`
 			MemLimit             *string   `json:"mem_limit"`
 			ResourceMode         *string   `json:"resource_mode"`
+			Volumes              *[]string `json:"volumes"`
+			GitToken             *string   `json:"git_token"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httpError(w, 400, "invalid json")
@@ -7587,6 +7603,18 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 			}
 			st.ResourceMode = mode
 		}
+		if body.Volumes != nil {
+			cleaned := make([]string, 0, len(*body.Volumes))
+			for _, v := range *body.Volumes {
+				if t := strings.TrimSpace(v); t != "" {
+					cleaned = append(cleaned, t)
+				}
+			}
+			st.Volumes = cleaned
+		}
+		if body.GitToken != nil {
+			st.GitToken = strings.TrimSpace(*body.GitToken)
+		}
 		if normalizeAccessPolicy(st.AccessPolicy) == AccessPolicyIPAllowlist && strings.TrimSpace(st.IPAllowlist) == "" {
 			httpError(w, 400, "ip_allowlist is required when access_policy is ip-allowlist")
 			return
@@ -7646,7 +7674,12 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, 200, map[string]any{})
 			return
 		}
-		writeJSON(w, 200, st)
+		// Marshal AppState then inject git_token_set so the token itself is never in responses.
+		stBytes, _ := json.Marshal(st)
+		var stMap map[string]any
+		_ = json.Unmarshal(stBytes, &stMap)
+		stMap["git_token_set"] = st.GitToken != ""
+		writeJSON(w, 200, stMap)
 
 	default:
 		httpError(w, 405, "method not allowed")
@@ -8242,6 +8275,9 @@ func (s *Server) runDeploy(job DeployJob) {
 		if req.RepoURL == "" {
 			req.RepoURL = state.RepoURL
 		}
+		if req.GitToken == "" {
+			req.GitToken = state.GitToken
+		}
 		if req.Mode == "" {
 			req.Mode = state.Mode
 		}
@@ -8319,12 +8355,22 @@ func (s *Server) runDeploy(job DeployJob) {
 		repoDir = filepath.Join(workspace, "repo")
 		mustMkdir(repoDir)
 		log("source is git: preparing repo from %s [%s]", req.RepoURL, req.Branch)
+
+		// Build an authenticated clone URL if a git token is set. The token is
+		// injected as the URL userinfo so git uses it for HTTPS auth without
+		// needing a credential helper. req.RepoURL is kept clean for logs.
+		cloneURL := req.RepoURL
+		if req.GitToken != "" {
+			if u, err := url.Parse(req.RepoURL); err == nil && (u.Scheme == "https" || u.Scheme == "http") {
+				u.User = url.UserPassword("x-access-token", req.GitToken)
+				cloneURL = u.String()
+			}
+		}
+
 		if !fileExists(filepath.Join(repoDir, ".git")) {
 			log("cloning repository...")
-			// Clone into a temp dir then move or just clone into repoDir
-			// Since repoDir exists (mustMkdir), we might need to remove it or clone inside
 			_ = os.RemoveAll(repoDir)
-			if err := runCmdLoggedCtx(buildCtx, workspace, logf, "git", "clone", "--depth", "1", "--branch", req.Branch, req.RepoURL, "repo"); err != nil {
+			if err := runCmdLoggedCtx(buildCtx, workspace, logf, "git", "clone", "--depth", "1", "--branch", req.Branch, cloneURL, "repo"); err != nil {
 				failDeploy(s, d, err, "git clone failed: "+err.Error())
 				return
 			}
@@ -8333,7 +8379,7 @@ func (s *Server) runDeploy(job DeployJob) {
 			if err := runCmdLoggedCtx(buildCtx, repoDir, logf, "git", "fetch", "--depth=1", "origin", req.Branch); err != nil {
 				log("fetch failed, attempting clean clone: %v", err)
 				_ = os.RemoveAll(repoDir)
-				if err := runCmdLoggedCtx(buildCtx, workspace, logf, "git", "clone", "--depth", "1", "--branch", req.Branch, req.RepoURL, "repo"); err != nil {
+				if err := runCmdLoggedCtx(buildCtx, workspace, logf, "git", "clone", "--depth", "1", "--branch", req.Branch, cloneURL, "repo"); err != nil {
 					failDeploy(s, d, err, "git clone failed after retry: "+err.Error())
 					return
 				}
@@ -13099,6 +13145,7 @@ func migrateDB(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN spec_hash TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN repo_hash TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN volumes TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN git_token TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE users ADD COLUMN created_at INTEGER`)
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS server_config (key TEXT PRIMARY KEY, value TEXT)`)
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS users (
@@ -13398,22 +13445,39 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		id := newID()
-		if _, err = s.db.Exec(
+		tx, err := s.db.Begin()
+		if err != nil {
+			httpError(w, 500, "db error")
+			return
+		}
+		if _, err = tx.Exec(
 			`INSERT INTO users (id, username, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)`,
 			id, body.Username, hash, role, time.Now().UnixMilli(),
 		); err != nil {
+			_ = tx.Rollback()
 			httpError(w, 409, "username already exists")
 			return
 		}
-		for i := range body.Permissions {
-			body.Permissions[i].UserID = id
+		perms := normalizeUserPermissions(body.Permissions)
+		for i := range perms {
+			perms[i].UserID = id
 		}
-		if err := s.replaceUserPermissions(id, body.Permissions); err != nil {
-			httpError(w, 500, "failed to save permissions")
+		for _, perm := range perms {
+			if _, err = tx.Exec(
+				`INSERT INTO user_permissions (user_id, app, env, role) VALUES (?, ?, ?, ?)`,
+				id, perm.App, perm.Env, perm.Role,
+			); err != nil {
+				_ = tx.Rollback()
+				httpError(w, 500, "failed to save permissions")
+				return
+			}
+		}
+		if err = tx.Commit(); err != nil {
+			httpError(w, 500, "db error")
 			return
 		}
 		s.auditLog(sess.Username, "user.create", body.Username, "role="+role)
-		writeJSON(w, 200, map[string]any{"id": id, "username": body.Username, "role": role, "permissions": normalizeUserPermissions(body.Permissions)})
+		writeJSON(w, 200, map[string]any{"id": id, "username": body.Username, "role": role, "permissions": perms})
 
 	default:
 		httpError(w, 405, "method not allowed")
@@ -13624,13 +13688,19 @@ func (s *Server) emitDeployNotificationsByID(deployID string) {
 		for _, endpoint := range webhooks {
 			req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
 			if err != nil {
+				fmt.Fprintf(os.Stderr, "notification webhook: build request for %s: %v\n", endpoint, err)
 				continue
 			}
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := client.Do(req)
-			if err == nil && resp != nil {
-				_ = resp.Body.Close()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "notification webhook: post to %s: %v\n", endpoint, err)
+				continue
 			}
+			if resp.StatusCode >= 400 {
+				fmt.Fprintf(os.Stderr, "notification webhook: %s returned %d\n", endpoint, resp.StatusCode)
+			}
+			_ = resp.Body.Close()
 		}
 	}()
 }
@@ -13652,7 +13722,9 @@ func failDeploy(s *Server, d *Deploy, err error, msg string) {
 	d.Status = StatusFailed
 	d.EndedAt = &end
 	d.Error = msg
-	_ = s.updateDeployStatus(d.ID, d.Status, d.Error, d.StartedAt, d.EndedAt, "", "")
+	if dbErr := s.updateDeployStatus(d.ID, d.Status, d.Error, d.StartedAt, d.EndedAt, "", ""); dbErr != nil {
+		fmt.Fprintf(os.Stderr, "failDeploy updateDeployStatus %s: %v\n", d.ID, dbErr)
+	}
 }
 
 func scanDeployRow(scanner interface {
@@ -13775,23 +13847,23 @@ func (s *Server) reconcileStaleDeploysOnStartup() error {
 func (s *Server) saveAppState(st *AppState) error {
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO app_state
-		(app, env, branch, repo_url, project_root, build_context, dockerfile, engine, current_image, previous_image, mode, host_port, host_port_explicit, service_port, public_host, public_hosts, active_slot, standby_slot, drain_until, traffic_mode, access_policy, ip_allowlist, repo_hash, expires_at, webhook_secret, notification_webhooks, traffic_split_percent, rollout_min_requests, rollout_error_percent, rollout_assess_seconds, rollout_started_at, rollout_deploy_id, rollout_status, stopped, cpu_limit, mem_limit, resource_mode, volumes, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(app, env, branch, repo_url, project_root, build_context, dockerfile, engine, current_image, previous_image, mode, host_port, host_port_explicit, service_port, public_host, public_hosts, active_slot, standby_slot, drain_until, traffic_mode, access_policy, ip_allowlist, repo_hash, expires_at, webhook_secret, notification_webhooks, traffic_split_percent, rollout_min_requests, rollout_error_percent, rollout_assess_seconds, rollout_started_at, rollout_deploy_id, rollout_status, stopped, cpu_limit, mem_limit, resource_mode, volumes, git_token, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		st.App, string(st.Env), st.Branch, st.RepoURL, st.ProjectRoot, st.BuildContext, st.Dockerfile, firstNonEmptyEngine(st.Engine), st.CurrentImage, st.PreviousImage, st.Mode,
-		st.HostPort, st.HostPortExplicit, st.ServicePort, st.PublicHost, encodePublicHosts(st.PublicHosts), normalizeActiveSlot(st.ActiveSlot), normalizeActiveSlot(st.StandbySlot), st.DrainUntil, firstNonEmpty(normalizeTrafficMode(st.TrafficMode), "edge"), firstNonEmpty(normalizeAccessPolicy(st.AccessPolicy), s.lanePolicy(st.Env).DefaultAccessPolicy), normalizeIPAllowlist(st.IPAllowlist), st.RepoHash, st.ExpiresAt, st.WebhookSecret, st.NotificationWebhooks, st.TrafficSplitPercent, st.RolloutMinRequests, st.RolloutErrorPercent, st.RolloutAssessSeconds, st.RolloutStartedAt, st.RolloutDeployID, st.RolloutStatus, st.Stopped, strings.TrimSpace(st.CPULimit), strings.TrimSpace(st.MemLimit), strings.TrimSpace(st.ResourceMode), encodeVolumes(st.Volumes), time.Now().UnixMilli(),
+		st.HostPort, st.HostPortExplicit, st.ServicePort, st.PublicHost, encodePublicHosts(st.PublicHosts), normalizeActiveSlot(st.ActiveSlot), normalizeActiveSlot(st.StandbySlot), st.DrainUntil, firstNonEmpty(normalizeTrafficMode(st.TrafficMode), "edge"), firstNonEmpty(normalizeAccessPolicy(st.AccessPolicy), s.lanePolicy(st.Env).DefaultAccessPolicy), normalizeIPAllowlist(st.IPAllowlist), st.RepoHash, st.ExpiresAt, st.WebhookSecret, st.NotificationWebhooks, st.TrafficSplitPercent, st.RolloutMinRequests, st.RolloutErrorPercent, st.RolloutAssessSeconds, st.RolloutStartedAt, st.RolloutDeployID, st.RolloutStatus, st.Stopped, strings.TrimSpace(st.CPULimit), strings.TrimSpace(st.MemLimit), strings.TrimSpace(st.ResourceMode), encodeVolumes(st.Volumes), st.GitToken, time.Now().UnixMilli(),
 	)
 	return err
 }
 
 func (s *Server) getAppState(app string, env DeployEnv, branch string) (*AppState, error) {
-	row := s.db.QueryRow(`SELECT app, env, branch, repo_url, COALESCE(project_root,''), COALESCE(build_context,''), COALESCE(dockerfile,''), COALESCE(engine,''), current_image, previous_image, mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(public_hosts,''), COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(repo_hash,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), COALESCE(stopped,0), COALESCE(cpu_limit,''), COALESCE(mem_limit,''), COALESCE(resource_mode,''), COALESCE(volumes,'')
+	row := s.db.QueryRow(`SELECT app, env, branch, repo_url, COALESCE(project_root,''), COALESCE(build_context,''), COALESCE(dockerfile,''), COALESCE(engine,''), current_image, previous_image, mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(public_hosts,''), COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(repo_hash,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), COALESCE(stopped,0), COALESCE(cpu_limit,''), COALESCE(mem_limit,''), COALESCE(resource_mode,''), COALESCE(volumes,''), COALESCE(git_token,'')
 		FROM app_state WHERE app=? AND env=? AND branch=?`, app, string(env), branch)
 
 	var st AppState
 	var envS string
 	var publicHostsRaw string
 	var volumesRaw string
-	if err := row.Scan(&st.App, &envS, &st.Branch, &st.RepoURL, &st.ProjectRoot, &st.BuildContext, &st.Dockerfile, &st.Engine, &st.CurrentImage, &st.PreviousImage, &st.Mode, &st.HostPort, &st.HostPortExplicit, &st.ServicePort, &st.PublicHost, &publicHostsRaw, &st.ActiveSlot, &st.StandbySlot, &st.DrainUntil, &st.TrafficMode, &st.AccessPolicy, &st.IPAllowlist, &st.RepoHash, &st.ExpiresAt, &st.WebhookSecret, &st.NotificationWebhooks, &st.TrafficSplitPercent, &st.RolloutMinRequests, &st.RolloutErrorPercent, &st.RolloutAssessSeconds, &st.RolloutStartedAt, &st.RolloutDeployID, &st.RolloutStatus, &st.Stopped, &st.CPULimit, &st.MemLimit, &st.ResourceMode, &volumesRaw); err != nil {
+	if err := row.Scan(&st.App, &envS, &st.Branch, &st.RepoURL, &st.ProjectRoot, &st.BuildContext, &st.Dockerfile, &st.Engine, &st.CurrentImage, &st.PreviousImage, &st.Mode, &st.HostPort, &st.HostPortExplicit, &st.ServicePort, &st.PublicHost, &publicHostsRaw, &st.ActiveSlot, &st.StandbySlot, &st.DrainUntil, &st.TrafficMode, &st.AccessPolicy, &st.IPAllowlist, &st.RepoHash, &st.ExpiresAt, &st.WebhookSecret, &st.NotificationWebhooks, &st.TrafficSplitPercent, &st.RolloutMinRequests, &st.RolloutErrorPercent, &st.RolloutAssessSeconds, &st.RolloutStartedAt, &st.RolloutDeployID, &st.RolloutStatus, &st.Stopped, &st.CPULimit, &st.MemLimit, &st.ResourceMode, &volumesRaw, &st.GitToken); err != nil {
 		return nil, err
 	}
 	st.Env = DeployEnv(envS)

@@ -343,6 +343,11 @@ export function buildSettingsConfig(
         rollout_started_at?: number;
         rollout_deploy_id?: string;
         rollout_status?: string;
+        cpu_limit?: string;
+        mem_limit?: string;
+        resource_mode?: string;
+        volumes?: string[];
+        git_token_set?: boolean;
       }
     | null,
 ): Record<string, unknown> {
@@ -370,6 +375,12 @@ export function buildSettingsConfig(
     rollout_started_at: selectedEnv?.rollout_started_at ?? 0,
     rollout_deploy_id: selectedEnv?.rollout_deploy_id ?? "",
     rollout_status: selectedEnv?.rollout_status ?? "",
+    cpu_limit: selectedEnv?.cpu_limit ?? "",
+    mem_limit: selectedEnv?.mem_limit ?? "",
+    resource_mode: selectedEnv?.resource_mode ?? "auto",
+    volumes: (selectedEnv as { volumes?: string[] } | null | undefined)?.volumes ?? [],
+    git_token_set: (selectedEnv as { git_token_set?: boolean } | null | undefined)?.git_token_set ?? false,
+    // git_token is intentionally omitted — it's write-only and never returned by the server
   });
 }
 

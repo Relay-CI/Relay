@@ -105,8 +105,12 @@ export function UsersPage({ currentUser }: UsersPageProps) {
 
   async function handleDelete(id: string) {
     if (!confirm("Delete this user?")) return;
-    await deleteUser(id);
-    await load();
+    try {
+      await deleteUser(id);
+      await load();
+    } catch (err) {
+      setNotice({ tone: "danger", text: err instanceof Error ? err.message : "Failed to delete user" });
+    }
   }
 
   return (

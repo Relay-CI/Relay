@@ -345,6 +345,9 @@ export interface AppConfig {
   cpu_limit?: string;
   mem_limit?: string;
   resource_mode?: "manual" | "auto";
+  volumes?: string[];
+  git_token?: string;        // write-only: set to clear or replace; never returned by server
+  git_token_set?: boolean;   // read-only: true when a token is stored
 }
 
 export async function getAppConfig(target: AppTarget): Promise<AppConfig> {

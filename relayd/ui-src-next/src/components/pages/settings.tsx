@@ -266,8 +266,10 @@ export function SettingsPage({
 
   function toApiPayload(cfg: AppConfig) {
     const publicHosts = normalizeHostEntries(cfg.public_hosts ?? []);
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { git_token_set: _gts, ...rest } = cfg;
     return {
-      ...cfg,
+      ...rest,
       mode: uiModeToApi(cfg.mode),
       traffic_mode: uiTrafficModeToApi(cfg.traffic_mode),
       host_port: Number(cfg.host_port) || 0,
@@ -1245,6 +1247,83 @@ export function SettingsPage({
         </div>
       </SectionCard>
 
+      <SectionCard title="Resource Limits" eyebrow="Container constraints">
+        <div className="space-y-4">
+          <SegmentCard
+            label="Resource Mode"
+            description={
+              (config.resource_mode ?? "auto") === "manual"
+                ? "CPU and memory limits are set manually below."
+                : "Relay manages resource allocation automatically."
+            }
+          >
+            {[
+              { value: "auto", title: "Auto" },
+              { value: "manual", title: "Manual" },
+            ].map((o) => (
+              <SegButton
+                key={o.value}
+                active={(config.resource_mode ?? "auto") === o.value}
+                onClick={() => canWrite && upd({ resource_mode: o.value as "auto" | "manual" })}
+              >
+                {o.title}
+              </SegButton>
+            ))}
+          </SegmentCard>
+          {(config.resource_mode ?? "auto") === "manual" && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Field label="CPU Limit">
+                <input
+                  className="text-input"
+                  value={config.cpu_limit ?? ""}
+                  onChange={(e) => upd({ cpu_limit: e.target.value })}
+                  placeholder="e.g. 0.5, 1.5"
+                  disabled={!canWrite}
+                />
+                <p className="text-[11px] text-white/30 mt-1">Fractional cores. 0.5 = half a core. Leave blank for unlimited.</p>
+              </Field>
+              <Field label="Memory Limit">
+                <input
+                  className="text-input"
+                  value={config.mem_limit ?? ""}
+                  onChange={(e) => upd({ mem_limit: e.target.value })}
+                  placeholder="e.g. 256m, 1g"
+                  disabled={!canWrite}
+                />
+                <p className="text-[11px] text-white/30 mt-1">Docker memory limit, e.g. 256m, 512m, 1g. Leave blank for unlimited.</p>
+              </Field>
+            </div>
+          )}
+          <Field label="Bind Mounts">
+            <textarea
+              className="text-input min-h-22 resize-y font-mono text-xs"
+              value={(config.volumes ?? []).join("\n")}
+              onChange={(e) =>
+                upd({
+                  volumes: e.target.value
+                    .split(/\r?\n/)
+                    .map((l) => l.trim())
+                    .filter(Boolean),
+                })
+              }
+              placeholder={"/host/path:/container/path\n/data:/app/data"}
+              disabled={!canWrite}
+            />
+            <p className="text-[11px] text-white/30 mt-1">
+              One bind mount per line. Format: <code className="font-mono">/host/path:/container/path</code>. Persists data across deploys.
+            </p>
+          </Field>
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={busy || !canWrite}
+            className="primary-btn"
+          >
+            {busy ? "Saving..." : "Save Resource Config"}
+          </button>
+        </div>
+      </SectionCard>
+
       <SectionCard title="Manual Deploy" eyebrow="Rebuild or redeploy on demand">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <Field label="Deploy Source">
@@ -1298,6 +1377,17 @@ export function SettingsPage({
               className="text-input"
               value={config.repo_url ?? ""}
               onChange={(e) => upd({ repo_url: e.target.value })}
+              disabled={!canWrite}
+            />
+          </Field>
+          <Field label="Git Access Token">
+            <input
+              type="password"
+              autoComplete="new-password"
+              className="text-input"
+              value={config.git_token ?? ""}
+              onChange={(e) => upd({ git_token: e.target.value })}
+              placeholder={config.git_token_set ? "(token set — leave blank to keep, clear to remove)" : "ghp_..."}
               disabled={!canWrite}
             />
           </Field>
