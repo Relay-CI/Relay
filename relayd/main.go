@@ -11536,8 +11536,18 @@ func (s *Server) ensureGlobalProxy() error {
 	cf.WriteString("\t\tformat json\n")
 	cf.WriteString("\t}\n")
 	cf.WriteString("}\n\n")
+	// DNS-01 challenge support: hosts fronted by a tunnel/CDN (Cloudflare
+	// Tunnel, etc.) never let Let's Encrypt reach the origin directly, so
+	// HTTP-01 and TLS-ALPN-01 both fail. DNS-01 proves ownership via a TXT
+	// record instead and works regardless of what's in front of the origin.
+	// Requires a Caddy image built with the cloudflare-dns plugin, set via
+	// RELAY_CADDY_IMAGE (see docker/caddy/Dockerfile).
+	cfToken := strings.TrimSpace(os.Getenv("CLOUDFLARE_API_TOKEN"))
 	for _, r := range routes {
 		cf.WriteString(strings.TrimSpace(r.host) + " {\n")
+		if cfToken != "" {
+			cf.WriteString("\ttls {\n\t\tdns cloudflare {env.CLOUDFLARE_API_TOKEN}\n\t}\n")
+		}
 		cf.WriteString(r.block)
 		cf.WriteString("}\n\n")
 	}
@@ -11559,9 +11569,25 @@ func (s *Server) ensureGlobalProxy() error {
 		return errors.Join(connectErrs...)
 	}
 
+	image := getenv("RELAY_CADDY_IMAGE", "caddy:alpine")
+	// The image and Cloudflare token are only applied at container creation
+	// (Docker has no live "docker update --env" for a running container), so
+	// track what the container was last created with and force a recreate
+	// when either changes — otherwise flipping on CLOUDFLARE_API_TOKEN would
+	// silently do nothing until someone manually removes the container.
+	markerPath := filepath.Join(configDir, "container.marker")
+	desiredMarker := fmt.Sprintf("image=%s cf=%t", image, cfToken != "")
+	if s.runtime.IsRunning(containerName) {
+		if prev, _ := os.ReadFile(markerPath); string(prev) != desiredMarker {
+			s.runtime.Remove(containerName)
+		}
+	}
+	if err := os.WriteFile(markerPath, []byte(desiredMarker), 0644); err != nil {
+		return err
+	}
+
 	if !s.runtime.IsRunning(containerName) {
 		s.runtime.Remove(containerName)
-		image := getenv("RELAY_CADDY_IMAGE", "caddy:alpine")
 		// Ensure the image is available before attempting to run
 		_ = s.runtime.Pull(image)
 		spec := ContainerSpec{
@@ -11575,6 +11601,9 @@ func (s *Server) ensureGlobalProxy() error {
 			},
 			PortBindings: []string{"80:80", "443:443", "443:443/udp"},
 			ExtraHosts:   []string{"host.docker.internal:host-gateway"},
+		}
+		if cfToken != "" {
+			spec.Env = append(spec.Env, "CLOUDFLARE_API_TOKEN="+cfToken)
 		}
 		if err := s.runtime.RunDetached(spec); err != nil {
 			return fmt.Errorf("global proxy start: %w", err)
