@@ -10,8 +10,44 @@ on:
 permissions:
   contents: write
   id-token: write
+  packages: write
 
 jobs:
+  # ── Build + publish the custom Caddy image (Cloudflare DNS-01 plugin) ──────
+  build-caddy-image:
+    name: Build Caddy image (cloudflare-dns)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/caddy
+          push: true
+          tags: |
+            ghcr.io/relay-ci/relay-caddy-cloudflare:${{ steps.version.outputs.tag }}
+            ghcr.io/relay-ci/relay-caddy-cloudflare:latest
+
+
   # ── Build Linux binaries (cross-compile for amd64 + arm64) ─────────────────
   build-linux:
     name: Build Linux (${{ matrix.arch }})
@@ -154,7 +190,7 @@ jobs:
             ```
 
             ### Windows — manual
-            Download `relay-windows-amd64.zip`, extract, and run `relayd.exe`.  
+            Download `relay-windows-amd64.zip`, extract, and run `relayd.exe`.
             Double-click `station.exe` for the Station Desktop UI.
 
             > No Go installation required — these are prebuilt binaries.

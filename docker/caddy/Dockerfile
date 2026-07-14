@@ -4,11 +4,14 @@
 # other setup where Let's Encrypt can't reach the origin directly for
 # HTTP-01/TLS-ALPN-01).
 #
-# Build:
+# Published on every release by .github/workflows/release.yml:
+#   ghcr.io/relay-ci/relay-caddy-cloudflare:latest
+#
+# To build locally instead:
 #   docker build -t relay-caddy-cloudflare:latest -f docker/caddy/Dockerfile docker/caddy
 #
 # Run relayd with:
-#   RELAY_CADDY_IMAGE=relay-caddy-cloudflare:latest
+#   RELAY_CADDY_IMAGE=ghcr.io/relay-ci/relay-caddy-cloudflare:latest
 #   CLOUDFLARE_API_TOKEN=<token scoped to Zone:DNS:Edit on the target zone>
 
 FROM caddy:builder AS builder
