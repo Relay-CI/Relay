@@ -607,7 +607,14 @@ func (r *DockerRuntime) Exec(container string, cmd []string) ([]byte, error) {
 }
 
 func (r *DockerRuntime) NetworkConnect(container, network string) error {
-	return exec.Command("docker", "network", "connect", network, container).Run()
+	out, err := exec.Command("docker", "network", "connect", network, container).CombinedOutput()
+	if err != nil && strings.Contains(strings.ToLower(string(out)), "already exists in network") {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("docker network connect %s %s: %w (%s)", network, container, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func (r *DockerRuntime) EnsureNetwork(name string) error {
@@ -11430,7 +11437,7 @@ func (s *Server) ensureGlobalProxy() error {
 		return err
 	}
 
-	rows, err := s.db.Query(`SELECT public_host, COALESCE(public_hosts,''), COALESCE(host_port, 0) FROM app_state WHERE (public_host != '' OR COALESCE(public_hosts,'') != '') AND COALESCE(stopped,0)=0`)
+	rows, err := s.db.Query(`SELECT app, env, branch, COALESCE(engine,'docker'), public_host, COALESCE(public_hosts,''), COALESCE(host_port, 0) FROM app_state WHERE (public_host != '' OR COALESCE(public_hosts,'') != '') AND COALESCE(stopped,0)=0`)
 	if err != nil {
 		return err
 	}
@@ -11442,6 +11449,7 @@ func (s *Server) ensureGlobalProxy() error {
 	}
 	routeIndex := map[string]int{}
 	var routes []route
+	dockerNetworks := map[string]struct{}{}
 	setRoute := func(host string, block string) {
 		host = strings.TrimSpace(host)
 		if host == "" || strings.TrimSpace(block) == "" {
@@ -11455,21 +11463,32 @@ func (s *Server) ensureGlobalProxy() error {
 		routes = append(routes, route{host: host, block: block})
 	}
 	for rows.Next() {
+		var app string
+		var env DeployEnv
+		var branch string
+		var engine string
 		var publicHost string
 		var publicHostsRaw string
 		var hostPort int
-		if err := rows.Scan(&publicHost, &publicHostsRaw, &hostPort); err != nil {
-			continue
-		}
-		if hostPort <= 0 {
+		if err := rows.Scan(&app, &env, &branch, &engine, &publicHost, &publicHostsRaw, &hostPort); err != nil {
 			continue
 		}
 		primary, hosts := canonicalizePublicHosts(publicHost, parsePublicHosts(publicHostsRaw))
 		if primary == "" {
 			continue
 		}
+		upstream := ""
+		if firstNonEmptyEngine(engine) == EngineDocker {
+			upstream = fmt.Sprintf("%s:3000", appBaseContainerName(app, env, branch))
+			dockerNetworks[appNetworkName(app, env, branch)] = struct{}{}
+		} else if hostPort > 0 {
+			upstream = fmt.Sprintf("host.docker.internal:%d", hostPort)
+		}
+		if upstream == "" {
+			continue
+		}
 		for _, host := range hosts {
-			setRoute(host, fmt.Sprintf("\treverse_proxy host.docker.internal:%d\n", hostPort))
+			setRoute(host, fmt.Sprintf("\treverse_proxy %s\n", upstream))
 		}
 	}
 	if dashboardHost := strings.TrimSpace(s.serverDashboardHost()); dashboardHost != "" {
@@ -11525,6 +11544,20 @@ func (s *Server) ensureGlobalProxy() error {
 	if err := os.WriteFile(configPath, []byte(cf.String()), 0644); err != nil {
 		return err
 	}
+	connectDockerNetworks := func() error {
+		networks := make([]string, 0, len(dockerNetworks))
+		for network := range dockerNetworks {
+			networks = append(networks, network)
+		}
+		sort.Strings(networks)
+		var connectErrs []error
+		for _, network := range networks {
+			if err := s.runtime.NetworkConnect(containerName, network); err != nil {
+				connectErrs = append(connectErrs, fmt.Errorf("connect global proxy to %s: %w", network, err))
+			}
+		}
+		return errors.Join(connectErrs...)
+	}
 
 	if !s.runtime.IsRunning(containerName) {
 		s.runtime.Remove(containerName)
@@ -11546,14 +11579,15 @@ func (s *Server) ensureGlobalProxy() error {
 		if err := s.runtime.RunDetached(spec); err != nil {
 			return fmt.Errorf("global proxy start: %w", err)
 		}
-		return nil
+		return connectDockerNetworks()
 	}
 
+	connectErr := connectDockerNetworks()
 	out, reloadErr := s.runtime.Exec(containerName, []string{"caddy", "reload", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"})
 	if reloadErr != nil {
-		return fmt.Errorf("global proxy reload: %v (%s)", reloadErr, strings.TrimSpace(string(out)))
+		return errors.Join(connectErr, fmt.Errorf("global proxy reload: %v (%s)", reloadErr, strings.TrimSpace(string(out))))
 	}
-	return nil
+	return connectErr
 }
 
 // repairLegacyAppHostPortsFromRuntime backfills missing persisted host ports for
