@@ -12,6 +12,10 @@ permissions:
   contents: write
   id-token: write
 
+concurrency:
+  group: auto-release-main
+  cancel-in-progress: false
+
 jobs:
   # ── Step 1: Bump version, commit, tag ──────────────────────────────────────
   bump:
