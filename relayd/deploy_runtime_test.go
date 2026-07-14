@@ -425,7 +425,7 @@ func TestEnsureGlobalProxyRepairsLegacyHostPortsBeforeWritingConfig(t *testing.T
 		t.Fatalf("read caddyfile: %v", err)
 	}
 	text := string(data)
-	if !strings.Contains(text, "myhltv.example.com {\n\treverse_proxy host.docker.internal:3002\n}") {
+	if !strings.Contains(text, "myhltv.example.com {\n\treverse_proxy "+containerName+":3000\n}") {
 		t.Fatalf("expected repaired host route in caddyfile, got:\n%s", text)
 	}
 
@@ -440,6 +440,7 @@ func TestEnsureGlobalProxyRepairsLegacyHostPortsBeforeWritingConfig(t *testing.T
 
 func TestEnsureGlobalProxyWritesAllPublicHostAliases(t *testing.T) {
 	s := newPreviewPortTestServer(t)
+	rt := s.runtime.(*mockRuntime)
 
 	if err := s.saveAppState(&AppState{
 		App:         "myhltv",
@@ -465,11 +466,49 @@ func TestEnsureGlobalProxyWritesAllPublicHostAliases(t *testing.T) {
 		t.Fatalf("read caddyfile: %v", err)
 	}
 	text := string(data)
-	if !strings.Contains(text, "myhltv.example.com {\n\treverse_proxy host.docker.internal:3002\n}") {
+	upstream := appBaseContainerName("myhltv", EnvProd, "main") + ":3000"
+	if !strings.Contains(text, "myhltv.example.com {\n\treverse_proxy "+upstream+"\n}") {
 		t.Fatalf("expected primary host route in caddyfile, got:\n%s", text)
 	}
-	if !strings.Contains(text, "www.myhltv.example.com {\n\treverse_proxy host.docker.internal:3002\n}") {
+	if !strings.Contains(text, "www.myhltv.example.com {\n\treverse_proxy "+upstream+"\n}") {
 		t.Fatalf("expected alias host route in caddyfile, got:\n%s", text)
+	}
+	if !rt.hasNetworkConnection("relay-global-proxy", appNetworkName("myhltv", EnvProd, "main")) {
+		t.Fatalf("expected global proxy to join app network, got connections: %v", rt.networkConnections)
+	}
+}
+
+func TestEnsureGlobalProxyKeepsStationLaneOnHostPort(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	rt := s.runtime.(*mockRuntime)
+
+	if err := s.saveAppState(&AppState{
+		App:        "desktop-app",
+		Env:        EnvProd,
+		Branch:     "main",
+		Engine:     EngineStation,
+		Mode:       "traefik",
+		HostPort:   3010,
+		PublicHost: "desktop.example.com",
+		Stopped:    false,
+	}); err != nil {
+		t.Fatalf("save app state: %v", err)
+	}
+
+	if err := s.ensureGlobalProxy(); err != nil {
+		t.Fatalf("ensure global proxy: %v", err)
+	}
+
+	configPath := filepath.Join(s.dataDir, "global-proxy", "Caddyfile")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read caddyfile: %v", err)
+	}
+	if !strings.Contains(string(data), "desktop.example.com {\n\treverse_proxy host.docker.internal:3010\n}") {
+		t.Fatalf("expected station host-port route in caddyfile, got:\n%s", data)
+	}
+	if len(rt.networkConnections) != 0 {
+		t.Fatalf("station lane should not attach caddy to a docker network, got: %v", rt.networkConnections)
 	}
 }
 
@@ -650,9 +689,10 @@ func TestWaitForRuntimeContainerReadyFailsFastForExitedContainer(t *testing.T) {
 }
 
 type mockRuntime struct {
-	running   map[string]bool
-	exists    map[string]bool
-	published map[string]int
+	running            map[string]bool
+	exists             map[string]bool
+	published          map[string]int
+	networkConnections [][2]string
 }
 
 func (m *mockRuntime) RunDetached(ContainerSpec) error { return nil }
@@ -667,11 +707,22 @@ func (m *mockRuntime) IsRunning(name string) bool            { return m.running[
 func (m *mockRuntime) ContainerIP(string) string             { return "" }
 func (m *mockRuntime) PublishedPort(name string, _ int) int  { return m.published[name] }
 func (m *mockRuntime) Exec(string, []string) ([]byte, error) { return nil, nil }
-func (m *mockRuntime) NetworkConnect(string, string) error   { return nil }
-func (m *mockRuntime) EnsureNetwork(string) error            { return nil }
-func (m *mockRuntime) RemoveNetwork(string)                  {}
-func (m *mockRuntime) RemoveVolume(string)                   {}
-func (m *mockRuntime) Pull(string) error                     { return nil }
+func (m *mockRuntime) NetworkConnect(container, network string) error {
+	m.networkConnections = append(m.networkConnections, [2]string{container, network})
+	return nil
+}
+func (m *mockRuntime) hasNetworkConnection(container, network string) bool {
+	for _, connection := range m.networkConnections {
+		if connection[0] == container && connection[1] == network {
+			return true
+		}
+	}
+	return false
+}
+func (m *mockRuntime) EnsureNetwork(string) error { return nil }
+func (m *mockRuntime) RemoveNetwork(string)       {}
+func (m *mockRuntime) RemoveVolume(string)        {}
+func (m *mockRuntime) Pull(string) error          { return nil }
 func (m *mockRuntime) Build(context.Context, string, string, string, map[string]string, io.Writer, string) error {
 	return nil
 }
