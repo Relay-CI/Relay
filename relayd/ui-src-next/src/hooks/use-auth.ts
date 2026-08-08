@@ -28,13 +28,17 @@ export function useAuth() {
   // Fetch session without showing the loading spinner (silent background check).
   // Call withLoading=true only on the very first mount check.
   const fetchSession = (withLoading: boolean) => {
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
     if (withLoading) {
       setState((prev) => ({ ...prev, loading: true }));
+      // Failsafe only for the initial blocking check: never leave the app stuck
+      // on the spinner if the very first session fetch hangs. A silent refresh
+      // must NOT arm this — a slow background fetch would otherwise flip an
+      // already-authenticated operator back to the login screen.
+      timeoutRef.current = setTimeout(() => {
+        setState({ loading: false, authed: false, user: null, setupAvailable: false, legacyMode: false, cliMode: false });
+      }, 5_000);
     }
-    if (timeoutRef.current) clearTimeout(timeoutRef.current);
-    timeoutRef.current = setTimeout(() => {
-      setState({ loading: false, authed: false, user: null, setupAvailable: false, legacyMode: false, cliMode: false });
-    }, 5_000);
     getSession()
       .then((session) => {
         if (timeoutRef.current) clearTimeout(timeoutRef.current);

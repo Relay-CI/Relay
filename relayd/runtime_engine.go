@@ -43,20 +43,6 @@ func detectDefaultEngine() string {
 	return EngineDocker
 }
 
-// ─── capability queries ───────────────────────────────────────────────────────
-
-func engineSupportsCompanions(engine string) bool {
-	return firstNonEmptyEngine(engine) == EngineDocker
-}
-
-func engineSupportsPublicHost(_ string) bool {
-	return true
-}
-
-func engineSupportsTrafficMode(_, trafficMode string) bool {
-	return normalizeTrafficMode(trafficMode) != "" || strings.TrimSpace(trafficMode) == ""
-}
-
 func (s *Server) runtimeForEngine(engine string) ContainerRuntime {
 	if firstNonEmptyEngine(engine) == EngineStation && s.stationRuntime != nil {
 		return s.stationRuntime
@@ -85,7 +71,7 @@ func constrainDeployRequestForEngine(engine string, req *DeployRequest) {
 	}
 	if req.Mode == "" {
 		if req.PublicHost != "" {
-			req.Mode = "traefik"											
+			req.Mode = "traefik"
 		} else {
 			req.Mode = "port"
 		}

@@ -45,6 +45,7 @@ export default function DashboardShell() {
   const [selectedProjectName, setSelectedProjectName] = useState("");
   const [selectedEnvKey, setSelectedEnvKey] = useState("");
   const [selectedDeploy, setSelectedDeploy] = useState<Deploy | null>(null);
+  const [cliHandoff, setCliHandoff] = useState<"idle" | "redirecting" | "failed">("idle");
 
   /* ── Derived project/env data ─────────────────────────────────────────── */
 
@@ -194,17 +195,24 @@ export default function DashboardShell() {
 
   // If the user is already authenticated and the URL has CLI params, mint a
   // code via the existing session and redirect back to the local CLI server.
+  // Without this, an operator who is already signed in lands on the dashboard
+  // and the CLI keeps waiting — they'd have to re-open the link manually.
   useEffect(() => {
     if (!auth.authed) return;
     const params = new URLSearchParams(window.location.search);
     if (params.get("cli") !== "1") return;
     const parsedPort = Number.parseInt(params.get("port") ?? "", 10);
     if (!Number.isInteger(parsedPort) || parsedPort <= 0 || parsedPort > 65535) return;
+    setCliHandoff("redirecting");
     cliStart(parsedPort)
       .then((resp) => {
-        if (resp.cli_redirect) window.location.assign(resp.cli_redirect);
+        if (resp.cli_redirect) {
+          window.location.assign(resp.cli_redirect);
+        } else {
+          setCliHandoff("failed");
+        }
       })
-      .catch(() => {/* ignore – fall through to normal dashboard */});
+      .catch(() => setCliHandoff("failed"));
   }, [auth.authed]);
 
   /* ── Auth gating ──────────────────────────────────────────────────────── */
@@ -216,6 +224,41 @@ export default function DashboardShell() {
           <div className="w-8 h-8 border-2 border-relay-accent border-t-transparent rounded-full animate-spin mx-auto mb-3" />
           <div className="eyebrow">Relayd Control Room</div>
           <div className="text-sm text-white/50 mt-1">Checking session…</div>
+        </div>
+      </div>
+    );
+  }
+
+  // Authenticated CLI handoff in progress: show a clear status instead of
+  // flashing the full dashboard while the browser hands control back to the CLI.
+  if (auth.authed && cliHandoff !== "idle") {
+    const failed = cliHandoff === "failed";
+    return (
+      <div className="min-h-screen bg-black flex items-center justify-center p-4">
+        <div className="text-center max-w-sm">
+          {failed ? (
+            <>
+              <div className="text-lg font-semibold text-white">Couldn’t return to the CLI</div>
+              <div className="text-sm text-white/50 mt-2">
+                The handoff to the Relay CLI failed. Return to your terminal and run{" "}
+                <span className="font-mono bg-white/[0.06] px-1.5 py-0.5 rounded">relay login</span> again,
+                or continue to the dashboard.
+              </div>
+              <button
+                type="button"
+                onClick={() => setCliHandoff("idle")}
+                className="mt-5 text-xs text-white/60 hover:text-white transition-colors"
+              >
+                Continue to dashboard
+              </button>
+            </>
+          ) : (
+            <>
+              <div className="w-8 h-8 border-2 border-relay-accent border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+              <div className="eyebrow">Relayd Control Room</div>
+              <div className="text-sm text-white/50 mt-1">Returning you to the Relay CLI…</div>
+            </>
+          )}
         </div>
       </div>
     );

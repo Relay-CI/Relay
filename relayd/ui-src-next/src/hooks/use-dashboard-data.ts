@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { getDeploys, getProjects, type Deploy, type Project } from "@/lib/api";
+import { getDeploys, getProjects, getSession, type Deploy, type Project } from "@/lib/api";
 import { hasActiveDeploysIn, normalizeProjects } from "@/lib/relay-utils";
 
 interface DashboardState {
@@ -40,6 +40,8 @@ export function useDashboardData(enabled: boolean): [DashboardState, () => Promi
   useEffect(() => {
     if (!enabled) return undefined;
     const es = new EventSource("/api/events", { withCredentials: true });
+    let closed = false;
+    let checkingAuth = false;
 
     es.addEventListener("snapshot", (e: MessageEvent) => {
       try {
@@ -56,6 +58,25 @@ export function useDashboardData(enabled: boolean): [DashboardState, () => Promi
     });
 
     es.onerror = () => {
+      // EventSource can't expose the HTTP status, so a session that expired
+      // mid-stream looks identical to a transient network blip — the browser
+      // just keeps auto-reconnecting and 401ing forever ("reconnecting…" with
+      // no recovery). Probe the session out-of-band: if it's actually gone,
+      // stop reconnecting and reload so the app falls back to the login screen.
+      if (!checkingAuth && !closed) {
+        checkingAuth = true;
+        getSession()
+          .then((session) => {
+            if (closed) return;
+            if (!session.authed) {
+              closed = true;
+              es.close();
+              window.location.reload();
+            }
+          })
+          .catch(() => {/* network still down — let EventSource keep retrying */})
+          .finally(() => { checkingAuth = false; });
+      }
       setState((prev) => ({
         ...prev,
         loading: false,
@@ -66,7 +87,7 @@ export function useDashboardData(enabled: boolean): [DashboardState, () => Promi
       }));
     };
 
-    return () => es.close();
+    return () => { closed = true; es.close(); };
   }, [enabled]);
 
   const manualRefresh = useCallback(async () => {

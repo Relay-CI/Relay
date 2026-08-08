@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"fmt"
 	"time"
 )
@@ -77,11 +76,4 @@ func (s *Server) expireLanesOnce() {
 	if changed {
 		s.broadcastSnapshot()
 	}
-}
-
-func scanNullableInt64(value sql.NullInt64) int64 {
-	if !value.Valid {
-		return 0
-	}
-	return value.Int64
 }

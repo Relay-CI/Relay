@@ -33,6 +33,20 @@ func housekeepingImageRetentionPerLane() int {
 	return 3
 }
 
+// housekeepingBuildCacheKeepGB caps how much BuildKit build cache to retain.
+// RELAY_BUILD_CACHE_KEEP_GB overrides the 5 GB default; 0 disables the cap
+// (never prune cache). This is the single biggest silent disk consumer: cache
+// mounts and layer cache are NOT touched by `docker image prune`, so without
+// this a busy host accumulates tens of GB of build cache until the disk fills.
+func housekeepingBuildCacheKeepGB() int {
+	if v := strings.TrimSpace(os.Getenv("RELAY_BUILD_CACHE_KEEP_GB")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return 5
+}
+
 // housekeepingInterval returns how often to run the full housekeeping pass.
 // On small hosts (≤2.2 GB RAM) images and logs accumulate faster relative to
 // available disk, and BuildKit cache eviction silently destroys incremental
@@ -63,11 +77,47 @@ func diskAvailableMB(path string) int {
 	return 0
 }
 
+// superviseWorker runs a long-lived worker goroutine and restarts it if it
+// panics. An unrecovered panic in any goroutine crashes the entire relayd
+// process, so every background worker is launched through this guard. A clean
+// return (a worker that intentionally stops, e.g. a disabled feature) is NOT
+// restarted — only panics trigger the restart-after-delay.
+func superviseWorker(name string, fn func()) {
+	for {
+		if !runGuarded(name, fn) {
+			return // worker returned normally; it chose to stop
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+// runGuarded runs fn with a panic guard and reports whether it panicked.
+func runGuarded(name string, fn func()) (panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			panicked = true
+			fmt.Printf("%s: recovered from panic, restarting in 5s: %v\n", name, r)
+		}
+	}()
+	fn()
+	return false
+}
+
 func (s *Server) runHousekeepingWorker() {
 	// Let startup (and any boot-time deploys) settle before the first pass.
 	time.Sleep(2 * time.Minute)
 	for {
-		s.housekeepOnce()
+		// A panic in a pass (e.g. an unexpected DB/exec state) would otherwise
+		// crash the whole relayd process. Contain it so housekeeping degrades
+		// to a skipped pass instead of taking the server down.
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Printf("housekeeping: recovered from panic during pass: %v\n", r)
+				}
+			}()
+			s.housekeepOnce()
+		}()
 		time.Sleep(housekeepingInterval())
 	}
 }
@@ -75,8 +125,44 @@ func (s *Server) runHousekeepingWorker() {
 func (s *Server) housekeepOnce() {
 	s.pruneDeployLogs()
 	s.pruneDeployImages()
+	s.pruneBuildCache(false)
 	s.pruneAbandonedSyncSessions()
 	s.pruneOldInMemoryDeploys()
+}
+
+// pruneBuildCache reclaims BuildKit build cache above the configured keep
+// threshold. `docker image prune` only removes dangling image layers — it never
+// touches BuildKit cache (cache mounts + the layer cache BuildKit maintains),
+// which is what quietly grows to tens of GB on a busy build host.
+//
+// Normal passes keep the newest RELAY_BUILD_CACHE_KEEP_GB of cache (default 5)
+// so incremental builds stay fast. When aggressive is true (disk critically
+// low, or after a "no space left" build failure) the entire cache is dropped —
+// a full disk that fails builds is worse than a cold cache.
+func (s *Server) pruneBuildCache(aggressive bool) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		return
+	}
+	keepGB := housekeepingBuildCacheKeepGB()
+	if keepGB <= 0 && !aggressive {
+		return // cap disabled and no disk emergency
+	}
+
+	args := []string{"builder", "prune", "-f"}
+	if !aggressive && keepGB > 0 {
+		// --keep-storage retains the most recently used cache up to the limit.
+		args = append(args, "--keep-storage", fmt.Sprintf("%dGB", keepGB))
+	}
+	if err := exec.Command("docker", args...).Run(); err != nil {
+		// Older Docker/buildx spellings differ; fall back to a plain prune so a
+		// flag mismatch never leaves the cache unbounded.
+		_ = exec.Command("docker", "builder", "prune", "-f").Run()
+	}
+	if aggressive {
+		fmt.Printf("housekeeping: pruned all BuildKit build cache (disk pressure)\n")
+	} else {
+		fmt.Printf("housekeeping: pruned BuildKit build cache above %d GB\n", keepGB)
+	}
 }
 
 // pruneAbandonedSyncSessions removes sync sessions whose clients never called

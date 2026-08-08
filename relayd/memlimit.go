@@ -208,15 +208,6 @@ func buildMemPctForKind(kind string) int {
 	return buildMemPctDefault
 }
 
-// isNodeBuildKind reports whether kind belongs to the Node/npm family.
-func isNodeBuildKind(kind string) bool {
-	_, ok := buildKindMemPct[kind]
-	if ok {
-		return buildKindMemPct[kind] == 85
-	}
-	return strings.HasPrefix(kind, "node-") || strings.HasPrefix(kind, "next-")
-}
-
 // daemonRSSBytes returns the daemon's resident set size, or 0 if unknown.
 func daemonRSSBytes() int64 {
 	f, err := os.Open("/proc/self/status")

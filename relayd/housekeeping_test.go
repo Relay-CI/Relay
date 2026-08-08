@@ -41,6 +41,29 @@ func TestSelectImagesToPruneDeduplicates(t *testing.T) {
 	}
 }
 
+func TestHousekeepingBuildCacheKeepGB(t *testing.T) {
+	// default when unset
+	t.Setenv("RELAY_BUILD_CACHE_KEEP_GB", "")
+	if got := housekeepingBuildCacheKeepGB(); got != 5 {
+		t.Fatalf("default keep-GB = %d, want 5", got)
+	}
+	// explicit override
+	t.Setenv("RELAY_BUILD_CACHE_KEEP_GB", "12")
+	if got := housekeepingBuildCacheKeepGB(); got != 12 {
+		t.Fatalf("override keep-GB = %d, want 12", got)
+	}
+	// 0 disables the cap (kept as 0, honored by pruneBuildCache)
+	t.Setenv("RELAY_BUILD_CACHE_KEEP_GB", "0")
+	if got := housekeepingBuildCacheKeepGB(); got != 0 {
+		t.Fatalf("zero keep-GB = %d, want 0", got)
+	}
+	// garbage falls back to default
+	t.Setenv("RELAY_BUILD_CACHE_KEEP_GB", "notanumber")
+	if got := housekeepingBuildCacheKeepGB(); got != 5 {
+		t.Fatalf("invalid keep-GB = %d, want 5 (default)", got)
+	}
+}
+
 func TestDefaultAppMemLimitMB(t *testing.T) {
 	t.Setenv("RELAY_APP_MEM_LIMIT_MB", "512")
 	if got := defaultAppMemLimitMB(); got != 512 {

@@ -286,6 +286,22 @@ func (s *Server) handleCloudAgentCommand(send func(any) error, reg *cloudAgentRe
 	if msg.ID == "" {
 		msg.ID = newID()
 	}
+	// This runs in its own goroutine driven by remote command input. An
+	// unrecovered panic in any command handler would crash the entire relayd
+	// process, so contain it here and report the failure back to the caller.
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("cloud-agent: recovered from panic handling command %q: %v\n", cmd, r)
+			_ = send(map[string]any{
+				"type":      "command_result",
+				"id":        msg.ID,
+				"command":   cmd,
+				"status":    "error",
+				"error":     fmt.Sprintf("internal panic: %v", r),
+				"timestamp": time.Now().UnixMilli(),
+			})
+		}
+	}()
 	sendResult := func(status string, result any, err error) {
 		out := map[string]any{
 			"type":      "command_result",

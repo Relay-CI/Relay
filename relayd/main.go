@@ -2476,44 +2476,6 @@ func serviceBaseArgs(svc ServiceConfig, volumeName string) []string {
 	}
 }
 
-func splitVolumeSpec(spec string) (source string, remainder string) {
-	spec = strings.TrimSpace(spec)
-	if spec == "" {
-		return "", ""
-	}
-	if len(spec) >= 2 && spec[1] == ':' {
-		if idx := strings.Index(spec[2:], ":"); idx >= 0 {
-			return spec[:idx+2], spec[idx+2:]
-		}
-		return spec, ""
-	}
-	if idx := strings.Index(spec, ":"); idx >= 0 {
-		return spec[:idx], spec[idx:]
-	}
-	return spec, ""
-}
-
-func isNamedVolumeSource(source string) bool {
-	source = strings.TrimSpace(source)
-	if source == "" {
-		return false
-	}
-	if filepath.IsAbs(source) {
-		return false
-	}
-	return !strings.ContainsAny(source, `/\`)
-}
-
-func (s *Server) stationVolumeMount(spec string) string {
-	source, remainder := splitVolumeSpec(spec)
-	if !isNamedVolumeSource(source) {
-		return spec
-	}
-	hostPath := filepath.Join(s.dataDir, "station-volumes", safe(source))
-	mustMkdir(hostPath)
-	return hostPath + remainder
-}
-
 func healthArgs(h *ServiceHealth) []string {
 	if h == nil || strings.TrimSpace(h.Test) == "" {
 		return nil
@@ -2831,16 +2793,6 @@ func (s *Server) reconcileProjectServices(log func(string, ...any), app string, 
 }
 
 // ---------------------- Preview URL helper ----------------------
-
-// autoPreviewHost reports whether the active lane policy would auto-assign
-// a managed hostname when RELAY_BASE_DOMAIN is configured.
-func autoPreviewHost(app, branch string) string {
-	base := strings.TrimSpace(os.Getenv("RELAY_BASE_DOMAIN"))
-	if !laneNeedsManagedHost(defaultLanePolicy(EnvPreview), base) {
-		return ""
-	}
-	return fmt.Sprintf("%s-%s.%s", safe(app), safe(branch), base)
-}
 
 // serverConfigGet reads a single key from the server_config table.
 // Returns "" if the key doesn't exist or on any error.
@@ -4877,7 +4829,7 @@ func main() {
 
 	// Restore global domain proxy state from DB
 	go func() { _ = s.ensureGlobalProxy() }()
-	go s.runLaneExpiryWorker()
+	go superviseWorker("lane-expiry", s.runLaneExpiryWorker)
 	go s.runHousekeepingWorker()
 
 	// Start worker pool: deploy jobs are I/O-bound (git, image pull/push,
@@ -5100,9 +5052,9 @@ func main() {
 	// continues without it).
 	go s.startACMEListener()
 	// Tail Caddy access logs and aggregate per-request analytics.
-	go s.startLogTailer()
+	go superviseWorker("log-tailer", s.startLogTailer)
 	if s.cloud != nil && s.cloud.agentEnabled {
-		go s.runCloudAgentLoop()
+		go superviseWorker("cloud-agent", s.runCloudAgentLoop)
 	}
 	httpServer := &http.Server{
 		Addr:    addr,
@@ -5895,11 +5847,6 @@ func (s *Server) broadcastSnapshot() {
 	}()
 }
 
-// buildSnapshotJSON returns the projects+deploys payload for the /api/events endpoint.
-func (s *Server) buildSnapshotJSON() ([]byte, error) {
-	return s.buildSnapshotJSONForSession(nil)
-}
-
 func (s *Server) buildSnapshotJSONForSession(sess *UserSession) ([]byte, error) {
 	rows, err := s.db.Query(
 		`SELECT app, env, branch, COALESCE(engine,''), mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(public_hosts,''), COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), repo_url, COALESCE(stopped,0)
@@ -6625,7 +6572,7 @@ func (s *Server) handleSyncBundle(w http.ResponseWriter, r *http.Request) {
 		case tar.TypeDir:
 			mustMkdir(filepath.Join(sess.StagingDir, filepath.FromSlash(name)))
 			continue
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg:
 		default:
 			continue
 		}
@@ -8773,6 +8720,9 @@ func (s *Server) runDeploy(job DeployJob) {
 		if avail := diskAvailableMB(s.dataDir); avail > 0 && avail < 2048 {
 			log("pre-build: only %d MB disk available — running housekeeping pass", avail)
 			s.pruneDeployImages()
+			// BuildKit build cache is the largest silent consumer and is not
+			// touched by image pruning; drop it entirely when disk is this low.
+			s.pruneBuildCache(true)
 			if after := diskAvailableMB(s.dataDir); after > 0 {
 				log("pre-build: %d MB available after prune", after)
 			}
@@ -8829,7 +8779,12 @@ func (s *Server) runDeploy(job DeployJob) {
 			d.EndedAt = &end
 			errMsg := err.Error()
 			if strings.Contains(strings.ToLower(errMsg), "no space left on device") {
-				log("hint: the build host is out of disk space — run 'docker system prune -f' to free space from dangling images and build cache")
+				log("build host out of disk space — reclaiming build cache and dangling images so the next deploy can proceed")
+				s.pruneDeployImages()
+				s.pruneBuildCache(true)
+				if after := diskAvailableMB(s.dataDir); after > 0 {
+					log("post-failure prune: %d MB disk available now — retry the deploy", after)
+				}
 			}
 			if deployLogLooksLikeOOMKill(d.LogPath, errMsg) {
 				heapMB := nodeBuildHeapMB()
@@ -11840,19 +11795,6 @@ func (s *Server) runContainer(log func(string, ...any), app string, env DeployEn
 		Mode:             mode,
 		TrafficMode:      trafficMode,
 	}, image, networkName, extraEnv)
-}
-
-func runCmdLogged(dir string, logw io.Writer, name string, args ...string) error {
-	return runCmdLoggedEnv(dir, logw, nil, name, args...)
-}
-
-func runCmdLoggedEnv(dir string, logw io.Writer, extraEnv []string, name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), extraEnv...)
-	cmd.Stdout = logw
-	cmd.Stderr = logw
-	return cmd.Run()
 }
 
 func runCmdLoggedCtx(ctx context.Context, dir string, logw io.Writer, name string, args ...string) error {
