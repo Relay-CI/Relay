@@ -9,6 +9,7 @@ import {
   deployDurationLabel,
   deployStatusClass,
   engineLabel,
+  frameworkLabel,
   formatCommitSHA,
   formatPercent,
   liveTargetLabel,
@@ -229,6 +230,9 @@ export function OverviewPage({
                     )}
 
                     <div className="flex gap-1 flex-wrap mb-2">
+                      {context.buildpack_kind && (
+                        <span className="text-[10px] bg-relay-accent/10 border border-relay-accent/20 px-1.5 py-0.5 rounded text-relay-accent">{frameworkLabel(context.buildpack_kind)}</span>
+                      )}
                       <span className="text-[10px] bg-white/[0.04] px-1.5 py-0.5 rounded text-white/40">{trafficModeLabel(context.traffic_mode ?? "")}</span>
                       <span className="text-[10px] bg-white/[0.04] px-1.5 py-0.5 rounded text-white/40">{rolloutStrategy(context)}</span>
                       <span className="text-[10px] bg-white/[0.04] px-1.5 py-0.5 rounded text-white/40">{engineLabel(context.engine ?? "docker")}</span>

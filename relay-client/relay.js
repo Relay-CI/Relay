@@ -427,6 +427,63 @@ function commandOutput(bin, args = []) {
   return { ok: true, text: String(out.stdout || "").trim() };
 }
 
+// ─── Browser launch ─────────────────────────────────────────────────────────
+
+// process.platform reports "linux" inside WSL2, not "win32" — detect WSL
+// explicitly so login/etc. can hand off to the Windows host's browser
+// instead of trying (and silently failing) a Linux xdg-open that usually
+// isn't installed in a minimal WSL2 distro.
+function isWSL() {
+  if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) return true;
+  try {
+    return /microsoft/i.test(fs.readFileSync("/proc/version", "utf8"));
+  } catch (_) {
+    return false;
+  }
+}
+
+// Best-effort browser launch. Returns true if a launch was attempted and the
+// child process spawned without an immediate error; false otherwise (caller
+// should fall back to printing the URL for the user to click).
+function openInBrowser(url) {
+  const { spawn } = require("child_process");
+  try {
+    let child;
+    if (process.platform === "win32") {
+      child = spawn("cmd", ["/c", "start", "", url], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+      });
+    } else if (isWSL()) {
+      // cmd.exe is reachable from WSL2 via the Windows interop path and
+      // opens the URL in the Windows-side default browser.
+      child = spawn("cmd.exe", ["/c", "start", "", url], {
+        detached: true,
+        stdio: "ignore",
+      });
+    } else {
+      const openCmd = process.platform === "darwin" ? "open" : "xdg-open";
+      child = spawn(openCmd, [url], {
+        detached: true,
+        stdio: "ignore",
+      });
+    }
+    child.on("error", (err) => {
+      console.log(
+        `  ${c.dim}(auto-open failed: ${err.message} — use the link above)${c.reset}`,
+      );
+    });
+    child.unref();
+    return true;
+  } catch (err) {
+    console.log(
+      `  ${c.dim}(auto-open failed: ${err.message} — use the link above)${c.reset}`,
+    );
+    return false;
+  }
+}
+
 // ─── Interactive setup wizard ─────────────────────────────────────────────────
 
 function prompt(question, defaultVal = "") {
@@ -1940,24 +1997,7 @@ async function main() {
     console.log(
       `  ${c.dim}If it doesn't open, visit:${c.reset}  ${c.cyan}${loginUrl}${c.reset}\n`,
     );
-    try {
-      const { spawn } = require("child_process");
-      if (process.platform === "win32") {
-        const child = spawn("cmd", ["/c", "start", "", loginUrl], {
-          detached: true,
-          stdio: "ignore",
-          windowsHide: true,
-        });
-        child.unref();
-      } else {
-        const openCmd = process.platform === "darwin" ? "open" : "xdg-open";
-        const child = spawn(openCmd, [loginUrl], {
-          detached: true,
-          stdio: "ignore",
-        });
-        child.unref();
-      }
-    } catch (_) {}
+    openInBrowser(loginUrl);
     const authCode = await authCodePromise.catch((e) => die(e.message));
 
     // Exchange one-time code for a bearer token.

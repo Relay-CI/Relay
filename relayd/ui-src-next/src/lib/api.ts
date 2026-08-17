@@ -181,6 +181,7 @@ export interface EnvInfo {
   active_slot?: string;
   standby_slot?: string;
   drain_until?: number;
+  buildpack_kind?: string;
   latestDeploy?: Deploy;
   previewURL?: string;
 }
@@ -309,6 +310,21 @@ export async function rollback(
   await apiFetch("/api/deploys/rollback", {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+}
+
+// abortRollout flips an in-progress canary/blue-green rollout back to the
+// previously-active slot immediately, instead of waiting for the automated
+// health check (rollout_assess_seconds) to run. Only valid while
+// rollout_status === "monitoring".
+export async function abortRollout(target: AppTarget): Promise<EnvInfo> {
+  return apiFetch("/api/deploys/rollout-abort", {
+    method: "POST",
+    body: JSON.stringify({
+      app: target.app,
+      env: target.env,
+      branch: target.branch,
+    }),
   });
 }
 
@@ -489,7 +505,9 @@ export interface CompanionConfig {
   name?: string;
   type?: string;
   version?: string;
+  profile?: "auto" | "starter" | "balanced" | "throughput";
   image?: string;
+  pooler_image?: string;
   command?: string;
   stopped?: boolean;
   disabled?: boolean;
@@ -558,8 +576,8 @@ export interface VersionInfo {
   version: string;
   commit: string;
   build_date: string;
-  os: string;
-  arch: string;
+  goos: string;
+  goarch: string;
 }
 
 export async function getVersion(): Promise<VersionInfo> {
@@ -577,6 +595,10 @@ export interface ServerConfig {
   theme_css?: string;
   plugin_mutations_enabled?: boolean;
   doctor?: DoctorReport;
+  image_retention_per_lane?: number;
+  unused_image_max_age_days?: number;
+  log_retention_days?: number;
+  build_cache_keep_gb?: number;
   [key: string]: unknown;
 }
 

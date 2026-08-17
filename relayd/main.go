@@ -310,7 +310,8 @@ type AppState struct {
 	MemLimit             string    `json:"mem_limit,omitempty"`
 	ResourceMode         string    `json:"resource_mode,omitempty"`
 	Volumes              []string  `json:"volumes,omitempty"`
-	GitToken             string    `json:"-"` // stored in DB but never in API responses
+	BuildpackKind        string    `json:"buildpack_kind,omitempty"` // e.g. "sveltekit", "django" — from the last successful build's BuildPlan.Kind
+	GitToken             string    `json:"-"`                        // stored in DB but never in API responses
 }
 
 // ---------------------- Multi-service / Project config ----------------------
@@ -323,21 +324,23 @@ type ProjectConfig struct {
 	Services []ServiceConfig `json:"services"`
 }
 
-// ServiceConfig describes a single service inside a project.
-// Type is one of: "app", "postgres", "mysql", "redis", "mongo".
+// ServiceConfig describes a single companion inside a project.
+// Type is one of: "app", "relaydb", "postgres", "mysql", "redis", "mongo".
 type ServiceConfig struct {
-	Name     string            `json:"name"`
-	Type     string            `json:"type"`
-	Version  string            `json:"version"`        // e.g. "16" for postgres:16
-	Port     int               `json:"port,omitempty"` // override default container port
-	HostPort int               `json:"host_port,omitempty"`
-	Image    string            `json:"image,omitempty"`
-	Command  string            `json:"command,omitempty"`
-	Env      map[string]string `json:"env,omitempty"`
-	Volumes  []string          `json:"volumes,omitempty"`
-	Health   *ServiceHealth    `json:"health,omitempty"`
-	Stopped  bool              `json:"stopped,omitempty"`
-	Disabled bool              `json:"disabled,omitempty"`
+	Name        string            `json:"name"`
+	Type        string            `json:"type"`
+	Version     string            `json:"version"`           // e.g. "17" for postgres:17
+	Profile     string            `json:"profile,omitempty"` // RelayDB: auto, starter, balanced, throughput
+	Port        int               `json:"port,omitempty"`    // override default container port
+	HostPort    int               `json:"host_port,omitempty"`
+	Image       string            `json:"image,omitempty"`
+	PoolerImage string            `json:"pooler_image,omitempty"`
+	Command     string            `json:"command,omitempty"`
+	Env         map[string]string `json:"env,omitempty"`
+	Volumes     []string          `json:"volumes,omitempty"`
+	Health      *ServiceHealth    `json:"health,omitempty"`
+	Stopped     bool              `json:"stopped,omitempty"`
+	Disabled    bool              `json:"disabled,omitempty"`
 }
 
 // ProjectService tracks a running companion (database) service in SQLite.
@@ -351,7 +354,7 @@ type ProjectService struct {
 	Network   string `json:"network"`
 	Volume    string `json:"volume"`
 	EnvKey    string `json:"env_key"`
-	EnvVal    string `json:"env_val"`
+	EnvVal    string `json:"-"` // connection credentials must never leave relayd
 	Image     string `json:"image,omitempty"`
 	Port      int    `json:"port,omitempty"`
 	HostPort  int    `json:"host_port,omitempty"`
@@ -750,6 +753,7 @@ type Server struct {
 
 	db          *sql.DB
 	analyticsDB *sql.DB
+	relayDB     *relayDBManager
 
 	apiToken  string
 	secretKey []byte // 32-byte AES-256 key for encrypting secrets at rest; nil = no encryption
@@ -1002,13 +1006,47 @@ type PluginBuildpack struct {
 	plugin *BuildpackPlugin
 }
 
+// monorepoSubdirHint scans one level into common monorepo layouts (apps/*,
+// packages/*, services/*) for a directory that matches a buildpack when the
+// repo root itself didn't match anything. Buildpack detection only looks at
+// the given root — this doesn't auto-deploy the subdir, it just turns a bare
+// "no buildpack matched" into an actionable pointer for the common
+// apps/web + apps/api monorepo shape instead of a dead end.
+func monorepoSubdirHint(repoDir string, packs []Buildpack, cfg *RelayConfig) string {
+	for _, parent := range []string{"apps", "packages", "services"} {
+		entries, err := os.ReadDir(filepath.Join(repoDir, parent))
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			sub := filepath.ToSlash(filepath.Join(parent, e.Name()))
+			for _, bp := range packs {
+				if bp.Detect(filepath.Join(repoDir, parent, e.Name()), cfg) {
+					return fmt.Sprintf(" Found a %s project at %s/ — set \"project_root\": %q in relay.config.json to deploy it.", bp.Name(), sub, sub)
+				}
+			}
+		}
+	}
+	return ""
+}
+
 // defaultBuildpacks returns the ordered list of buildpacks we support.
 func defaultBuildpacks() []Buildpack {
 	return []Buildpack{
 		&NodeNextStandaloneBuildpack{},
 		&NodeNextBuildpack{},
+		// SvelteKit and Remix must be checked before NodeVite: both also ship
+		// a vite.config.ts, and NodeVite's static-SPA assumption is wrong for
+		// either (see SvelteKitBuildpack/RemixBuildpack doc comments).
+		&SvelteKitBuildpack{},
+		&RemixBuildpack{},
 		&NodeViteBuildpack{},
 		&ExpoWebBuildpack{},
+		&NuxtBuildpack{},
+		&PHPBuildpack{},
 		&SprintUIBuildpack{},
 		&BunBuildpack{},
 		&NodeGenericBuildpack{},
@@ -1464,6 +1502,208 @@ EXPOSE 80
 	}, nil
 }
 
+// nodeServerBuildpackPlan is the shared Plan() body for Node meta-frameworks
+// that build to a self-hosted server entrypoint (SvelteKit adapter-node,
+// Remix/React Router, Nuxt's Nitro server) rather than a static SPA. It
+// mirrors NodeGenericBuildpack's multi-stage layout (cached install, build,
+// slim prod-deps runtime image) so these frameworks get the same build-cache
+// speed benefits instead of a bespoke, uncached Dockerfile per framework.
+func nodeServerBuildpackPlan(kind string, req DeployRequest, repoDir string, cfg *RelayConfig) (BuildPlan, error) {
+	buildImg := getenv("RELAY_NODE_IMAGE", "node:22")
+	runImg := getenv("RELAY_NODE_RUN_IMAGE", "node:22-slim")
+	install := firstNonEmpty(req.InstallCmd, nodeInstallCmd(repoDir))
+	build := nodeBuildCmdWithMemoryGuard(firstNonEmpty(req.BuildCmd, nodeDefaultBuildCmd(repoDir)))
+	start := firstNonEmpty(req.StartCmd, nodeDefaultStartCmd(repoDir))
+	port := firstNonZero(req.ServicePort, 3000)
+
+	return BuildPlan{
+		Kind:        kind,
+		ServicePort: port,
+		BuildImage:  firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg),
+		RunImage:    firstNonEmpty(cfgStr(cfg, "RunImage"), runImg),
+		InstallCmd:  install,
+		BuildCmd:    build,
+		StartCmd:    start,
+		WriteDockerfile: func(repoDir string) error {
+			df := fmt.Sprintf(`# syntax=docker/dockerfile:1.7
+FROM %s AS deps
+WORKDIR /app
+ENV CI=true
+COPY package.json ./
+COPY package-lock.json* pnpm-lock.yaml* yarn.lock* ./
+%s
+
+FROM deps AS builder
+COPY . .
+%s
+RUN rm -rf node_modules
+
+%s
+
+FROM %s
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT=%d
+COPY --from=builder /app /app
+COPY --from=prod-deps /app/node_modules ./node_modules
+EXPOSE %d
+CMD %s
+`, firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg), nodeRunStepWithCaches(repoDir, "", install), nodeRunStepWithCaches(repoDir, "", build), nodeProdDepsStage(repoDir), firstNonEmpty(cfgStr(cfg, "RunImage"), runImg), port, port, shellJSON(start))
+
+			writeRelayDockerignore(repoDir)
+			return os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte(df), 0644)
+		},
+		Cleanup: func(repoDir string) error {
+			cleanupRelayDockerignore(repoDir)
+			_ = os.RemoveAll(filepath.Join(repoDir, "node_modules"))
+			_ = os.Remove(filepath.Join(repoDir, "Dockerfile"))
+			return nil
+		},
+	}, nil
+}
+
+type SvelteKitBuildpack struct{}
+
+func (b *SvelteKitBuildpack) Name() string { return "sveltekit" }
+
+// Detect must win over NodeViteBuildpack: SvelteKit apps also ship a
+// vite.config.ts (the SvelteKit Vite plugin needs it), so if this ran after
+// NodeViteBuildpack in priority order every SvelteKit app would be
+// misdetected as a static Vite SPA and nginx-served from a "dist/" directory
+// that SvelteKit never produces — a real, silent deploy failure this was
+// hitting before this buildpack existed.
+func (b *SvelteKitBuildpack) Detect(repoDir string, cfg *RelayConfig) bool {
+	if cfg != nil && strings.EqualFold(cfg.Kind, "sveltekit") {
+		return true
+	}
+	if !hasPackageDependency(repoDir, "@sveltejs/kit") {
+		return false
+	}
+	return fileExists(filepath.Join(repoDir, "svelte.config.js")) ||
+		fileExists(filepath.Join(repoDir, "svelte.config.ts")) ||
+		fileExists(filepath.Join(repoDir, "svelte.config.mjs"))
+}
+func (b *SvelteKitBuildpack) Plan(req DeployRequest, repoDir string, cfg *RelayConfig) (BuildPlan, error) {
+	// Targets adapter-node (or adapter-auto falling back to node in a
+	// generic Docker/Linux environment, which is the common self-hosted
+	// case): build/index.js, started via the "start" script SvelteKit's
+	// adapter-node scaffolds — nodeDefaultStartCmd already resolves that.
+	// A project explicitly using @sveltejs/adapter-static should override
+	// with "kind": "vite-static" in relay.config.json to get the nginx
+	// static-file path instead.
+	return nodeServerBuildpackPlan("sveltekit", req, repoDir, cfg)
+}
+
+type RemixBuildpack struct{}
+
+func (b *RemixBuildpack) Name() string { return "remix" }
+
+// Same rationale as SvelteKitBuildpack: Remix's Vite plugin also requires a
+// vite.config.ts, so this must be detected (and listed) before
+// NodeViteBuildpack or Remix apps get misdetected as a static SPA.
+func (b *RemixBuildpack) Detect(repoDir string, cfg *RelayConfig) bool {
+	if cfg != nil && (strings.EqualFold(cfg.Kind, "remix") || strings.EqualFold(cfg.Kind, "react-router")) {
+		return true
+	}
+	return anyPackageDep(repoDir, []string{"@remix-run/dev", "@remix-run/serve", "@remix-run/react", "@react-router/dev", "@react-router/serve"}) ||
+		fileExists(filepath.Join(repoDir, "remix.config.js"))
+}
+func (b *RemixBuildpack) Plan(req DeployRequest, repoDir string, cfg *RelayConfig) (BuildPlan, error) {
+	return nodeServerBuildpackPlan("remix", req, repoDir, cfg)
+}
+
+type NuxtBuildpack struct{}
+
+func (b *NuxtBuildpack) Name() string { return "nuxt" }
+func (b *NuxtBuildpack) Detect(repoDir string, cfg *RelayConfig) bool {
+	if cfg != nil && strings.EqualFold(cfg.Kind, "nuxt") {
+		return true
+	}
+	if !hasPackageDependency(repoDir, "nuxt") {
+		return false
+	}
+	return fileExists(filepath.Join(repoDir, "nuxt.config.js")) ||
+		fileExists(filepath.Join(repoDir, "nuxt.config.ts")) ||
+		fileExists(filepath.Join(repoDir, "nuxt.config.mjs"))
+}
+func (b *NuxtBuildpack) Plan(req DeployRequest, repoDir string, cfg *RelayConfig) (BuildPlan, error) {
+	// Nuxt's own "start" script runs `node .output/server/index.mjs` (the
+	// Nitro server), which nodeDefaultStartCmd already resolves via the
+	// package.json "start" script — no framework-specific override needed.
+	return nodeServerBuildpackPlan("nuxt", req, repoDir, cfg)
+}
+
+type PHPBuildpack struct{}
+
+func (b *PHPBuildpack) Name() string { return "php" }
+func (b *PHPBuildpack) Detect(repoDir string, cfg *RelayConfig) bool {
+	if cfg != nil && (strings.EqualFold(cfg.Kind, "php") || strings.EqualFold(cfg.Kind, "laravel")) {
+		return true
+	}
+	return fileExists(filepath.Join(repoDir, "composer.json"))
+}
+
+// phpIsLaravel reports whether composer.json declares laravel/framework —
+// Laravel's convention is to serve from public/ (index.php lives there,
+// everything else is deliberately outside the webroot); a bare PHP app
+// without that convention is served from the repo root instead.
+func phpIsLaravel(repoDir string) bool {
+	b, err := os.ReadFile(filepath.Join(repoDir, "composer.json"))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(b)), `"laravel/framework"`)
+}
+
+func (b *PHPBuildpack) Plan(req DeployRequest, repoDir string, cfg *RelayConfig) (BuildPlan, error) {
+	buildImg := getenv("RELAY_PHP_BUILD_IMAGE", "composer:2")
+	runImg := getenv("RELAY_PHP_IMAGE", "php:8.3-cli")
+	port := firstNonZero(req.ServicePort, 8000)
+
+	docroot := "."
+	if phpIsLaravel(repoDir) {
+		docroot = "public"
+	}
+
+	install := firstNonEmpty(req.InstallCmd, `sh -lc "composer install --no-dev --optimize-autoloader --no-interaction"`)
+	// Laravel's artisan cache commands (config:cache, route:cache) need
+	// runtime env (DATABASE_URL, APP_KEY, etc.) that Relay only injects when
+	// the container starts, not at `docker build` time — running them here
+	// would hit the exact "env var required during build" failure class this
+	// project has already hit once with a Next.js app. Skipped deliberately.
+	start := firstNonEmpty(req.StartCmd, fmt.Sprintf(`sh -lc "php -S 0.0.0.0:${PORT:-%d} -t %s"`, port, docroot))
+
+	return BuildPlan{
+		Kind:        "php",
+		ServicePort: port,
+		BuildImage:  firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg),
+		RunImage:    firstNonEmpty(cfgStr(cfg, "RunImage"), runImg),
+		InstallCmd:  install,
+		StartCmd:    start,
+		WriteDockerfile: func(repoDir string) error {
+			df := fmt.Sprintf(`FROM %s AS deps
+WORKDIR /app
+COPY composer.json composer.lock* ./
+RUN %s
+
+FROM %s
+WORKDIR /app
+ENV PORT=%d
+COPY --from=deps /app/vendor ./vendor
+COPY . .
+EXPOSE %d
+CMD %s
+`, firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg), install, firstNonEmpty(cfgStr(cfg, "RunImage"), runImg), port, port, shellForm(start))
+			return os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte(df), 0644)
+		},
+		Cleanup: func(repoDir string) error {
+			_ = os.RemoveAll(filepath.Join(repoDir, "vendor"))
+			_ = os.Remove(filepath.Join(repoDir, "Dockerfile"))
+			return nil
+		},
+	}, nil
+}
+
 type ExpoWebBuildpack struct{}
 
 func (b *ExpoWebBuildpack) Name() string { return "expo-web" }
@@ -1844,7 +2084,8 @@ type PythonBuildpack struct{}
 
 func (b *PythonBuildpack) Name() string { return "python" }
 func (b *PythonBuildpack) Detect(repoDir string, cfg *RelayConfig) bool {
-	if cfg != nil && (strings.EqualFold(cfg.Kind, "python") || strings.EqualFold(cfg.Kind, "django")) {
+	if cfg != nil && (strings.EqualFold(cfg.Kind, "python") || strings.EqualFold(cfg.Kind, "django") ||
+		strings.EqualFold(cfg.Kind, "fastapi") || strings.EqualFold(cfg.Kind, "flask")) {
 		return true
 	}
 	return fileExists(filepath.Join(repoDir, "requirements.txt")) ||
@@ -1862,8 +2103,18 @@ func (b *PythonBuildpack) Plan(req DeployRequest, repoDir string, cfg *RelayConf
 	build := firstNonEmpty(req.BuildCmd, "") // optional
 	start := firstNonEmpty(req.StartCmd, pythonDefaultStart(repoDir))
 
+	// Kind reflects the actually-detected framework (django/fastapi/flask),
+	// not just "python" — visible in deploy records/UI so a wrong framework
+	// guess (which changes the start command) is easy to spot and override
+	// via relay.config.json's "kind" instead of silently shipping a broken
+	// CMD.
+	kind := pythonFramework(repoDir)
+	if kind == "generic" {
+		kind = "python"
+	}
+
 	return BuildPlan{
-		Kind:        "python",
+		Kind:        kind,
 		ServicePort: port,
 		BuildImage:  firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg),
 		RunImage:    firstNonEmpty(cfgStr(cfg, "RunImage"), runImg),
@@ -1899,7 +2150,7 @@ type RubyBuildpack struct{}
 
 func (b *RubyBuildpack) Name() string { return "ruby" }
 func (b *RubyBuildpack) Detect(repoDir string, cfg *RelayConfig) bool {
-	if cfg != nil && (strings.EqualFold(cfg.Kind, "ruby") || strings.EqualFold(cfg.Kind, "rails")) {
+	if cfg != nil && (strings.EqualFold(cfg.Kind, "ruby") || strings.EqualFold(cfg.Kind, "rails") || strings.EqualFold(cfg.Kind, "sinatra")) {
 		return true
 	}
 	return fileExists(filepath.Join(repoDir, "Gemfile"))
@@ -1913,8 +2164,16 @@ func (b *RubyBuildpack) Plan(req DeployRequest, repoDir string, cfg *RelayConfig
 	build := firstNonEmpty(req.BuildCmd, rubyDefaultBuildCmd(repoDir))
 	start := firstNonEmpty(req.StartCmd, rubyDefaultStart(repoDir))
 
+	// Kind reflects the detected framework so it's visible in the deploy
+	// record instead of a flat "ruby" for both a Rails app and a bare Rack
+	// script.
+	kind := "ruby"
+	if rubyRailsApp(repoDir) {
+		kind = "rails"
+	}
+
 	return BuildPlan{
-		Kind:        "ruby",
+		Kind:        kind,
 		ServicePort: port,
 		BuildImage:  firstNonEmpty(cfgStr(cfg, "BuildImage"), buildImg),
 		RunImage:    firstNonEmpty(cfgStr(cfg, "RunImage"), runImg),
@@ -2231,7 +2490,13 @@ func normalizeServiceConfig(svc ServiceConfig) ServiceConfig {
 	svc.Name = strings.TrimSpace(svc.Name)
 	svc.Type = strings.ToLower(strings.TrimSpace(svc.Type))
 	svc.Version = strings.TrimSpace(svc.Version)
+	if svc.Type == serviceTypeRelayDB {
+		svc.Profile = normalizeRelayDBProfile(svc.Profile)
+	} else {
+		svc.Profile = strings.TrimSpace(svc.Profile)
+	}
 	svc.Image = strings.TrimSpace(svc.Image)
+	svc.PoolerImage = strings.TrimSpace(svc.PoolerImage)
 	svc.Command = strings.TrimSpace(svc.Command)
 	if svc.Env == nil {
 		svc.Env = map[string]string{}
@@ -2264,7 +2529,7 @@ func serviceConfigHash(svc ServiceConfig) string {
 
 func defaultServiceType(kind string) string {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
-	case "postgres", "mysql", "redis", "mongo", "worker", "custom":
+	case serviceTypeRelayDB, "postgres", "mysql", "redis", "mongo", "worker", "custom":
 		return strings.ToLower(strings.TrimSpace(kind))
 	default:
 		return "custom"
@@ -2278,6 +2543,11 @@ func serviceImageName(svc ServiceConfig) string {
 	}
 	version := strings.TrimSpace(svc.Version)
 	switch strings.ToLower(svc.Type) {
+	case serviceTypeRelayDB:
+		if version == "" {
+			version = defaultRelayDBVersion
+		}
+		return "postgres:" + version
 	case "postgres":
 		if version == "" {
 			version = "16"
@@ -2313,6 +2583,8 @@ func serviceImageName(svc ServiceConfig) string {
 // serviceDefaultPort returns the default container port for a service type.
 func serviceDefaultPort(svcType string) int {
 	switch strings.ToLower(svcType) {
+	case serviceTypeRelayDB:
+		return 5432
 	case "postgres":
 		return 5432
 	case "mysql":
@@ -2407,6 +2679,9 @@ func serviceEnvInfo(svc ServiceConfig, host string, port int) (key, val string) 
 		port = serviceDefaultPort(svc.Type)
 	}
 	switch strings.ToLower(svc.Type) {
+	case serviceTypeRelayDB:
+		return relayDBEnvKey(svc.Name),
+			fmt.Sprintf("postgresql://relay@%s:%d/relay?sslmode=disable", host, port)
 	case "postgres":
 		return strings.ToUpper(svc.Name) + "_URL",
 			fmt.Sprintf("postgres://relay:relay@%s:%d/relay?sslmode=disable", host, port)
@@ -2515,12 +2790,22 @@ func (s *Server) deleteProjectServiceState(app, env, branch, name string) {
 
 func (s *Server) stopProjectServiceRuntime(app, env, branch, name string) {
 	if running, err := s.getProjectService(app, env, branch, name); err == nil && running != nil {
-		s.runtime.Remove(running.Container)
-		if s.stationRuntime != nil {
-			s.stationRuntime.Remove(running.Container)
-		}
+		s.removeProjectServiceContainers(*running)
 	}
 	s.deleteProjectServiceState(app, env, branch, name)
+}
+
+func (s *Server) removeProjectServiceContainers(svc ProjectService) {
+	if strings.EqualFold(svc.Type, serviceTypeRelayDB) {
+		s.runtime.Remove(relayDBPoolContainerName(svc.Container))
+		if s.stationRuntime != nil {
+			s.stationRuntime.Remove(relayDBPoolContainerName(svc.Container))
+		}
+	}
+	s.runtime.Remove(svc.Container)
+	if s.stationRuntime != nil {
+		s.stationRuntime.Remove(svc.Container)
+	}
 }
 
 func (s *Server) appLaneRunning(app string, env DeployEnv, branch string) bool {
@@ -2555,6 +2840,40 @@ func (s *Server) startProjectService(
 	runtime := s.runtime // companion services always run through the Docker runtime
 	containerName := fmt.Sprintf("relay__%s__%s__%s__svc__%s", safe(app), safe(env), safe(branch), safe(svc.Name))
 	volumeName := containerName + "_data"
+	if svc.Type == serviceTypeRelayDB {
+		if s.relayDB == nil {
+			return "", "", fmt.Errorf("RelayDB manager is not initialized")
+		}
+		if runtime.IsRunning(containerName) && !force {
+			if current, currentErr := s.getProjectService(app, env, branch, svc.Name); currentErr == nil && current != nil && current.SpecHash != serviceConfigHash(svc) {
+				force = true
+			}
+		}
+		connection, ensureErr := s.relayDB.Ensure(runtime, relayDBTarget{
+			App:           app,
+			Env:           env,
+			Branch:        branch,
+			Name:          svc.Name,
+			Network:       networkName,
+			PrimaryName:   containerName,
+			VolumeName:    volumeName,
+			HostPort:      svc.HostPort,
+			CustomVolumes: svc.Volumes,
+		}, svc, force, log)
+		if ensureErr != nil {
+			return "", "", ensureErr
+		}
+		if saveErr := s.saveProjectService(&ProjectService{
+			Project: app, Name: svc.Name, Type: svc.Type, Branch: branch, Env: env,
+			Container: connection.PrimaryName, Network: networkName, Volume: connection.VolumeName,
+			EnvKey: connection.EnvKey, EnvVal: "", Image: connection.PrimaryImage,
+			Port: connection.Port, HostPort: svc.HostPort, SpecHash: serviceConfigHash(svc),
+		}); saveErr != nil {
+			return "", "", fmt.Errorf("save RelayDB state: %w", saveErr)
+		}
+		log("RelayDB %s ready: profile=%s pooled_url=%s", svc.Name, connection.Profile.Name, connection.EnvKey)
+		return connection.EnvKey, connection.URL, nil
+	}
 	image := serviceImageName(svc)
 	port := svc.Port
 	if port == 0 {
@@ -3173,23 +3492,31 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		writeJSON(w, 200, map[string]any{
-			"base_domain":              s.serverBaseDomain(),
-			"dashboard_host":           s.serverDashboardHost(),
-			"acme_disabled":            s.serverConfigGet("acme_disabled"),
-			"custom_host_rules":        s.serverCustomHostRules(),
-			"theme_name":               s.serverConfigGet("theme_name"),
-			"theme_css":                s.serverConfigGet("theme_css"),
-			"plugin_mutations_enabled": s.pluginMutationsEnabled(),
-			"doctor":                   s.buildDoctorReport(),
+			"base_domain":               s.serverBaseDomain(),
+			"dashboard_host":            s.serverDashboardHost(),
+			"acme_disabled":             s.serverConfigGet("acme_disabled"),
+			"custom_host_rules":         s.serverCustomHostRules(),
+			"theme_name":                s.serverConfigGet("theme_name"),
+			"theme_css":                 s.serverConfigGet("theme_css"),
+			"plugin_mutations_enabled":  s.pluginMutationsEnabled(),
+			"doctor":                    s.buildDoctorReport(),
+			"image_retention_per_lane":  s.imageRetentionPerLaneSetting(),
+			"unused_image_max_age_days": s.unusedImageMaxAgeDaysSetting(),
+			"log_retention_days":        s.logRetentionDaysSetting(),
+			"build_cache_keep_gb":       s.buildCacheKeepGBSetting(),
 		})
 	case http.MethodPost:
 		var body struct {
-			BaseDomain      *string           `json:"base_domain"`
-			DashboardHost   *string           `json:"dashboard_host"`
-			ACMEDisabled    *string           `json:"acme_disabled"`
-			CustomHostRules *[]customHostRule `json:"custom_host_rules"`
-			ThemeName       *string           `json:"theme_name"`
-			ThemeCSS        *string           `json:"theme_css"`
+			BaseDomain            *string           `json:"base_domain"`
+			DashboardHost         *string           `json:"dashboard_host"`
+			ACMEDisabled          *string           `json:"acme_disabled"`
+			CustomHostRules       *[]customHostRule `json:"custom_host_rules"`
+			ThemeName             *string           `json:"theme_name"`
+			ThemeCSS              *string           `json:"theme_css"`
+			ImageRetentionPerLane *int              `json:"image_retention_per_lane"`
+			UnusedImageMaxAgeDays *int              `json:"unused_image_max_age_days"`
+			LogRetentionDays      *int              `json:"log_retention_days"`
+			BuildCacheKeepGB      *int              `json:"build_cache_keep_gb"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httpError(w, 400, "invalid JSON")
@@ -3242,6 +3569,34 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 		if body.ThemeCSS != nil {
 			updates["theme_css"] = *body.ThemeCSS
 		}
+		if body.ImageRetentionPerLane != nil {
+			if *body.ImageRetentionPerLane < 0 {
+				httpError(w, 400, "image_retention_per_lane must be >= 0")
+				return
+			}
+			updates["image_retention_per_lane"] = strconv.Itoa(*body.ImageRetentionPerLane)
+		}
+		if body.UnusedImageMaxAgeDays != nil {
+			if *body.UnusedImageMaxAgeDays < 0 {
+				httpError(w, 400, "unused_image_max_age_days must be >= 0")
+				return
+			}
+			updates["unused_image_max_age_days"] = strconv.Itoa(*body.UnusedImageMaxAgeDays)
+		}
+		if body.LogRetentionDays != nil {
+			if *body.LogRetentionDays < 0 {
+				httpError(w, 400, "log_retention_days must be >= 0")
+				return
+			}
+			updates["log_retention_days"] = strconv.Itoa(*body.LogRetentionDays)
+		}
+		if body.BuildCacheKeepGB != nil {
+			if *body.BuildCacheKeepGB < 0 {
+				httpError(w, 400, "build_cache_keep_gb must be >= 0")
+				return
+			}
+			updates["build_cache_keep_gb"] = strconv.Itoa(*body.BuildCacheKeepGB)
+		}
 		previous := map[string]string{
 			"base_domain":       s.serverConfigGet("base_domain"),
 			"dashboard_host":    s.serverConfigGet("dashboard_host"),
@@ -3277,14 +3632,18 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		writeJSON(w, 200, map[string]any{
-			"base_domain":              s.serverConfigGet("base_domain"),
-			"dashboard_host":           s.serverConfigGet("dashboard_host"),
-			"acme_disabled":            s.serverConfigGet("acme_disabled"),
-			"custom_host_rules":        s.serverCustomHostRules(),
-			"theme_name":               s.serverConfigGet("theme_name"),
-			"theme_css":                s.serverConfigGet("theme_css"),
-			"plugin_mutations_enabled": s.pluginMutationsEnabled(),
-			"doctor":                   s.buildDoctorReport(),
+			"base_domain":               s.serverConfigGet("base_domain"),
+			"dashboard_host":            s.serverConfigGet("dashboard_host"),
+			"acme_disabled":             s.serverConfigGet("acme_disabled"),
+			"custom_host_rules":         s.serverCustomHostRules(),
+			"theme_name":                s.serverConfigGet("theme_name"),
+			"theme_css":                 s.serverConfigGet("theme_css"),
+			"plugin_mutations_enabled":  s.pluginMutationsEnabled(),
+			"doctor":                    s.buildDoctorReport(),
+			"image_retention_per_lane":  s.imageRetentionPerLaneSetting(),
+			"unused_image_max_age_days": s.unusedImageMaxAgeDaysSetting(),
+			"log_retention_days":        s.logRetentionDaysSetting(),
+			"build_cache_keep_gb":       s.buildCacheKeepGBSetting(),
 		})
 	default:
 		httpError(w, 405, "method not allowed")
@@ -3753,7 +4112,7 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	const projectsQueryWithResources = `SELECT app, env, branch, COALESCE(engine,''), mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(public_hosts,''), COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), repo_url, COALESCE(stopped,0), COALESCE(cpu_limit,''), COALESCE(mem_limit,''), COALESCE(resource_mode,'')
+	const projectsQueryWithResources = `SELECT app, env, branch, COALESCE(engine,''), mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(public_hosts,''), COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), repo_url, COALESCE(stopped,0), COALESCE(cpu_limit,''), COALESCE(mem_limit,''), COALESCE(resource_mode,''), COALESCE(buildpack_kind,'')
 		FROM app_state ORDER BY app, env, branch`
 	const projectsQueryLegacy = `SELECT app, env, branch, COALESCE(engine,''), mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(public_hosts,''), COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), repo_url, COALESCE(stopped,0)
 		FROM app_state ORDER BY app, env, branch`
@@ -3802,6 +4161,7 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 		CPULimit             string   `json:"cpu_limit,omitempty"`
 		MemLimit             string   `json:"mem_limit,omitempty"`
 		ResourceMode         string   `json:"resource_mode,omitempty"`
+		BuildpackKind        string   `json:"buildpack_kind,omitempty"`
 	}
 
 	type ProjectInfo struct {
@@ -3816,7 +4176,7 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 		var publicHostsRaw string
 		if hasResourceColumns {
 			if err := rows.Scan(&pe.App, &pe.Env, &pe.Branch, &pe.Engine, &pe.Mode,
-				&pe.HostPort, &pe.HostPortExplicit, &pe.ServicePort, &pe.PublicHost, &publicHostsRaw, &pe.ActiveSlot, &pe.StandbySlot, &pe.DrainUntil, &pe.TrafficMode, &pe.AccessPolicy, &pe.IPAllowlist, &pe.ExpiresAt, &pe.WebhookSecret, &pe.NotificationWebhooks, &pe.TrafficSplitPercent, &pe.RolloutMinRequests, &pe.RolloutErrorPercent, &pe.RolloutAssessSeconds, &pe.RolloutStartedAt, &pe.RolloutDeployID, &pe.RolloutStatus, &pe.RepoURL, &pe.Stopped, &pe.CPULimit, &pe.MemLimit, &pe.ResourceMode); err != nil {
+				&pe.HostPort, &pe.HostPortExplicit, &pe.ServicePort, &pe.PublicHost, &publicHostsRaw, &pe.ActiveSlot, &pe.StandbySlot, &pe.DrainUntil, &pe.TrafficMode, &pe.AccessPolicy, &pe.IPAllowlist, &pe.ExpiresAt, &pe.WebhookSecret, &pe.NotificationWebhooks, &pe.TrafficSplitPercent, &pe.RolloutMinRequests, &pe.RolloutErrorPercent, &pe.RolloutAssessSeconds, &pe.RolloutStartedAt, &pe.RolloutDeployID, &pe.RolloutStatus, &pe.RepoURL, &pe.Stopped, &pe.CPULimit, &pe.MemLimit, &pe.ResourceMode, &pe.BuildpackKind); err != nil {
 				continue
 			}
 		} else {
@@ -4141,7 +4501,7 @@ func (s *Server) deleteLaneData(app string, env DeployEnv, branch string) (map[s
 	}
 
 	for _, svc := range services {
-		s.runtime.Remove(svc.Container)
+		s.removeProjectServiceContainers(svc)
 		if svc.Network != "" {
 			networks[svc.Network] = struct{}{}
 		}
@@ -4247,6 +4607,11 @@ func (s *Server) deleteLaneData(app string, env DeployEnv, branch string) (map[s
 		_ = tx.Rollback()
 		return nil, warnings, fmt.Errorf("delete app secrets: %w", err)
 	}
+	credentialCount, err := execDelete(`DELETE FROM service_credentials WHERE project=? AND env=? AND branch=?`, app, string(env), branch)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, warnings, fmt.Errorf("delete service credentials: %w", err)
+	}
 	serviceStateCount, err := execDelete(`DELETE FROM project_services WHERE project=? AND env=? AND branch=?`, app, string(env), branch)
 	if err != nil {
 		_ = tx.Rollback()
@@ -4298,15 +4663,16 @@ func (s *Server) deleteLaneData(app string, env DeployEnv, branch string) (map[s
 	go func() { _ = s.ensureGlobalProxy() }()
 
 	return map[string]int64{
-		"lanes":            appStateCount,
-		"deploys":          deployCount,
-		"deploy_requests":  deployRequestCount,
-		"secrets":          secretCount,
-		"service_states":   serviceStateCount,
-		"service_specs":    serviceSpecCount,
-		"sync_sessions":    sessionCount,
-		"promotions":       promotionCount,
-		"runtime_services": int64(len(services)),
+		"lanes":               appStateCount,
+		"deploys":             deployCount,
+		"deploy_requests":     deployRequestCount,
+		"secrets":             secretCount,
+		"service_credentials": credentialCount,
+		"service_states":      serviceStateCount,
+		"service_specs":       serviceSpecCount,
+		"sync_sessions":       sessionCount,
+		"promotions":          promotionCount,
+		"runtime_services":    int64(len(services)),
 	}, warnings, nil
 }
 
@@ -4499,7 +4865,7 @@ func (s *Server) deleteProjectData(app string) (map[string]int64, []string, erro
 	}
 
 	for _, svc := range services {
-		s.runtime.Remove(svc.Container)
+		s.removeProjectServiceContainers(svc)
 		if svc.Network != "" {
 			networks[svc.Network] = struct{}{}
 		}
@@ -4605,6 +4971,11 @@ func (s *Server) deleteProjectData(app string) (map[string]int64, []string, erro
 		_ = tx.Rollback()
 		return nil, warnings, fmt.Errorf("delete app secrets: %w", err)
 	}
+	credentialCount, err := execDelete(`DELETE FROM service_credentials WHERE project=?`, app)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, warnings, fmt.Errorf("delete service credentials: %w", err)
+	}
 	serviceStateCount, err := execDelete(`DELETE FROM project_services WHERE project=?`, app)
 	if err != nil {
 		_ = tx.Rollback()
@@ -4652,14 +5023,15 @@ func (s *Server) deleteProjectData(app string) (map[string]int64, []string, erro
 	go func() { _ = s.ensureGlobalProxy() }()
 
 	return map[string]int64{
-		"lanes":            appStateCount,
-		"deploys":          deployCount,
-		"deploy_requests":  deployRequestCount,
-		"secrets":          secretCount,
-		"service_states":   serviceStateCount,
-		"service_specs":    serviceSpecCount,
-		"sync_sessions":    sessionCount,
-		"runtime_services": int64(len(services)),
+		"lanes":               appStateCount,
+		"deploys":             deployCount,
+		"deploy_requests":     deployRequestCount,
+		"secrets":             secretCount,
+		"service_credentials": credentialCount,
+		"service_states":      serviceStateCount,
+		"service_specs":       serviceSpecCount,
+		"sync_sessions":       sessionCount,
+		"runtime_services":    int64(len(services)),
 	}, warnings, nil
 }
 
@@ -4764,6 +5136,10 @@ func main() {
 	if err := migrateDB(db); err != nil {
 		panic(err)
 	}
+	relayDBKey, err := loadOrCreateRelayDBKey(dataDir)
+	if err != nil {
+		panic(fmt.Errorf("initialize RelayDB credential key: %w", err))
+	}
 	analyticsDB, err := sql.Open("sqlite", sqliteDSN(dbPath))
 	if err != nil {
 		panic(err)
@@ -4796,6 +5172,7 @@ func main() {
 		enablePluginMutations: getenvBool("RELAY_ENABLE_PLUGIN_MUTATIONS", false),
 		db:                    db,
 		analyticsDB:           analyticsDB,
+		relayDB:               newRelayDBManager(db, relayDBKey, hostTotalMemMB),
 		apiToken:              apiToken,
 		secretKey:             secretKey,
 		buildpacks:            defaultBuildpacks(),
@@ -4831,6 +5208,7 @@ func main() {
 	go func() { _ = s.ensureGlobalProxy() }()
 	go superviseWorker("lane-expiry", s.runLaneExpiryWorker)
 	go s.runHousekeepingWorker()
+	go runGuarded("warm-images", s.warmBuildpackBaseImages)
 
 	// Start worker pool: deploy jobs are I/O-bound (git, image pull/push,
 	// container ops), so we can run more workers than CPU cores. On very small
@@ -4884,6 +5262,7 @@ func main() {
 	mux.HandleFunc("/api/deploys/cancel/", authDeployer(s.handleDeployCancel))
 	mux.HandleFunc("/api/deploys/", authAny(s.handleDeployByID))
 	mux.HandleFunc("/api/deploys/rollback", authDeployer(s.handleRollback))
+	mux.HandleFunc("/api/deploys/rollout-abort", authDeployer(s.handleRolloutAbort))
 	mux.HandleFunc("/api/apps/start", authDeployer(s.handleAppStart))
 	mux.HandleFunc("/api/apps/stop", authDeployer(s.handleAppStop))
 	mux.HandleFunc("/api/apps/delete-lane", authDeployer(s.handleLaneDelete))
@@ -5594,6 +5973,16 @@ func (s *Server) runtimeLogTargets(app string, env DeployEnv, branch string) ([]
 				Service:   svc.Name,
 				Image:     svc.Image,
 			})
+			if strings.EqualFold(svc.Type, serviceTypeRelayDB) {
+				add(RuntimeLogTarget{
+					ID:        "service:" + svc.Name + ":pool",
+					Label:     fmt.Sprintf("RelayDB pool: %s", svc.Name),
+					Kind:      "service",
+					Container: relayDBPoolContainerName(svc.Container),
+					Service:   svc.Name,
+					Image:     getenv("RELAY_PGBOUNCER_IMAGE", defaultPgBouncerImage),
+				})
+			}
 		}
 	}
 
@@ -7063,6 +7452,52 @@ func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, deploy)
+}
+
+// handleRolloutAbort lets a user manually flip an in-progress canary/blue-green
+// rollout back to the previously-active slot immediately, instead of waiting
+// out rollout_assess_seconds for the automated health check in
+// startRolloutWatch. It's the fast path (an existing container swap, not a
+// full redeploy) — handleRollback (POST /api/deploys/rollback) is the
+// separate, heavier "redeploy a past image" flow and doesn't touch an
+// in-flight traffic split the way this does.
+func (s *Server) handleRolloutAbort(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpError(w, 405, "method not allowed")
+		return
+	}
+	var req AppActionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, 400, "invalid json")
+		return
+	}
+	req.Env = normalizeDeployEnv(string(req.Env))
+	if !validDeployTarget(req.App, req.Env, req.Branch) {
+		httpError(w, 400, "app, branch, env required")
+		return
+	}
+	if _, ok := s.requireLaneAccess(w, r, req.App, req.Env, "deployer"); !ok {
+		return
+	}
+	st, err := s.getAppState(req.App, req.Env, req.Branch)
+	if err != nil || st == nil {
+		httpError(w, 404, "app not found")
+		return
+	}
+	if normalizeActiveSlot(st.StandbySlot) == "" || strings.TrimSpace(st.RolloutStatus) != "monitoring" {
+		httpError(w, 400, "no active rollout to abort")
+		return
+	}
+	if err := s.rollbackCanary(req.App, req.Env, req.Branch, "manually aborted by "+requestActorLabel(s, r)); err != nil {
+		httpError(w, 500, "rollback failed: "+err.Error())
+		return
+	}
+	st, err = s.getAppState(req.App, req.Env, req.Branch)
+	if err != nil || st == nil {
+		writeJSON(w, 200, map[string]string{"status": "rolled_back"})
+		return
+	}
+	writeJSON(w, 200, st)
 }
 
 func (s *Server) handleDeployCancel(w http.ResponseWriter, r *http.Request) {
@@ -8606,21 +9041,30 @@ func (s *Server) runDeploy(job DeployJob) {
 			Verify:          nil,
 		}
 	} else {
-		// Select buildpack (ConfigBuildpack has priority if cfg exists)
+		// Select buildpack (ConfigBuildpack has priority if cfg exists). Keep
+		// scanning after the first match so an ambiguous repo (e.g. both
+		// go.mod and package.json at the root) is visible in the build log
+		// instead of being silently resolved by list order.
 		var pack Buildpack
+		var matchedNames []string
 		for _, bp := range s.buildpacks {
 			ok := bp.Detect(projectRootDir, cfg)
 			log("buildpack detect: %s -> %v", bp.Name(), ok)
 			if ok {
-				pack = bp
-				break
+				matchedNames = append(matchedNames, bp.Name())
+				if pack == nil {
+					pack = bp
+				}
 			}
+		}
+		if len(matchedNames) > 1 {
+			log("warning: %d buildpacks matched (%s) — selected %q by priority order; set \"kind\" in relay.config.json to pin this explicitly if that's wrong", len(matchedNames), strings.Join(matchedNames, ", "), pack.Name())
 		}
 		if pack == nil {
 			end := time.Now()
 			d.Status = StatusFailed
 			d.EndedAt = &end
-			d.Error = "no buildpack matched (add relay.config.json or a recognizable project file)"
+			d.Error = "no buildpack matched (add relay.config.json or a recognizable project file)." + monorepoSubdirHint(projectRootDir, s.buildpacks, cfg)
 			_ = s.updateDeployStatus(d.ID, d.Status, d.Error, d.StartedAt, d.EndedAt, "", "")
 			return
 		}
@@ -8721,8 +9165,15 @@ func (s *Server) runDeploy(job DeployJob) {
 			log("pre-build: only %d MB disk available — running housekeeping pass", avail)
 			s.pruneDeployImages()
 			// BuildKit build cache is the largest silent consumer and is not
-			// touched by image pruning; drop it entirely when disk is this low.
-			s.pruneBuildCache(true)
+			// touched by image pruning. Try a bounded prune (keeps the newest
+			// RELAY_BUILD_CACHE_KEEP_GB) first — that's usually enough to clear
+			// the low-disk condition without throwing away cache that would
+			// otherwise make the next build of the SAME app fast. Only fall
+			// back to wiping the entire cache if that wasn't enough.
+			s.pruneBuildCache(false)
+			if after := diskAvailableMB(s.dataDir); after == 0 || after < 2048 {
+				s.pruneBuildCache(true)
+			}
 			if after := diskAvailableMB(s.dataDir); after > 0 {
 				log("pre-build: %d MB available after prune", after)
 			}
@@ -8974,6 +9425,7 @@ func (s *Server) runDeploy(job DeployJob) {
 			return ""
 		}(),
 		Engine:        engine,
+		BuildpackKind: plan.Kind,
 		CurrentImage:  artifactRef,
 		PreviousImage: prevImg,
 		Mode:          firstNonEmpty(req.Mode, "port"),
@@ -10041,7 +10493,11 @@ func (s *Server) assessRolloutLog(app string, env DeployEnv, branch string, acti
 	if sinceMillis > 0 {
 		since = strconv.FormatInt(sinceMillis/1000, 10)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// 8s (was 3s): scanning up to 20000 log lines can legitimately take longer
+	// than 3s under host load, and a cutoff scan used to be reported as a
+	// clean, error-free result (see below) — silently undercounting requests
+	// and letting a genuinely failing canary sail through the health check.
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	pr, err := s.runtime.LogStream(ctx, containerName, 20000, since)
 	if err != nil {
@@ -10078,7 +10534,17 @@ func (s *Server) assessRolloutLog(app string, env DeployEnv, branch string, acti
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, io.ErrClosedPipe) {
+		// A deadline exceeded mid-scan means the read was cut off before it
+		// reached the end of the window — total/errorCount are a partial,
+		// potentially misleading sample, not a clean result. Treat that as a
+		// failed assessment so the caller doesn't graduate a canary on
+		// undercounted data. io.ErrClosedPipe / context.Canceled without a
+		// deadline are the normal "reader closed after we were done" case
+		// and are still safe to treat as success.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return total, errorCount, fmt.Errorf("log scan timed out before finishing: %w", err)
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, io.ErrClosedPipe) {
 			return total, errorCount, nil
 		}
 		return total, errorCount, err
@@ -10123,6 +10589,16 @@ func (s *Server) startRolloutWatch(app string, env DeployEnv, branch string) {
 		}
 
 		total, errors, logErr := s.assessRolloutLog(app, env, branch, st.ActiveSlot, st.RolloutStartedAt)
+		// A failed/inconclusive assessment (log stream unreachable, scan
+		// timed out, container not running) must never be treated the same
+		// as "no errors seen" — that would auto-promote a canary relay
+		// never actually verified. Retry once after a short backoff before
+		// giving up, since most causes here (a slow log read, a momentarily
+		// busy proxy) are transient.
+		if logErr != nil {
+			time.Sleep(10 * time.Second)
+			total, errors, logErr = s.assessRolloutLog(app, env, branch, st.ActiveSlot, st.RolloutStartedAt)
+		}
 		errorPercent := 0.0
 		if total > 0 {
 			errorPercent = (float64(errors) / float64(total)) * 100
@@ -10132,6 +10608,15 @@ func (s *Server) startRolloutWatch(app string, env DeployEnv, branch string) {
 
 		if logErr == nil && total >= minRequests && errorPercent > threshold {
 			_ = s.rollbackCanary(app, env, branch, fmt.Sprintf("%.2f%% 5xx over %d requests", errorPercent, total))
+			return
+		}
+		if logErr != nil {
+			// Still couldn't get a trustworthy read after the retry. Hold —
+			// leave RolloutStatus as "monitoring" rather than blindly
+			// graduating an unverified canary. relayd re-arms this watch on
+			// its next restart (resumeRolloutWatches); the split otherwise
+			// stays as-is until then.
+			s.auditLog("relay-rollout", "rollout.assess_failed", app, fmt.Sprintf("env=%s branch=%s requests=%d err=%v — holding at current split, not graduating", env, branch, total, logErr))
 			return
 		}
 		_ = s.graduateCanary(app, env, branch, total, errorPercent, logErr)
@@ -10149,7 +10634,7 @@ func (s *Server) graduateCanary(app string, env DeployEnv, branch string, total 
 	st.TrafficSplitPercent = 100
 	st.RolloutStartedAt = 0
 	st.RolloutStatus = "graduated"
-	_ = s.saveAppState(st)
+	_ = s.saveRolloutGraduation(st)
 	s.broadcastSnapshot()
 	s.auditLog("relay-rollout", "rollout.graduate", app, fmt.Sprintf("env=%s branch=%s requests=%d error_percent=%.2f err=%v", env, branch, total, errorPercent, assessErr))
 	s.cleanupStandbySlotAfter(app, env, branch, st.ActiveSlot, st.StandbySlot, st.ServicePort, st.HostPort, st.Mode, st.TrafficMode, st.PublicHost, rolloutDrainDuration())
@@ -10179,7 +10664,7 @@ func (s *Server) rollbackCanary(app string, env DeployEnv, branch string, detail
 	if st.PreviousImage != "" {
 		st.CurrentImage = st.PreviousImage
 	}
-	_ = s.saveAppState(st)
+	_ = s.saveRolloutRollback(st)
 	s.broadcastSnapshot()
 	s.auditLog("relay-rollout", "rollout.rollback", app, fmt.Sprintf("env=%s branch=%s %s", env, branch, detail))
 	return nil
@@ -13056,6 +13541,7 @@ func migrateDB(db *sql.DB) error {
 			mem_limit TEXT DEFAULT '',
 			resource_mode TEXT DEFAULT '',
 			volumes TEXT DEFAULT '',
+			buildpack_kind TEXT DEFAULT '',
 			updated_at INTEGER,
 			PRIMARY KEY (app, env, branch)
 		);`,
@@ -13106,6 +13592,17 @@ func migrateDB(db *sql.DB) error {
 			updated_at INTEGER,
 			PRIMARY KEY (project, env, branch, name)
 		);`,
+		`CREATE TABLE IF NOT EXISTS service_credentials (
+			project TEXT NOT NULL,
+			env TEXT NOT NULL,
+			branch TEXT NOT NULL,
+			name TEXT NOT NULL,
+			username TEXT NOT NULL,
+			password TEXT NOT NULL,
+			database_name TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (project, env, branch, name)
+		);`,
 	}
 	for _, st := range stmts {
 		if _, err := db.Exec(st); err != nil {
@@ -13144,6 +13641,7 @@ func migrateDB(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN mem_limit TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN resource_mode TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN public_hosts TEXT DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE app_state ADD COLUMN buildpack_kind TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN image TEXT DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN port INTEGER DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE project_services ADD COLUMN host_port INTEGER DEFAULT 0`)
@@ -13852,23 +14350,53 @@ func (s *Server) reconcileStaleDeploysOnStartup() error {
 func (s *Server) saveAppState(st *AppState) error {
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO app_state
-		(app, env, branch, repo_url, project_root, build_context, dockerfile, engine, current_image, previous_image, mode, host_port, host_port_explicit, service_port, public_host, public_hosts, active_slot, standby_slot, drain_until, traffic_mode, access_policy, ip_allowlist, repo_hash, expires_at, webhook_secret, notification_webhooks, traffic_split_percent, rollout_min_requests, rollout_error_percent, rollout_assess_seconds, rollout_started_at, rollout_deploy_id, rollout_status, stopped, cpu_limit, mem_limit, resource_mode, volumes, git_token, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(app, env, branch, repo_url, project_root, build_context, dockerfile, engine, current_image, previous_image, mode, host_port, host_port_explicit, service_port, public_host, public_hosts, active_slot, standby_slot, drain_until, traffic_mode, access_policy, ip_allowlist, repo_hash, expires_at, webhook_secret, notification_webhooks, traffic_split_percent, rollout_min_requests, rollout_error_percent, rollout_assess_seconds, rollout_started_at, rollout_deploy_id, rollout_status, stopped, cpu_limit, mem_limit, resource_mode, volumes, buildpack_kind, git_token, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		st.App, string(st.Env), st.Branch, st.RepoURL, st.ProjectRoot, st.BuildContext, st.Dockerfile, firstNonEmptyEngine(st.Engine), st.CurrentImage, st.PreviousImage, st.Mode,
-		st.HostPort, st.HostPortExplicit, st.ServicePort, st.PublicHost, encodePublicHosts(st.PublicHosts), normalizeActiveSlot(st.ActiveSlot), normalizeActiveSlot(st.StandbySlot), st.DrainUntil, firstNonEmpty(normalizeTrafficMode(st.TrafficMode), "edge"), firstNonEmpty(normalizeAccessPolicy(st.AccessPolicy), s.lanePolicy(st.Env).DefaultAccessPolicy), normalizeIPAllowlist(st.IPAllowlist), st.RepoHash, st.ExpiresAt, st.WebhookSecret, st.NotificationWebhooks, st.TrafficSplitPercent, st.RolloutMinRequests, st.RolloutErrorPercent, st.RolloutAssessSeconds, st.RolloutStartedAt, st.RolloutDeployID, st.RolloutStatus, st.Stopped, strings.TrimSpace(st.CPULimit), strings.TrimSpace(st.MemLimit), strings.TrimSpace(st.ResourceMode), encodeVolumes(st.Volumes), st.GitToken, time.Now().UnixMilli(),
+		st.HostPort, st.HostPortExplicit, st.ServicePort, st.PublicHost, encodePublicHosts(st.PublicHosts), normalizeActiveSlot(st.ActiveSlot), normalizeActiveSlot(st.StandbySlot), st.DrainUntil, firstNonEmpty(normalizeTrafficMode(st.TrafficMode), "edge"), firstNonEmpty(normalizeAccessPolicy(st.AccessPolicy), s.lanePolicy(st.Env).DefaultAccessPolicy), normalizeIPAllowlist(st.IPAllowlist), st.RepoHash, st.ExpiresAt, st.WebhookSecret, st.NotificationWebhooks, st.TrafficSplitPercent, st.RolloutMinRequests, st.RolloutErrorPercent, st.RolloutAssessSeconds, st.RolloutStartedAt, st.RolloutDeployID, st.RolloutStatus, st.Stopped, strings.TrimSpace(st.CPULimit), strings.TrimSpace(st.MemLimit), strings.TrimSpace(st.ResourceMode), encodeVolumes(st.Volumes), strings.TrimSpace(st.BuildpackKind), st.GitToken, time.Now().UnixMilli(),
+	)
+	return err
+}
+
+// saveRolloutGraduation persists only the columns rollout graduation touches,
+// as a targeted UPDATE rather than saveAppState's full-row INSERT OR REPLACE.
+// graduateCanary runs on a background timer and can land after a concurrent
+// deploy or config save already wrote a newer full row for this lane; a
+// full-row REPLACE here would silently clobber every other column (e.g. a
+// just-deployed current_image) with this goroutine's now-stale copy. Only
+// touching the columns actually being changed makes the two writers
+// commutative instead of last-write-wins.
+func (s *Server) saveRolloutGraduation(st *AppState) error {
+	_, err := s.db.Exec(
+		`UPDATE app_state SET traffic_split_percent=?, rollout_started_at=?, rollout_status=?, updated_at=?
+		 WHERE app=? AND env=? AND branch=?`,
+		st.TrafficSplitPercent, st.RolloutStartedAt, st.RolloutStatus, time.Now().UnixMilli(),
+		st.App, string(st.Env), st.Branch,
+	)
+	return err
+}
+
+// saveRolloutRollback is saveRolloutGraduation's counterpart for rollbackCanary
+// — same rationale, scoped to the columns a rollback actually changes.
+func (s *Server) saveRolloutRollback(st *AppState) error {
+	_, err := s.db.Exec(
+		`UPDATE app_state SET active_slot=?, standby_slot=?, drain_until=?, traffic_split_percent=?, rollout_started_at=?, rollout_status=?, current_image=?, updated_at=?
+		 WHERE app=? AND env=? AND branch=?`,
+		normalizeActiveSlot(st.ActiveSlot), normalizeActiveSlot(st.StandbySlot), st.DrainUntil, st.TrafficSplitPercent, st.RolloutStartedAt, st.RolloutStatus, st.CurrentImage, time.Now().UnixMilli(),
+		st.App, string(st.Env), st.Branch,
 	)
 	return err
 }
 
 func (s *Server) getAppState(app string, env DeployEnv, branch string) (*AppState, error) {
-	row := s.db.QueryRow(`SELECT app, env, branch, repo_url, COALESCE(project_root,''), COALESCE(build_context,''), COALESCE(dockerfile,''), COALESCE(engine,''), current_image, previous_image, mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(public_hosts,''), COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(repo_hash,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), COALESCE(stopped,0), COALESCE(cpu_limit,''), COALESCE(mem_limit,''), COALESCE(resource_mode,''), COALESCE(volumes,''), COALESCE(git_token,'')
+	row := s.db.QueryRow(`SELECT app, env, branch, repo_url, COALESCE(project_root,''), COALESCE(build_context,''), COALESCE(dockerfile,''), COALESCE(engine,''), current_image, previous_image, mode, host_port, COALESCE(host_port_explicit,0), service_port, public_host, COALESCE(public_hosts,''), COALESCE(active_slot,''), COALESCE(standby_slot,''), COALESCE(drain_until,0), COALESCE(traffic_mode,''), COALESCE(access_policy,''), COALESCE(ip_allowlist,''), COALESCE(repo_hash,''), COALESCE(expires_at,0), COALESCE(webhook_secret,''), COALESCE(notification_webhooks,''), COALESCE(traffic_split_percent,100), COALESCE(rollout_min_requests,25), COALESCE(rollout_error_percent,5), COALESCE(rollout_assess_seconds,300), COALESCE(rollout_started_at,0), COALESCE(rollout_deploy_id,''), COALESCE(rollout_status,''), COALESCE(stopped,0), COALESCE(cpu_limit,''), COALESCE(mem_limit,''), COALESCE(resource_mode,''), COALESCE(volumes,''), COALESCE(buildpack_kind,''), COALESCE(git_token,'')
 		FROM app_state WHERE app=? AND env=? AND branch=?`, app, string(env), branch)
 
 	var st AppState
 	var envS string
 	var publicHostsRaw string
 	var volumesRaw string
-	if err := row.Scan(&st.App, &envS, &st.Branch, &st.RepoURL, &st.ProjectRoot, &st.BuildContext, &st.Dockerfile, &st.Engine, &st.CurrentImage, &st.PreviousImage, &st.Mode, &st.HostPort, &st.HostPortExplicit, &st.ServicePort, &st.PublicHost, &publicHostsRaw, &st.ActiveSlot, &st.StandbySlot, &st.DrainUntil, &st.TrafficMode, &st.AccessPolicy, &st.IPAllowlist, &st.RepoHash, &st.ExpiresAt, &st.WebhookSecret, &st.NotificationWebhooks, &st.TrafficSplitPercent, &st.RolloutMinRequests, &st.RolloutErrorPercent, &st.RolloutAssessSeconds, &st.RolloutStartedAt, &st.RolloutDeployID, &st.RolloutStatus, &st.Stopped, &st.CPULimit, &st.MemLimit, &st.ResourceMode, &volumesRaw, &st.GitToken); err != nil {
+	if err := row.Scan(&st.App, &envS, &st.Branch, &st.RepoURL, &st.ProjectRoot, &st.BuildContext, &st.Dockerfile, &st.Engine, &st.CurrentImage, &st.PreviousImage, &st.Mode, &st.HostPort, &st.HostPortExplicit, &st.ServicePort, &st.PublicHost, &publicHostsRaw, &st.ActiveSlot, &st.StandbySlot, &st.DrainUntil, &st.TrafficMode, &st.AccessPolicy, &st.IPAllowlist, &st.RepoHash, &st.ExpiresAt, &st.WebhookSecret, &st.NotificationWebhooks, &st.TrafficSplitPercent, &st.RolloutMinRequests, &st.RolloutErrorPercent, &st.RolloutAssessSeconds, &st.RolloutStartedAt, &st.RolloutDeployID, &st.RolloutStatus, &st.Stopped, &st.CPULimit, &st.MemLimit, &st.ResourceMode, &volumesRaw, &st.BuildpackKind, &st.GitToken); err != nil {
 		return nil, err
 	}
 	st.Env = DeployEnv(envS)

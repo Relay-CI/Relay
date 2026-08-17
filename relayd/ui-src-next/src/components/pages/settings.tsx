@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { cn } from "@/lib/utils";
 import {
   buildSettingsConfig,
@@ -36,6 +36,7 @@ import {
   requestPromotion,
   approvePromotion,
   rollback,
+  abortRollout,
   type AppConfig,
   type Secret,
   type Companion,
@@ -177,14 +178,26 @@ export function SettingsPage({
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState("");
 
+  // selectedEnv is recomputed (new object identity) on every dashboard SSE
+  // push, even when this lane's data didn't change. Reloading settings on
+  // every identity change would clobber in-progress, unsaved edits (e.g. a
+  // host chip typed but not yet saved). Track the latest value in a ref and
+  // only re-trigger the load when the actual lane (app/env/branch) changes.
+  const selectedEnvRef = useRef(selectedEnv);
+  selectedEnvRef.current = selectedEnv;
+  const envKey = selectedEnv
+    ? `${selectedEnv.app}::${selectedEnv.env}::${selectedEnv.branch}`
+    : "";
+
   const load = useCallback(async () => {
-    if (!selectedEnv) return;
+    const env = selectedEnvRef.current;
+    if (!env) return;
     try {
       const [cfg, secs, comps, promotionItems] = await Promise.all([
-        getAppConfig(selectedEnv),
-        getSecrets(selectedEnv),
-        getCompanions(selectedEnv),
-        getPromotions(selectedEnv.app, selectedEnv.env, selectedEnv.branch),
+        getAppConfig(env),
+        getSecrets(env),
+        getCompanions(env),
+        getPromotions(env.app, env.env, env.branch),
       ]);
       const normalized = buildSettingsConfig(cfg) as AppConfig;
       setConfig(normalized);
@@ -197,11 +210,11 @@ export function SettingsPage({
         text: `Failed to load settings: ${err instanceof Error ? err.message : "unknown error"}`,
       });
     }
-  }, [selectedEnv]);
+  }, []);
 
   useEffect(() => {
     load();
-  }, [load]);
+  }, [envKey, load]);
 
   const promotionTargets = useMemo(
     () =>
@@ -266,7 +279,6 @@ export function SettingsPage({
 
   function toApiPayload(cfg: AppConfig) {
     const publicHosts = normalizeHostEntries(cfg.public_hosts ?? []);
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { git_token_set: _gts, ...rest } = cfg;
     return {
       ...rest,
@@ -624,6 +636,31 @@ export function SettingsPage({
     }
   }
 
+  async function handleAbortRollout() {
+    if (!selectedEnv || !canWrite) return;
+    const confirmed = window.confirm(
+      `Abort the in-progress rollout for ${selectedEnv.app}/${selectedEnv.env}/${selectedEnv.branch}? Traffic flips back to the previous slot immediately — this doesn't wait for the automated health check.`,
+    );
+    if (!confirmed) return;
+
+    setRolloutBusy("abort-rollout");
+    try {
+      await abortRollout(selectedEnv);
+      setNotice({
+        tone: "ok",
+        text: "Rollout aborted. Traffic is back on the previous slot.",
+      });
+      await onUpdated();
+    } catch (err) {
+      setNotice({
+        tone: "warn",
+        text: `Abort failed: ${err instanceof Error ? err.message : "unknown error"}`,
+      });
+    } finally {
+      setRolloutBusy("");
+    }
+  }
+
   async function handleManualDeploy() {
     if (!selectedEnv || !canWrite) return;
     const [targetEnv, targetBranch] = manualDeployTargetKey.split("::");
@@ -908,6 +945,17 @@ export function SettingsPage({
               >
                 {rolloutBusy === "promote-traffic" ? "Applying..." : "Promote All Traffic"}
               </button>
+              {selectedEnv.rollout_status === "monitoring" && (
+                <button
+                  type="button"
+                  onClick={handleAbortRollout}
+                  disabled={rolloutBusy === "abort-rollout" || !canWrite}
+                  className="ghost-btn border-red-500/40 text-red-300 hover:bg-red-500/10"
+                  title="Flip traffic back to the previous slot right now, without waiting for the automated health check"
+                >
+                  {rolloutBusy === "abort-rollout" ? "Aborting..." : "Abort Rollout Now"}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={handleRollbackLane}
@@ -1121,6 +1169,17 @@ export function SettingsPage({
                   className="ghost-btn"
                 >
                   {promotionBusy ? "Approving..." : "Approve Pending Request"}
+                </button>
+              )}
+              {selectedEnv.rollout_status === "monitoring" && (
+                <button
+                  type="button"
+                  onClick={handleAbortRollout}
+                  disabled={rolloutBusy === "abort-rollout" || !canWrite}
+                  className="ghost-btn border-red-500/40 text-red-300 hover:bg-red-500/10"
+                  title="Flip traffic back to the previous slot right now, without waiting for the automated health check"
+                >
+                  {rolloutBusy === "abort-rollout" ? "Aborting..." : "Abort Rollout Now"}
                 </button>
               )}
               <button
@@ -1435,7 +1494,7 @@ export function SettingsPage({
         wide
       >
         <div className="flex gap-2 mb-4 flex-wrap">
-          {["postgres", "redis", "worker", "custom"].map((kind) => (
+          {["relaydb", "postgres", "redis", "worker", "custom"].map((kind) => (
             <button
               key={kind}
               type="button"
@@ -1515,6 +1574,7 @@ export function SettingsPage({
                   }
                 >
                   {[
+                    "relaydb",
                     "postgres",
                     "redis",
                     "worker",
@@ -1540,6 +1600,25 @@ export function SettingsPage({
                   }
                 />
               </Field>
+              {companionDraft.type === "relaydb" && (
+                <Field label="Performance Profile">
+                  <select
+                    className="text-input"
+                    value={companionDraft.profile ?? "auto"}
+                    onChange={(e) =>
+                      setCompanionDraft({
+                        ...companionDraft,
+                        profile: e.target.value as CompanionConfig["profile"],
+                      })
+                    }
+                  >
+                    <option value="auto">Auto (host-aware)</option>
+                    <option value="starter">Starter (512 MB)</option>
+                    <option value="balanced">Balanced (2 GB)</option>
+                    <option value="throughput">Throughput (8 GB)</option>
+                  </select>
+                </Field>
+              )}
               <Field label="Image">
                 <input
                   className="text-input"
@@ -1861,6 +1940,17 @@ function normalizeHostEntries(values: string[]): string[] {
   return out;
 }
 
+// For a bare apex host ("ethrealm.com") returns its www pair
+// ("www.ethrealm.com"), and vice versa. Only pairs 2-label apex hosts so
+// deeper subdomains ("app.ethrealm.com") aren't guessed at.
+function wwwPairFor(host: string): string | null {
+  if (host.startsWith("www.")) {
+    const apex = host.slice(4);
+    return apex.split(".").length === 2 ? apex : null;
+  }
+  return host.split(".").length === 2 ? `www.${host}` : null;
+}
+
 function HostChipsInput({
   value,
   onChange,
@@ -1885,7 +1975,11 @@ function HostChipsInput({
       setDraft("");
       return;
     }
-    onChange(normalizeHostEntries([...value, ...additions]));
+    const withPairs = additions.flatMap((host) => {
+      const pair = wwwPairFor(host);
+      return pair ? [host, pair] : [host];
+    });
+    onChange(normalizeHostEntries([...value, ...withPairs]));
     setDraft("");
   }
 
@@ -1954,7 +2048,7 @@ function HostChipsInput({
         />
       </div>
       <p className="mt-2 text-[11px] text-white/32">
-        Type a hostname and press Enter, Tab, or comma to add it. The first chip is the primary host used for preview links.
+        Type a hostname and press Enter, Tab, or comma to add it. Adding an apex domain (or its www subdomain) also adds the other automatically. The first chip is the primary host used for preview links.
       </p>
     </div>
   );

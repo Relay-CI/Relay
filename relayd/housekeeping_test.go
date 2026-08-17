@@ -5,6 +5,37 @@ import (
 	"testing"
 )
 
+// The *Setting methods (imageRetentionPerLaneSetting etc.) back the Server
+// Settings → Cleanup UI: a DB-persisted value must win over the env var and
+// hardcoded default, matching serverBaseDomain's precedence.
+func TestCleanupSettingsPreferDBValueOverEnvAndDefault(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+
+	if got := s.imageRetentionPerLaneSetting(); got != 3 {
+		t.Fatalf("default image_retention_per_lane = %d, want 3", got)
+	}
+	t.Setenv("RELAY_IMAGE_RETENTION_PER_LANE", "7")
+	if got := s.imageRetentionPerLaneSetting(); got != 7 {
+		t.Fatalf("env-overridden image_retention_per_lane = %d, want 7", got)
+	}
+	if _, err := s.db.Exec(`INSERT INTO server_config (key, value) VALUES ('image_retention_per_lane', '1')`); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	if got := s.imageRetentionPerLaneSetting(); got != 1 {
+		t.Fatalf("db-overridden image_retention_per_lane = %d, want 1 (should beat env var)", got)
+	}
+
+	if got := s.unusedImageMaxAgeDaysSetting(); got != 14 {
+		t.Fatalf("default unused_image_max_age_days = %d, want 14", got)
+	}
+	if got := s.logRetentionDaysSetting(); got != 30 {
+		t.Fatalf("default log_retention_days = %d, want 30", got)
+	}
+	if got := s.buildCacheKeepGBSetting(); got != 10 {
+		t.Fatalf("default build_cache_keep_gb = %d, want 10", got)
+	}
+}
+
 func TestSelectImagesToPrune(t *testing.T) {
 	records := []laneImageRecord{
 		// lane A, newest first
@@ -44,8 +75,8 @@ func TestSelectImagesToPruneDeduplicates(t *testing.T) {
 func TestHousekeepingBuildCacheKeepGB(t *testing.T) {
 	// default when unset
 	t.Setenv("RELAY_BUILD_CACHE_KEEP_GB", "")
-	if got := housekeepingBuildCacheKeepGB(); got != 5 {
-		t.Fatalf("default keep-GB = %d, want 5", got)
+	if got := housekeepingBuildCacheKeepGB(); got != 10 {
+		t.Fatalf("default keep-GB = %d, want 10", got)
 	}
 	// explicit override
 	t.Setenv("RELAY_BUILD_CACHE_KEEP_GB", "12")
@@ -59,8 +90,8 @@ func TestHousekeepingBuildCacheKeepGB(t *testing.T) {
 	}
 	// garbage falls back to default
 	t.Setenv("RELAY_BUILD_CACHE_KEEP_GB", "notanumber")
-	if got := housekeepingBuildCacheKeepGB(); got != 5 {
-		t.Fatalf("invalid keep-GB = %d, want 5 (default)", got)
+	if got := housekeepingBuildCacheKeepGB(); got != 10 {
+		t.Fatalf("invalid keep-GB = %d, want 10 (default)", got)
 	}
 }
 

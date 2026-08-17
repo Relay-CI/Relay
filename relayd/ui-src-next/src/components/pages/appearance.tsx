@@ -62,7 +62,12 @@ export function AppearancePage({ currentUser }: AppearancePageProps) {
       setSavedThemeName(tn);
       setSavedCustomCSS(tc);
       setThemeDraft({ name: tn, css: tc });
-    }).catch(() => {});
+    }).catch((err) => {
+      setNotice({
+        tone: "err",
+        text: `Failed to load saved appearance: ${err instanceof Error ? err.message : "unknown error"}. Showing defaults, not your saved theme.`,
+      });
+    });
   }, [isOwner]);
 
   function buildCompositeCSS(themeCSS: string, font: string, radius: string, density: string, sidebar: string, custom: string) {

@@ -34,17 +34,83 @@ func housekeepingImageRetentionPerLane() int {
 }
 
 // housekeepingBuildCacheKeepGB caps how much BuildKit build cache to retain.
-// RELAY_BUILD_CACHE_KEEP_GB overrides the 5 GB default; 0 disables the cap
+// RELAY_BUILD_CACHE_KEEP_GB overrides the 10 GB default; 0 disables the cap
 // (never prune cache). This is the single biggest silent disk consumer: cache
 // mounts and layer cache are NOT touched by `docker image prune`, so without
 // this a busy host accumulates tens of GB of build cache until the disk fills.
+// 10 GB (up from 5) because a single Next.js app's npm store + .next cache +
+// base image layers can approach or exceed 5 GB on its own — too small a cap
+// evicts an app's own cache before its next deploy, defeating the point.
 func housekeepingBuildCacheKeepGB() int {
 	if v := strings.TrimSpace(os.Getenv("RELAY_BUILD_CACHE_KEEP_GB")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			return n
 		}
 	}
-	return 5
+	return 10
+}
+
+// The following *Setting methods are the effective, user-configurable
+// versions of the housekeeping* free functions above: DB-persisted value
+// (settable from Server Settings → Cleanup in the UI) first, then the env
+// var, then the hardcoded default — same precedence as serverBaseDomain and
+// friends. The free functions stay as-is (and stay directly unit-testable
+// without a DB) and are only the last fallback here.
+
+func (s *Server) imageRetentionPerLaneSetting() int {
+	if v := s.serverConfigGet("image_retention_per_lane"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return housekeepingImageRetentionPerLane()
+}
+
+func (s *Server) logRetentionDaysSetting() int {
+	if v := s.serverConfigGet("log_retention_days"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return housekeepingLogRetentionDays()
+}
+
+func (s *Server) buildCacheKeepGBSetting() int {
+	if v := s.serverConfigGet("build_cache_keep_gb"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return housekeepingBuildCacheKeepGB()
+}
+
+// unusedImageMaxAgeDaysSetting controls how old an unused, non-dangling
+// image (e.g. an old base image no app references anymore) must be before
+// it's eligible for removal. This is what actually clears the "images pile
+// up for weeks and I have to purge them manually" complaint: plain `docker
+// image prune` (without -a) only removes dangling/untagged layers — a
+// named, tagged image like an old node:22 pull that nothing currently
+// builds against sits there forever otherwise, no matter how many
+// housekeeping passes run. 0 disables this (falls back to the old
+// dangling-only behavior).
+//
+// Caveat, stated honestly: Docker's `until=` filter matches image
+// creation/pull time, not last-used time, since Docker doesn't track that.
+// This can't touch an image still referenced by any container (Docker
+// refuses), so the worst case for an old-but-still-relevant base image is a
+// re-pull on the next build — slower, not broken.
+func (s *Server) unusedImageMaxAgeDaysSetting() int {
+	if v := s.serverConfigGet("unused_image_max_age_days"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("RELAY_UNUSED_IMAGE_MAX_AGE_DAYS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return 14
 }
 
 // housekeepingInterval returns how often to run the full housekeeping pass.
@@ -143,7 +209,7 @@ func (s *Server) pruneBuildCache(aggressive bool) {
 	if _, err := exec.LookPath("docker"); err != nil {
 		return
 	}
-	keepGB := housekeepingBuildCacheKeepGB()
+	keepGB := s.buildCacheKeepGBSetting()
 	if keepGB <= 0 && !aggressive {
 		return // cap disabled and no disk emergency
 	}
@@ -258,7 +324,7 @@ func (s *Server) pruneOldInMemoryDeploys() {
 // pruneDeployLogs removes build/deploy log files older than the retention
 // window. RELAY_LOG_RETENTION_DAYS overrides the 30-day default; 0 disables.
 func (s *Server) pruneDeployLogs() {
-	days := housekeepingLogRetentionDays()
+	days := s.logRetentionDaysSetting()
 	if days <= 0 {
 		return
 	}
@@ -326,13 +392,10 @@ func selectImagesToPrune(records []laneImageRecord, protected map[string]struct{
 // targets) are never deleted, and `docker rmi` without -f refuses to remove
 // anything a container still uses.
 func (s *Server) pruneDeployImages() {
-	keep := housekeepingImageRetentionPerLane()
-	if keep <= 0 {
-		return
-	}
 	if _, err := exec.LookPath("docker"); err != nil {
 		return
 	}
+	keep := s.imageRetentionPerLaneSetting()
 
 	protected := map[string]struct{}{}
 	if rows, err := s.db.Query(`SELECT COALESCE(current_image,''), COALESCE(previous_image,'') FROM app_state`); err == nil {
@@ -368,15 +431,26 @@ func (s *Server) pruneDeployImages() {
 	}
 
 	removed := 0
-	for _, image := range selectImagesToPrune(records, protected, keep) {
-		if exec.Command("docker", "rmi", image).Run() == nil {
-			removed++
+	if keep > 0 {
+		// keep <= 0 means "don't touch per-lane history" — selectImagesToPrune
+		// would otherwise treat 0 as "keep none" and delete everything.
+		for _, image := range selectImagesToPrune(records, protected, keep) {
+			if exec.Command("docker", "rmi", image).Run() == nil {
+				removed++
+			}
+		}
+		if removed > 0 {
+			fmt.Printf("housekeeping: removed %d old build image(s) (keeping %d per lane)\n", removed, keep)
 		}
 	}
-	// Dangling layers from superseded builds hold no tags and are always safe
-	// to reclaim; this does not touch BuildKit cache mounts.
-	_ = exec.Command("docker", "image", "prune", "-f").Run()
-	if removed > 0 {
-		fmt.Printf("housekeeping: removed %d old build image(s) (keeping %d per lane)\n", removed, keep)
+
+	// Beyond per-lane relay/-tagged image history: reclaim dangling layers
+	// (always safe — untagged, unreferenced) and, if configured, unused
+	// tagged images (e.g. old base images) past the configured age. Neither
+	// touches BuildKit cache mounts — that's pruneBuildCache's job.
+	if maxAgeDays := s.unusedImageMaxAgeDaysSetting(); maxAgeDays > 0 {
+		_ = exec.Command("docker", "image", "prune", "-a", "-f", "--filter", fmt.Sprintf("until=%dh", maxAgeDays*24)).Run()
+	} else {
+		_ = exec.Command("docker", "image", "prune", "-f").Run()
 	}
 }

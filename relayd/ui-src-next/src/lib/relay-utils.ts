@@ -1,7 +1,7 @@
 // ── Ported from ui-src/src/index.jsx ─────────────────────────────────────
 // All pure utility functions from the original Vite/React dashboard.
 
-import type { Deploy, EnvInfo, Project } from "./api";
+import type { CompanionConfig, Deploy, EnvInfo, Project } from "./api";
 
 export type { Project as NormalizedProject };
 
@@ -280,6 +280,47 @@ export function engineLabel(value: string | undefined): string {
   return value === "station" ? "Station" : "Docker";
 }
 
+// Human-readable label for a BuildPlan.Kind / AppState.buildpack_kind value
+// (relayd/main.go). Kinds not listed here (custom-dockerfile, static, etc)
+// fall back to a generic title-cased version of the raw kind.
+const FRAMEWORK_LABELS: Record<string, string> = {
+  "node-next-standalone": "Next.js",
+  "node-next": "Next.js",
+  sveltekit: "SvelteKit",
+  remix: "Remix",
+  nuxt: "Nuxt",
+  "node-vite": "Vite",
+  "expo-web": "Expo",
+  "sprint-ui": "Sprint UI",
+  bun: "Bun",
+  node: "Node",
+  php: "PHP",
+  go: "Go",
+  dotnet: ".NET",
+  python: "Python",
+  django: "Django",
+  fastapi: "FastAPI",
+  flask: "Flask",
+  ruby: "Ruby",
+  rails: "Rails",
+  java: "Java",
+  rust: "Rust",
+  "c-cpp": "C/C++",
+  "wasm-static": "WASM",
+  static: "Static",
+  "custom-dockerfile": "Dockerfile",
+};
+
+export function frameworkLabel(kind: string | undefined): string {
+  const value = (kind ?? "").trim();
+  if (!value) return "";
+  if (FRAMEWORK_LABELS[value]) return FRAMEWORK_LABELS[value];
+  return value
+    .split("-")
+    .map((part) => (part ? part[0].toUpperCase() + part.slice(1) : part))
+    .join(" ");
+}
+
 export function normalizeEngineValue(value: string | undefined): string {
   return value === "station" ? "station" : "docker";
 }
@@ -388,6 +429,7 @@ export function buildSettingsConfig(
 
 export function prettyCompanionType(value: string | undefined): string {
   const kind = (value ?? "custom").toLowerCase();
+  if (kind === "relaydb") return "RelayDB";
   if (kind === "postgres") return "Postgres";
   if (kind === "redis") return "Redis";
   if (kind === "mysql") return "MySQL";
@@ -396,8 +438,8 @@ export function prettyCompanionType(value: string | undefined): string {
   return "Custom";
 }
 
-export function defaultCompanionDraft(kind = "postgres") {
-  const base = {
+export function defaultCompanionDraft(kind = "postgres"): CompanionConfig {
+  const base: CompanionConfig = {
     name: "",
     type: kind,
     version: "",
@@ -416,6 +458,8 @@ export function defaultCompanionDraft(kind = "postgres") {
       start_period_seconds: 0,
     },
   };
+  if (kind === "relaydb")
+    return { ...base, name: "db", version: "17", profile: "auto", port: 5432 };
   if (kind === "postgres")
     return { ...base, name: "db", version: "16", port: 5432 };
   if (kind === "redis")

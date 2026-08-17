@@ -257,12 +257,16 @@ func parseCopy(rest string) DFInstruction {
 	ins := DFInstruction{Kind: DFCopy}
 	tokens := splitCopyTokens(rest)
 
-	// Extract --from=<stage> flag.
+	// Extract --from=<stage> flag; ignore any other BuildKit COPY flag
+	// (--chown=, --chmod=, --link, --exclude=, and any future addition) by
+	// its "--" prefix rather than an explicit allowlist — an unrecognized
+	// flag falling through to `paths` would silently corrupt Srcs/Dest for
+	// an otherwise-valid Dockerfile instead of just being ignored.
 	var paths []string
 	for _, t := range tokens {
 		if strings.HasPrefix(t, "--from=") {
 			ins.FromStage = strings.TrimPrefix(t, "--from=")
-		} else if strings.HasPrefix(t, "--chown=") || strings.HasPrefix(t, "--chmod=") {
+		} else if strings.HasPrefix(t, "--") {
 			// ignore
 		} else {
 			paths = append(paths, t)

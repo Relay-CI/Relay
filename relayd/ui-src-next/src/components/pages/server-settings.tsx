@@ -18,7 +18,7 @@ interface ServerSettingsPageProps {
   currentUser: CurrentUser;
 }
 
-type ServerTab = "routing" | "rules" | "checks" | "overview";
+type ServerTab = "routing" | "rules" | "cleanup";
 
 type RuleDraft = CustomHostRule & { id: string };
 
@@ -27,14 +27,26 @@ type DraftState = {
   dashboardHost: string;
   acmeDisabled: boolean;
   customHostRules: RuleDraft[];
+  imageRetentionPerLane: number;
+  unusedImageMaxAgeDays: number;
+  logRetentionDays: number;
+  buildCacheKeepGB: number;
 };
 
 const SERVER_TABS: Array<{ id: ServerTab; label: string }> = [
   { id: "routing", label: "Routing" },
   { id: "rules", label: "Custom Rules" },
-  { id: "checks", label: "Checks" },
-  { id: "overview", label: "How It Works" },
+  { id: "cleanup", label: "Cleanup" },
 ];
+
+// Mirrors relayd's housekeeping.go defaults so the form shows a sensible
+// value even before the first GET /api/server-config response lands.
+const CLEANUP_DEFAULTS = {
+  imageRetentionPerLane: 3,
+  unusedImageMaxAgeDays: 14,
+  logRetentionDays: 30,
+  buildCacheKeepGB: 10,
+};
 
 const RULE_ACTIONS: Array<{
   value: RuleDraft["action"];
@@ -103,6 +115,12 @@ function toDraftState(data?: ServerConfig | null): DraftState {
     dashboardHost: data?.dashboard_host ?? "",
     acmeDisabled: data?.acme_disabled === "true",
     customHostRules: rules,
+    imageRetentionPerLane:
+      data?.image_retention_per_lane ?? CLEANUP_DEFAULTS.imageRetentionPerLane,
+    unusedImageMaxAgeDays:
+      data?.unused_image_max_age_days ?? CLEANUP_DEFAULTS.unusedImageMaxAgeDays,
+    logRetentionDays: data?.log_retention_days ?? CLEANUP_DEFAULTS.logRetentionDays,
+    buildCacheKeepGB: data?.build_cache_keep_gb ?? CLEANUP_DEFAULTS.buildCacheKeepGB,
   };
 }
 
@@ -116,6 +134,10 @@ function serializeDraft(draft: DraftState): string {
       const { id, ...rest } = normalized;
       return rest;
     }),
+    imageRetentionPerLane: draft.imageRetentionPerLane,
+    unusedImageMaxAgeDays: draft.unusedImageMaxAgeDays,
+    logRetentionDays: draft.logRetentionDays,
+    buildCacheKeepGB: draft.buildCacheKeepGB,
   });
 }
 
@@ -143,7 +165,12 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
         setSavedDraft(nextDraft);
         setDraft(nextDraft);
       })
-      .catch(() => {});
+      .catch((err) => {
+        setNotice({
+          tone: "danger",
+          text: `Failed to load server config: ${err instanceof Error ? err.message : "unknown error"}. The form below may not reflect what's actually saved.`,
+        });
+      });
   }, [isOwner]);
 
   const dirty = useMemo(
@@ -177,6 +204,10 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
           const { id, ...rest } = normalized;
           return rest;
         }),
+        image_retention_per_lane: draft.imageRetentionPerLane,
+        unused_image_max_age_days: draft.unusedImageMaxAgeDays,
+        log_retention_days: draft.logRetentionDays,
+        build_cache_keep_gb: draft.buildCacheKeepGB,
       };
       const saved = await saveServerConfig(payload);
       const nextDraft = toDraftState(saved);
@@ -188,7 +219,9 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
         text:
           activeTab === "rules"
             ? "Saved. Custom host rules were written to the global Caddy proxy."
-            : "Saved. Global routing settings and managed domains were refreshed.",
+            : activeTab === "cleanup"
+              ? "Saved. New cleanup limits take effect on the next housekeeping pass."
+              : "Saved. Global routing settings and managed domains were refreshed.",
       });
     } catch (err) {
       setNotice({
@@ -246,7 +279,7 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
             <KVCard label="Build date" value={versionInfo.build_date ?? "—"} />
             <KVCard
               label="OS / Arch"
-              value={`${versionInfo.os}/${versionInfo.arch}`}
+              value={`${versionInfo.goos}/${versionInfo.goarch}`}
               mono
             />
           </div>
@@ -626,7 +659,109 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
         </div>
       )}
 
-      {activeTab === "checks" && (
+      {activeTab === "cleanup" && (
+        <div className="bg-white/[0.02] border border-white/[0.06] rounded-xl p-5 space-y-4">
+          <div>
+            <div className="eyebrow mb-0.5">Disk housekeeping</div>
+            <h2 className="text-base font-semibold text-white">
+              Automatic cleanup
+            </h2>
+            <p className="text-xs text-white/40 mt-1">
+              Relay prunes old build artifacts on a background timer so disk
+              usage doesn&apos;t creep up between manual checks. Set{" "}
+              <code className="font-mono text-white/50">0</code> on any field
+              to disable that particular cleanup.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <Field label="Images to keep per app">
+              <input
+                type="number"
+                min={0}
+                className="text-input"
+                value={draft.imageRetentionPerLane}
+                onChange={(e) =>
+                  setDraft((current) => ({
+                    ...current,
+                    imageRetentionPerLane: Number(e.target.value) || 0,
+                  }))
+                }
+              />
+              <p className="text-xs text-white/35 mt-1.5">
+                Newest N built images kept per app/environment/branch, for
+                rollback. Older ones are removed after each deploy.
+              </p>
+            </Field>
+            <Field label="Remove unused images after (days)">
+              <input
+                type="number"
+                min={0}
+                className="text-input"
+                value={draft.unusedImageMaxAgeDays}
+                onChange={(e) =>
+                  setDraft((current) => ({
+                    ...current,
+                    unusedImageMaxAgeDays: Number(e.target.value) || 0,
+                  }))
+                }
+              />
+              <p className="text-xs text-white/35 mt-1.5">
+                Any image not referenced by an app or a running container
+                (old base images, superseded builds) is removed once it's
+                older than this. This is what clears images that would
+                otherwise sit around for weeks.
+              </p>
+            </Field>
+            <Field label="Deploy log retention (days)">
+              <input
+                type="number"
+                min={0}
+                className="text-input"
+                value={draft.logRetentionDays}
+                onChange={(e) =>
+                  setDraft((current) => ({
+                    ...current,
+                    logRetentionDays: Number(e.target.value) || 0,
+                  }))
+                }
+              />
+              <p className="text-xs text-white/35 mt-1.5">
+                Build/deploy log files older than this are deleted from disk.
+              </p>
+            </Field>
+            <Field label="Build cache to keep (GB)">
+              <input
+                type="number"
+                min={0}
+                className="text-input"
+                value={draft.buildCacheKeepGB}
+                onChange={(e) =>
+                  setDraft((current) => ({
+                    ...current,
+                    buildCacheKeepGB: Number(e.target.value) || 0,
+                  }))
+                }
+              />
+              <p className="text-xs text-white/35 mt-1.5">
+                BuildKit's layer/dependency cache is capped at this size.
+                Higher keeps builds fast across more apps; lower frees disk
+                sooner. Most Node/Python apps need several GB each to stay
+                warm.
+              </p>
+            </Field>
+          </div>
+
+          <SaveBar
+            busy={busy}
+            dirty={dirty}
+            onSave={save}
+            label="Save cleanup settings"
+          />
+        </div>
+      )}
+
+      {activeTab === "routing" && (
         <div className="bg-white/[0.02] border border-white/[0.06] rounded-xl p-5 space-y-4">
           <div>
             <div className="eyebrow mb-0.5">Guided setup</div>
@@ -689,14 +824,19 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
         </div>
       )}
 
-      {activeTab === "overview" && (
+      {activeTab === "routing" && (
         <div className="space-y-4">
-          <div className="bg-white/[0.02] border border-white/[0.06] rounded-xl p-5">
-            <div className="eyebrow mb-1">How it works</div>
-            <h2 className="text-base font-semibold text-white mb-4">
-              Domain routing overview
-            </h2>
-            <div className="space-y-2.5">
+          <details className="bg-white/[0.02] border border-white/[0.06] rounded-xl p-5 group">
+            <summary className="cursor-pointer list-none flex items-center justify-between">
+              <div>
+                <div className="eyebrow mb-1">How it works</div>
+                <h2 className="text-base font-semibold text-white">
+                  Domain routing overview
+                </h2>
+              </div>
+              <span className="text-white/30 text-xs group-open:rotate-180 transition-transform">▾</span>
+            </summary>
+            <div className="space-y-2.5 mt-4">
               {[
                 {
                   title: "Auto subdomains",
@@ -746,7 +886,7 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
                 </div>
               ))}
             </div>
-          </div>
+          </details>
 
           <div className="bg-white/[0.02] border border-white/[0.06] rounded-xl px-5 py-4 flex items-center gap-3">
             <svg

@@ -13,6 +13,26 @@ permissions:
   packages: write
 
 jobs:
+  # ── Resolve the version/commit/date stamped into relayd and station via ldflags ──
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      commit: ${{ steps.version.outputs.commit }}
+      build_date: ${{ steps.version.outputs.build_date }}
+    steps:
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
+          echo "commit=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
+
   # ── Build + publish the custom Caddy image (Cloudflare DNS-01 plugin) ──────
   build-caddy-image:
     name: Build Caddy image (cloudflare-dns)
@@ -51,6 +71,7 @@ jobs:
   # ── Build Linux binaries (cross-compile for amd64 + arm64) ─────────────────
   build-linux:
     name: Build Linux (${{ matrix.arch }})
+    needs: version
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -81,7 +102,10 @@ jobs:
           GOOS: linux
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: "0"
-        run: go build -trimpath -ldflags="-s -w" -o ../dist/linux-${{ matrix.arch }}/relayd .
+        run: >
+          go build -trimpath
+          -ldflags="-s -w -X main.relaydVersion=${{ needs.version.outputs.tag }} -X main.relaydCommit=${{ needs.version.outputs.commit }} -X main.relaydBuildDate=${{ needs.version.outputs.build_date }}"
+          -o ../dist/linux-${{ matrix.arch }}/relayd .
 
       - name: Build station (linux/${{ matrix.arch }})
         working-directory: station
@@ -89,7 +113,10 @@ jobs:
           GOOS: linux
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: "0"
-        run: go build -trimpath -ldflags="-s -w" -o ../dist/linux-${{ matrix.arch }}/station .
+        run: >
+          go build -trimpath
+          -ldflags="-s -w -X main.stationVersion=${{ needs.version.outputs.tag }} -X main.stationCommit=${{ needs.version.outputs.commit }} -X main.stationBuildDate=${{ needs.version.outputs.build_date }}"
+          -o ../dist/linux-${{ matrix.arch }}/station .
 
       - name: Create tarball
         run: |
@@ -105,6 +132,7 @@ jobs:
   # ── Build Windows binary (includes station-linux WSL2 sidecar) ─────────────
   build-windows:
     name: Build Windows (amd64)
+    needs: version
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -124,7 +152,7 @@ jobs:
 
       - name: Build all (Windows + station-linux sidecar)
         shell: pwsh
-        run: .\scripts\build.ps1 -OutputDir dist\windows-amd64
+        run: .\scripts\build.ps1 -OutputDir dist\windows-amd64 -Version "${{ needs.version.outputs.tag }}" -Commit "${{ needs.version.outputs.commit }}" -BuildDate "${{ needs.version.outputs.build_date }}"
 
       - name: Create zip
         shell: pwsh
@@ -139,29 +167,20 @@ jobs:
   # ── Publish GitHub Release ──────────────────────────────────────────────────
   release:
     name: Publish Release
-    needs: [build-linux, build-windows]
+    needs: [version, build-linux, build-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: Get version
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
-          else
-            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
-          fi
-
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: Relay ${{ steps.version.outputs.tag }}
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: Relay ${{ needs.version.outputs.tag }}
           draft: false
-          prerelease: ${{ contains(steps.version.outputs.tag, '-') }}
+          prerelease: ${{ contains(needs.version.outputs.tag, '-') }}
           generate_release_notes: true
           files: |
             artifacts/relay-linux-amd64/relay-linux-amd64.tar.gz
@@ -179,13 +198,13 @@ jobs:
 
             ### Linux (amd64) — manual
             ```bash
-            curl -L https://github.com/Relay-CI/Relay/releases/download/${{ steps.version.outputs.tag }}/relay-linux-amd64.tar.gz | tar xz
+            curl -L https://github.com/Relay-CI/Relay/releases/download/${{ needs.version.outputs.tag }}/relay-linux-amd64.tar.gz | tar xz
             sudo mv relayd station /usr/local/bin/
             ```
 
             ### Linux (arm64 / Raspberry Pi) — manual
             ```bash
-            curl -L https://github.com/Relay-CI/Relay/releases/download/${{ steps.version.outputs.tag }}/relay-linux-arm64.tar.gz | tar xz
+            curl -L https://github.com/Relay-CI/Relay/releases/download/${{ needs.version.outputs.tag }}/relay-linux-arm64.tar.gz | tar xz
             sudo mv relayd station /usr/local/bin/
             ```
 
@@ -198,7 +217,7 @@ jobs:
   # ── Publish to npm ──────────────────────────────────────────────────────────
   publish-npm:
     name: Publish to npm
-    needs: [release]
+    needs: [version, release]
     runs-on: ubuntu-latest
     environment: npm-publish   # optional: add approval gate in repo Settings → Environments
     permissions:
@@ -212,18 +231,9 @@ jobs:
           node-version: '22'   # OIDC publishing requires Node ≥ 22.14.0
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Get version
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
-          else
-            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
-          fi
-
       - name: Set package version
         run: |
-          VERSION="${{ steps.version.outputs.tag }}"
+          VERSION="${{ needs.version.outputs.tag }}"
           VERSION="${VERSION#v}"
           (cd relay-client && npm version "$VERSION" --no-git-tag-version)
           (cd relay-mcp    && npm version "$VERSION" --no-git-tag-version)

@@ -144,6 +144,138 @@ func TestJavaBuildpackDockerfileExportsServerPort(t *testing.T) {
 	}
 }
 
+// SvelteKit and Remix apps both ship a vite.config.ts (their Vite plugin
+// requires it), so without a higher-priority, framework-aware buildpack they
+// used to be misdetected as a static Vite SPA by NodeViteBuildpack and
+// nginx-served from a "dist/" directory neither framework ever produces —
+// a real, silent deploy failure. These tests pin the fix.
+func TestDefaultBuildpacksPreferSvelteKitOverNodeVite(t *testing.T) {
+	repoDir := t.TempDir()
+	mustWriteTestFile(t, filepath.Join(repoDir, "package.json"), `{
+		"name":"demo",
+		"dependencies":{"@sveltejs/kit":"^2.0.0"},
+		"scripts":{"build":"vite build","start":"node build/index.js"}
+	}`)
+	mustWriteTestFile(t, filepath.Join(repoDir, "svelte.config.js"), `export default {};`)
+	mustWriteTestFile(t, filepath.Join(repoDir, "vite.config.ts"), `export default {};`)
+
+	var selected Buildpack
+	for _, bp := range defaultBuildpacks() {
+		if bp.Detect(repoDir, nil) {
+			selected = bp
+			break
+		}
+	}
+	if selected == nil {
+		t.Fatalf("expected a buildpack match")
+	}
+	if selected.Name() != "sveltekit" {
+		t.Fatalf("expected sveltekit buildpack to win over node-vite, got %q", selected.Name())
+	}
+}
+
+func TestDefaultBuildpacksPreferRemixOverNodeVite(t *testing.T) {
+	repoDir := t.TempDir()
+	mustWriteTestFile(t, filepath.Join(repoDir, "package.json"), `{
+		"name":"demo",
+		"devDependencies":{"@remix-run/dev":"^2.0.0"},
+		"dependencies":{"@remix-run/serve":"^2.0.0"},
+		"scripts":{"build":"remix vite:build","start":"remix-serve build/server/index.js"}
+	}`)
+	mustWriteTestFile(t, filepath.Join(repoDir, "vite.config.ts"), `export default {};`)
+
+	var selected Buildpack
+	for _, bp := range defaultBuildpacks() {
+		if bp.Detect(repoDir, nil) {
+			selected = bp
+			break
+		}
+	}
+	if selected == nil {
+		t.Fatalf("expected a buildpack match")
+	}
+	if selected.Name() != "remix" {
+		t.Fatalf("expected remix buildpack to win over node-vite, got %q", selected.Name())
+	}
+}
+
+func TestNuxtBuildpackDetected(t *testing.T) {
+	repoDir := t.TempDir()
+	mustWriteTestFile(t, filepath.Join(repoDir, "package.json"), `{
+		"name":"demo",
+		"dependencies":{"nuxt":"^3.0.0"},
+		"scripts":{"build":"nuxt build","start":"node .output/server/index.mjs"}
+	}`)
+	mustWriteTestFile(t, filepath.Join(repoDir, "nuxt.config.ts"), `export default defineNuxtConfig({});`)
+
+	var selected Buildpack
+	for _, bp := range defaultBuildpacks() {
+		if bp.Detect(repoDir, nil) {
+			selected = bp
+			break
+		}
+	}
+	if selected == nil {
+		t.Fatalf("expected a buildpack match")
+	}
+	if selected.Name() != "nuxt" {
+		t.Fatalf("expected nuxt buildpack, got %q", selected.Name())
+	}
+}
+
+func TestPHPBuildpackLaravelUsesPublicDocroot(t *testing.T) {
+	repoDir := t.TempDir()
+	mustWriteTestFile(t, filepath.Join(repoDir, "composer.json"), `{
+		"require": {"laravel/framework": "^11.0"}
+	}`)
+
+	plan, err := (&PHPBuildpack{}).Plan(DeployRequest{}, repoDir, nil)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if !strings.Contains(plan.StartCmd, "-t public") {
+		t.Fatalf("expected laravel start command to serve from public/, got %q", plan.StartCmd)
+	}
+}
+
+func TestPHPBuildpackGenericUsesRepoRootDocroot(t *testing.T) {
+	repoDir := t.TempDir()
+	mustWriteTestFile(t, filepath.Join(repoDir, "composer.json"), `{
+		"require": {"slim/slim": "^4.0"}
+	}`)
+
+	plan, err := (&PHPBuildpack{}).Plan(DeployRequest{}, repoDir, nil)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if !strings.Contains(plan.StartCmd, "-t .") {
+		t.Fatalf("expected generic php start command to serve from repo root, got %q", plan.StartCmd)
+	}
+}
+
+func TestMonorepoSubdirHintFindsNestedApp(t *testing.T) {
+	repoDir := t.TempDir()
+	mustWriteTestFile(t, filepath.Join(repoDir, "apps", "web", "package.json"), `{"name":"web"}`)
+
+	hint := monorepoSubdirHint(repoDir, defaultBuildpacks(), nil)
+	if !strings.Contains(hint, "apps/web") {
+		t.Fatalf("expected hint to mention apps/web, got %q", hint)
+	}
+	if !strings.Contains(hint, `"project_root"`) {
+		t.Fatalf("expected hint to suggest project_root override, got %q", hint)
+	}
+}
+
+func TestMonorepoSubdirHintEmptyWhenNothingMatches(t *testing.T) {
+	repoDir := t.TempDir()
+	mustWriteTestFile(t, filepath.Join(repoDir, "README.md"), "nothing deployable here")
+
+	hint := monorepoSubdirHint(repoDir, defaultBuildpacks(), nil)
+	if hint != "" {
+		t.Fatalf("expected empty hint, got %q", hint)
+	}
+}
+
 func TestRubyBuildpackDetectsRailsStartCommand(t *testing.T) {
 	repoDir := t.TempDir()
 	mustWriteTestFile(t, filepath.Join(repoDir, "Gemfile"), `source "https://rubygems.org"

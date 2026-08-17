@@ -7,12 +7,18 @@ import type { AuditEntry } from "@/lib/api";
 export function AuditPage() {
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
   function load() {
     setLoading(true);
     getAuditLog(100)
-      .then((data) => setEntries(data ?? []))
-      .catch(() => {})
+      .then((data) => {
+        setEntries(data ?? []);
+        setError("");
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : "Failed to load activity log");
+      })
       .finally(() => setLoading(false));
   }
 
@@ -40,6 +46,12 @@ export function AuditPage() {
         </button>
       </div>
 
+      {error && (
+        <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2.5 text-sm text-red-300">
+          Failed to load activity log: {error}
+        </div>
+      )}
+
       <div className="bg-white/[0.02] border border-white/[0.06] rounded-xl overflow-hidden">
         <div className="grid grid-cols-[1fr_1fr_auto_1fr_auto] text-[10px] uppercase tracking-wider text-white/30 font-semibold border-b border-white/[0.06] px-5 py-2.5 gap-4">
           <span>Action</span>
@@ -53,7 +65,7 @@ export function AuditPage() {
           <div className="text-sm text-white/30 text-center py-10">Loading…</div>
         )}
 
-        {!loading && !entries.length && (
+        {!loading && !error && !entries.length && (
           <div className="empty-state">
             <div className="empty-state__icon">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
