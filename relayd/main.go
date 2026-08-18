@@ -11827,9 +11827,9 @@ func (s *Server) startACMEListener() {
 	// Enable by setting RELAY_HTTPS_REDIRECT=1 or by configuring a base
 	// domain or dashboard host (which implies TLS is in use via Caddy).
 	acmeMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		httpsRedirect := getenv("RELAY_HTTPS_REDIRECT", "") != "" ||
+		httpsRedirect := (getenv("RELAY_HTTPS_REDIRECT", "") != "" ||
 			s.serverBaseDomain() != "" ||
-			s.serverDashboardHost() != ""
+			s.serverDashboardHost() != "") && !isHTTPSRequest(r)
 		if httpsRedirect {
 			target := "https://" + r.Host + r.URL.RequestURI()
 			http.Redirect(w, r, target, http.StatusMovedPermanently)
