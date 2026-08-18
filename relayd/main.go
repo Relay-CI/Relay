@@ -9439,6 +9439,18 @@ func (s *Server) runDeploy(job DeployJob) {
 		HostPortExplicit: persistedHostPortExplicit(req, prev),
 		ServicePort:      req.ServicePort,
 		PublicHost:       req.PublicHost,
+		PublicHosts: func() []string {
+			if len(req.PublicHosts) > 0 {
+				return req.PublicHosts
+			}
+			if currentState != nil {
+				return currentState.PublicHosts
+			}
+			if prev != nil {
+				return prev.PublicHosts
+			}
+			return nil
+		}(),
 		ActiveSlot: func() string {
 			if currentState != nil {
 				return currentState.ActiveSlot

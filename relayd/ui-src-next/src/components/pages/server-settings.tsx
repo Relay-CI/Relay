@@ -708,7 +708,7 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
               />
               <p className="text-xs text-white/35 mt-1.5">
                 Any image not referenced by an app or a running container
-                (old base images, superseded builds) is removed once it's
+                (old base images, superseded builds) is removed once it&apos;s
                 older than this. This is what clears images that would
                 otherwise sit around for weeks.
               </p>
@@ -744,7 +744,7 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
                 }
               />
               <p className="text-xs text-white/35 mt-1.5">
-                BuildKit's layer/dependency cache is capped at this size.
+                BuildKit&apos;s layer/dependency cache is capped at this size.
                 Higher keeps builds fast across more apps; lower frees disk
                 sooner. Most Node/Python apps need several GB each to stay
                 warm.
