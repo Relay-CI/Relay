@@ -667,6 +667,41 @@ func TestRuntimeLogTargetsUseRunningSlotAsLiveTargetWhenStateIsStale(t *testing.
 	}
 }
 
+// retireStandbySlot must drop the old slot from the edge proxy's routing
+// map (nginx reload) BEFORE removing its container — removing first (the
+// previous order) left a window where an in-flight or sticky-session
+// request could resolve to a container that no longer existed, surfacing as
+// a Cloudflare-visible 502 during every deploy's slot switch.
+func TestRetireStandbySlotReloadsBeforeRemoving(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	app, env, branch := "demo", EnvPreview, "main"
+	edgeName := appBaseContainerName(app, env, branch)
+	oldSlotName := appSlotContainerName(app, env, branch, "blue")
+	rt := s.runtime.(*mockRuntime)
+	rt.running[edgeName] = true
+
+	s.retireStandbySlot(app, env, branch, "green", "blue", 3000, 0, "port", "edge", "")
+
+	var reloadIdx, removeIdx = -1, -1
+	for i, ev := range rt.events {
+		if strings.HasPrefix(ev, "exec:"+edgeName+":") && strings.Contains(ev, "reload") {
+			reloadIdx = i
+		}
+		if ev == "remove:"+oldSlotName {
+			removeIdx = i
+		}
+	}
+	if reloadIdx == -1 {
+		t.Fatalf("expected an nginx reload exec against %s, got events: %v", edgeName, rt.events)
+	}
+	if removeIdx == -1 {
+		t.Fatalf("expected the old slot container %s to be removed, got events: %v", oldSlotName, rt.events)
+	}
+	if removeIdx < reloadIdx {
+		t.Fatalf("expected reload (index %d) before remove (index %d), got events: %v", reloadIdx, removeIdx, rt.events)
+	}
+}
+
 func TestWaitForRuntimeContainerReadyFailsFastForExitedContainer(t *testing.T) {
 	s := newPreviewPortTestServer(t)
 	rt := &mockRuntime{
@@ -693,20 +728,24 @@ type mockRuntime struct {
 	exists             map[string]bool
 	published          map[string]int
 	networkConnections [][2]string
+	events             []string
 }
 
 func (m *mockRuntime) RunDetached(ContainerSpec) error { return nil }
-func (m *mockRuntime) Remove(string)                   {}
+func (m *mockRuntime) Remove(name string)              { m.events = append(m.events, "remove:"+name) }
 func (m *mockRuntime) ContainerExists(name string) bool {
 	if m.exists == nil {
 		return m.running[name]
 	}
 	return m.exists[name] || m.running[name]
 }
-func (m *mockRuntime) IsRunning(name string) bool            { return m.running[name] }
-func (m *mockRuntime) ContainerIP(string) string             { return "" }
-func (m *mockRuntime) PublishedPort(name string, _ int) int  { return m.published[name] }
-func (m *mockRuntime) Exec(string, []string) ([]byte, error) { return nil, nil }
+func (m *mockRuntime) IsRunning(name string) bool           { return m.running[name] }
+func (m *mockRuntime) ContainerIP(string) string            { return "" }
+func (m *mockRuntime) PublishedPort(name string, _ int) int { return m.published[name] }
+func (m *mockRuntime) Exec(name string, args []string) ([]byte, error) {
+	m.events = append(m.events, "exec:"+name+":"+strings.Join(args, " "))
+	return nil, nil
+}
 func (m *mockRuntime) NetworkConnect(container, network string) error {
 	m.networkConnections = append(m.networkConnections, [2]string{container, network})
 	return nil

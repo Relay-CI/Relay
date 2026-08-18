@@ -10441,33 +10441,38 @@ func validateEdgeProxyLogPaths(configPath string, volumes []string) error {
 	return nil
 }
 
-func (s *Server) cleanupStandbySlotAfter(app string, env DeployEnv, branch string, activeSlot string, oldSlot string, servicePort int, hostPort int, mode string, trafficMode string, publicHost string, wait time.Duration) {
+// retireStandbySlot drops oldSlot from the edge proxy's routing map (via a
+// graceful `nginx -s reload`, which stops new connections from being routed
+// there without dropping ones already in flight) and only removes its
+// container once that's confirmed applied. Removing the container first (the
+// previous order) left a window where a sticky-session or in-flight request
+// could resolve to a container that had already been torn down — a
+// Cloudflare-visible 502 during every slot switch. A short pause after the
+// reload gives nginx's already-established connections to the old upstream
+// a moment to finish before the process under them disappears.
+func (s *Server) retireStandbySlot(app string, env DeployEnv, branch string, activeSlot string, oldSlot string, servicePort int, hostPort int, mode string, trafficMode string, publicHost string) {
 	name := appSlotContainerName(app, env, branch, oldSlot)
-	if wait <= 0 {
-		s.runtime.Remove(name)
-		_ = s.ensureEdgeProxy(nil, app, env, branch, appNetworkName(app, env, branch), activeSlot, "", servicePort, hostPort, mode, trafficMode, publicHost, 100, false)
-		if st, err := s.getAppState(app, env, branch); err == nil && st != nil {
-			if normalizeActiveSlot(st.ActiveSlot) == normalizeActiveSlot(activeSlot) && normalizeActiveSlot(st.StandbySlot) == normalizeActiveSlot(oldSlot) {
-				st.StandbySlot = ""
-				st.DrainUntil = 0
-				_ = s.saveAppState(st)
-				s.broadcastSnapshot()
-			}
+	_ = s.ensureEdgeProxy(nil, app, env, branch, appNetworkName(app, env, branch), activeSlot, "", servicePort, hostPort, mode, trafficMode, publicHost, 100, false)
+	time.Sleep(2 * time.Second)
+	s.runtime.Remove(name)
+	if st, err := s.getAppState(app, env, branch); err == nil && st != nil {
+		if normalizeActiveSlot(st.ActiveSlot) == normalizeActiveSlot(activeSlot) && normalizeActiveSlot(st.StandbySlot) == normalizeActiveSlot(oldSlot) {
+			st.StandbySlot = ""
+			st.DrainUntil = 0
+			_ = s.saveAppState(st)
+			s.broadcastSnapshot()
 		}
+	}
+}
+
+func (s *Server) cleanupStandbySlotAfter(app string, env DeployEnv, branch string, activeSlot string, oldSlot string, servicePort int, hostPort int, mode string, trafficMode string, publicHost string, wait time.Duration) {
+	if wait <= 0 {
+		s.retireStandbySlot(app, env, branch, activeSlot, oldSlot, servicePort, hostPort, mode, trafficMode, publicHost)
 		return
 	}
 	go func() {
 		time.Sleep(wait)
-		s.runtime.Remove(name)
-		_ = s.ensureEdgeProxy(nil, app, env, branch, appNetworkName(app, env, branch), activeSlot, "", servicePort, hostPort, mode, trafficMode, publicHost, 100, false)
-		if st, err := s.getAppState(app, env, branch); err == nil && st != nil {
-			if normalizeActiveSlot(st.ActiveSlot) == normalizeActiveSlot(activeSlot) && normalizeActiveSlot(st.StandbySlot) == normalizeActiveSlot(oldSlot) {
-				st.StandbySlot = ""
-				st.DrainUntil = 0
-				_ = s.saveAppState(st)
-				s.broadcastSnapshot()
-			}
-		}
+		s.retireStandbySlot(app, env, branch, activeSlot, oldSlot, servicePort, hostPort, mode, trafficMode, publicHost)
 	}()
 }
 
@@ -12193,6 +12198,22 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 	activeSlot := s.currentActiveSlot(req.App, req.Env, req.Branch, state)
 	nextSlot := nextActiveSlot(activeSlot)
 	candidateName := appSlotContainerName(req.App, req.Env, req.Branch, nextSlot)
+
+	// nextSlot is the OTHER of only two slot names (blue/green), reused by
+	// every deploy. If it's still running, it can only be a previous
+	// deploy's standby that's mid-drain (this deploy started before that
+	// one's rolloutDrainDuration elapsed) — runSlotContainer would
+	// otherwise force-remove it unconditionally to make room, abruptly
+	// cutting off any sticky-session user still pinned there with zero
+	// grace. Finish its drain safely first: drop it from the edge proxy's
+	// routing map (so nothing new can be sent to it) before removing it,
+	// instead of yanking it out from under active traffic.
+	if s.runtime.IsRunning(candidateName) {
+		if log != nil {
+			log("slot %s still draining a previous deploy; finishing that drain before reuse", nextSlot)
+		}
+		s.retireStandbySlot(req.App, req.Env, req.Branch, activeSlot, nextSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost)
+	}
 
 	if err := s.runSlotContainer(log, req.App, req.Env, req.Branch, nextSlot, imageTag, servicePort, networkName, extraEnv); err != nil {
 		return err
