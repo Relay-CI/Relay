@@ -29,6 +29,35 @@ func TestWriteEdgeProxyConfigUsesStdStreamsForLogs(t *testing.T) {
 	}
 }
 
+// This hop (Caddy -> this nginx -> app container) is always plain HTTP, so
+// unconditionally setting X-Forwarded-Proto to $scheme would always send
+// "http" downstream, even when the public client used https (or an
+// upstream CDN like Cloudflare already set the correct header). That's the
+// exact cause of an http<->https redirect loop for any app that redirects
+// based on this header — pin the fix: an incoming X-Forwarded-Proto must
+// win over the local (always-http) scheme.
+func TestWriteEdgeProxyConfigPreservesIncomingForwardedProto(t *testing.T) {
+	s := &Server{dataDir: t.TempDir()}
+	configPath, err := s.writeEdgeProxyConfig("demo", EnvPreview, "main", "blue", "", 3000, "edge", 100)
+	if err != nil {
+		t.Fatalf("write edge proxy config: %v", err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read edge proxy config: %v", err)
+	}
+	text := string(data)
+	if strings.Contains(text, "X-Forwarded-Proto $scheme") {
+		t.Fatalf("expected X-Forwarded-Proto to not be unconditionally overwritten with the local $scheme, got:\n%s", text)
+	}
+	if !strings.Contains(text, "map $http_x_forwarded_proto $relay_xfp") {
+		t.Fatalf("expected a map preserving an incoming X-Forwarded-Proto, got:\n%s", text)
+	}
+	if !strings.Contains(text, "proxy_set_header X-Forwarded-Proto $relay_xfp;") {
+		t.Fatalf("expected the app-facing proxy to forward the preserved value, got:\n%s", text)
+	}
+}
+
 func TestValidateEdgeProxyLogPathsRejectsUnboundFileLogs(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "nginx.conf")
 	cfg := `

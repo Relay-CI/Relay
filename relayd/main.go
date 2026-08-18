@@ -10094,6 +10094,19 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 	conf.WriteString("    default upgrade;\n")
 	conf.WriteString("    '' close;\n")
 	conf.WriteString("  }\n")
+	// This hop (Caddy -> this nginx -> app container) is always plain HTTP,
+	// so $scheme below is always "http" regardless of what the public
+	// client actually used. An incoming X-Forwarded-Proto (set correctly by
+	// Caddy, or passed through from an upstream CDN like Cloudflare) must
+	// win over that — otherwise every app behind Relay is told every
+	// request is HTTP even when it wasn't, and any app that redirects
+	// http->https based on that header redirects forever (client is on
+	// https, gets told it's http, redirects to https, loops — this is
+	// exactly what "Flexible" SSL mode on Cloudflare triggers).
+	conf.WriteString("  map $http_x_forwarded_proto $relay_xfp {\n")
+	conf.WriteString("    default $http_x_forwarded_proto;\n")
+	conf.WriteString("    '' $scheme;\n")
+	conf.WriteString("  }\n")
 	conf.WriteString("  resolver 127.0.0.11 ipv6=off valid=5s;\n")
 	conf.WriteString("  client_max_body_size 0;\n")
 	conf.WriteString("  large_client_header_buffers 4 16k;\n")
@@ -10187,7 +10200,7 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 	conf.WriteString("      proxy_http_version 1.1;\n")
 	conf.WriteString("      proxy_set_header Host $host;\n")
 	conf.WriteString("      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n")
-	conf.WriteString("      proxy_set_header X-Forwarded-Proto $scheme;\n")
+	conf.WriteString("      proxy_set_header X-Forwarded-Proto $relay_xfp;\n")
 	conf.WriteString("      proxy_set_header Upgrade $http_upgrade;\n")
 	conf.WriteString("      proxy_set_header Connection $connection_upgrade;\n")
 	conf.WriteString("      proxy_request_buffering off;\n")
