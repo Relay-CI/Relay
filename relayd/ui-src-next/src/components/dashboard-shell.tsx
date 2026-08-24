@@ -406,7 +406,7 @@ export default function DashboardShell() {
     : null;
 
   return (
-    <div className="relay-admin-shell flex h-screen overflow-hidden">
+    <div className="relay-admin-shell flex flex-col h-screen overflow-hidden">
       <Topbar
         projects={projectOptions}
         selectedProjectName={selectedProjectName}
