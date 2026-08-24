@@ -17,9 +17,51 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  verify:
+    name: Verify release candidate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            relay-client/package-lock.json
+            relayd/ui-src-next/package-lock.json
+
+      - name: Test relay CLI
+        working-directory: relay-client
+        run: npm ci && npm test
+
+      - name: Verify dashboard
+        working-directory: relayd/ui-src-next
+        run: npm ci && npm run lint && npm run build
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+          cache-dependency-path: |
+            relayd/go.sum
+            station/go.sum
+
+      - name: Test relayd
+        working-directory: relayd
+        env:
+          CGO_ENABLED: "0"
+        run: go test -count=1 -parallel=4 ./...
+
+      - name: Test station
+        working-directory: station
+        env:
+          CGO_ENABLED: "0"
+        run: go test -count=1 -parallel=4 ./...
+
   # ── Step 1: Bump version, commit, tag ──────────────────────────────────────
   bump:
     name: Bump version
+    needs: verify
     runs-on: ubuntu-latest
     if: "!startsWith(github.event.head_commit.message, 'chore: release v')"
     outputs:

@@ -107,8 +107,15 @@ jobs:
 
       - name: Install deps
         working-directory: relay-client
-        run: npm install
+        run: npm ci
 
       - name: Check syntax
         working-directory: relay-client
-        run: node --check relay.js
+        run: |
+          node --check relay.js
+          node --check deploy.js
+          node --check config.js
+
+      - name: Test relay CLI
+        working-directory: relay-client
+        run: npm test

@@ -151,20 +151,6 @@ func seedLanePolicies(db *sql.DB) error {
 	if db == nil {
 		return nil
 	}
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS lane_policies (
-		env TEXT PRIMARY KEY,
-		display_name TEXT DEFAULT '',
-		default_mode TEXT DEFAULT '',
-		default_traffic_mode TEXT DEFAULT '',
-		default_access_policy TEXT DEFAULT '',
-		default_host_port INTEGER DEFAULT 0,
-		auto_subdomain INTEGER DEFAULT 0,
-		random_subdomain INTEGER DEFAULT 0,
-		retention_hours INTEGER DEFAULT 0,
-		promote_to TEXT DEFAULT ''
-	)`); err != nil {
-		return err
-	}
 	for _, policy := range builtInLanePolicies {
 		if _, err := db.Exec(
 			`INSERT OR IGNORE INTO lane_policies

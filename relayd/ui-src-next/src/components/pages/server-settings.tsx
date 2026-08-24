@@ -18,7 +18,7 @@ interface ServerSettingsPageProps {
   currentUser: CurrentUser;
 }
 
-type ServerTab = "routing" | "rules" | "cleanup";
+type ServerTab = "routing" | "rules" | "security" | "cleanup";
 
 type RuleDraft = CustomHostRule & { id: string };
 
@@ -26,6 +26,9 @@ type DraftState = {
   baseDomain: string;
   dashboardHost: string;
   acmeDisabled: boolean;
+  relaySecretKey: string;
+  relaySecretKeyConfigured: boolean;
+  relaySecretKeySource: string;
   customHostRules: RuleDraft[];
   imageRetentionPerLane: number;
   unusedImageMaxAgeDays: number;
@@ -36,6 +39,7 @@ type DraftState = {
 const SERVER_TABS: Array<{ id: ServerTab; label: string }> = [
   { id: "routing", label: "Routing" },
   { id: "rules", label: "Custom Rules" },
+  { id: "security", label: "Security" },
   { id: "cleanup", label: "Cleanup" },
 ];
 
@@ -114,6 +118,9 @@ function toDraftState(data?: ServerConfig | null): DraftState {
     baseDomain: data?.base_domain ?? "",
     dashboardHost: data?.dashboard_host ?? "",
     acmeDisabled: data?.acme_disabled === "true",
+    relaySecretKey: "",
+    relaySecretKeyConfigured: data?.relay_secret_key_configured === true,
+    relaySecretKeySource: data?.relay_secret_key_source ?? "",
     customHostRules: rules,
     imageRetentionPerLane:
       data?.image_retention_per_lane ?? CLEANUP_DEFAULTS.imageRetentionPerLane,
@@ -129,6 +136,7 @@ function serializeDraft(draft: DraftState): string {
     baseDomain: draft.baseDomain.trim(),
     dashboardHost: draft.dashboardHost.trim(),
     acmeDisabled: draft.acmeDisabled,
+    relaySecretKey: draft.relaySecretKey.trim(),
     customHostRules: draft.customHostRules.map((rule) => {
       const normalized = normalizeRuleDraft(rule);
       const { id, ...rest } = normalized;
@@ -182,6 +190,9 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
   const exampleHost = draft.baseDomain
     ? `myapp-main.${draft.baseDomain}`
     : "myapp-main.example.com";
+  const secretKeyStatus = draft.relaySecretKeyConfigured
+    ? `Configured${draft.relaySecretKeySource ? ` from ${draft.relaySecretKeySource}` : ""}`
+    : "Not configured";
 
   if (!isOwner) {
     return (
@@ -195,20 +206,28 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
     setBusy(true);
     setNotice(null);
     try {
-      const payload: ServerConfig = {
-        base_domain: draft.baseDomain.trim(),
-        dashboard_host: draft.dashboardHost.trim(),
-        acme_disabled: draft.acmeDisabled ? "true" : "",
-        custom_host_rules: draft.customHostRules.map((rule) => {
+      const payload: ServerConfig = {};
+      if (activeTab === "routing") {
+        payload.base_domain = draft.baseDomain.trim();
+        payload.dashboard_host = draft.dashboardHost.trim();
+        payload.acme_disabled = draft.acmeDisabled ? "true" : "";
+      }
+      if (activeTab === "rules") {
+        payload.custom_host_rules = draft.customHostRules.map((rule) => {
           const normalized = normalizeRuleDraft(rule);
           const { id, ...rest } = normalized;
           return rest;
-        }),
-        image_retention_per_lane: draft.imageRetentionPerLane,
-        unused_image_max_age_days: draft.unusedImageMaxAgeDays,
-        log_retention_days: draft.logRetentionDays,
-        build_cache_keep_gb: draft.buildCacheKeepGB,
-      };
+        });
+      }
+      if (activeTab === "cleanup") {
+        payload.image_retention_per_lane = draft.imageRetentionPerLane;
+        payload.unused_image_max_age_days = draft.unusedImageMaxAgeDays;
+        payload.log_retention_days = draft.logRetentionDays;
+        payload.build_cache_keep_gb = draft.buildCacheKeepGB;
+      }
+      if (activeTab === "security" && draft.relaySecretKey.trim()) {
+        payload.relay_secret_key = draft.relaySecretKey.trim();
+      }
       const saved = await saveServerConfig(payload);
       const nextDraft = toDraftState(saved);
       setDoctor((saved?.doctor as DoctorReport | undefined) ?? null);
@@ -219,6 +238,8 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
         text:
           activeTab === "rules"
             ? "Saved. Custom host rules were written to the global Caddy proxy."
+            : activeTab === "security"
+              ? "Saved. Secret encryption is active for future credentials and app secrets."
             : activeTab === "cleanup"
               ? "Saved. New cleanup limits take effect on the next housekeeping pass."
               : "Saved. Global routing settings and managed domains were refreshed.",
@@ -254,6 +275,15 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
       ...current,
       customHostRules: current.customHostRules.filter((rule) => rule.id !== id),
     }));
+  }
+
+  function generateRelaySecretKey() {
+    const bytes = new Uint8Array(32);
+    crypto.getRandomValues(bytes);
+    const value = Array.from(bytes)
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+    setDraft((current) => ({ ...current, relaySecretKey: value }));
   }
 
   return (
@@ -656,6 +686,74 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
               ))}
             </div>
           </div>
+        </div>
+      )}
+
+      {activeTab === "security" && (
+        <div className="bg-white/[0.02] border border-white/[0.06] rounded-xl p-5 space-y-4">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="eyebrow mb-0.5">Secrets at rest</div>
+              <h2 className="text-base font-semibold text-white">
+                Relay secret key
+              </h2>
+              <p className="text-xs text-white/40 mt-1 max-w-2xl">
+                Used to encrypt GitHub credentials, GitHub App private keys,
+                webhook secrets, and app secrets saved in Relay.
+              </p>
+            </div>
+            <span
+              className={cn(
+                "text-[10px] uppercase tracking-wider font-semibold px-2 py-1 rounded border shrink-0",
+                draft.relaySecretKeyConfigured
+                  ? "bg-emerald-500/10 border-emerald-500/25 text-emerald-400"
+                  : "bg-amber-500/10 border-amber-500/25 text-amber-400",
+              )}
+            >
+              {secretKeyStatus}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-3 items-end">
+            <Field label="New RELAY_SECRET_KEY">
+              <input
+                type="password"
+                autoComplete="new-password"
+                className="text-input font-mono"
+                value={draft.relaySecretKey}
+                onChange={(e) =>
+                  setDraft((current) => ({
+                    ...current,
+                    relaySecretKey: e.target.value,
+                  }))
+                }
+                placeholder={
+                  draft.relaySecretKeyConfigured
+                    ? "Leave blank to keep current key"
+                    : "Set a strong key before connecting GitHub"
+                }
+              />
+            </Field>
+            <button
+              type="button"
+              onClick={generateRelaySecretKey}
+              className="text-sm px-4 py-2 rounded bg-white/[0.06] text-white/70 hover:bg-white/[0.1] hover:text-white transition-colors"
+            >
+              Generate
+            </button>
+          </div>
+
+          <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-xs text-amber-100/70 leading-relaxed">
+            Existing encrypted values can only be read with the same key. Relay
+            blocks unsafe key changes when encrypted data already exists.
+          </div>
+
+          <SaveBar
+            busy={busy}
+            dirty={dirty}
+            onSave={save}
+            label="Save secret key"
+          />
         </div>
       )}
 

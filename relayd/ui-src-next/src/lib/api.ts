@@ -453,6 +453,154 @@ export async function approvePromotion(id: string): Promise<PromotionRecord> {
   });
 }
 
+// ── GitHub delivery workflow ──────────────────────────────────────────────
+
+export interface GitHubConnection {
+  connected: boolean;
+  login?: string;
+  avatar_url?: string;
+  html_url?: string;
+  webhook_url: string;
+  secret_key_configured: boolean;
+  updated_at?: number;
+}
+
+export interface GitHubRepository {
+  id?: number;
+  installation_id?: number;
+  full_name: string;
+  clone_url: string;
+  html_url: string;
+  default_branch: string;
+  private: boolean;
+  permissions?: { admin?: boolean; push?: boolean };
+}
+
+export interface GitHubPreview {
+  repo_full_name: string;
+  pr_number?: number;
+  app: string;
+  branch: string;
+  head_sha?: string;
+  deploy_id?: string;
+  preview_url?: string;
+  status: string;
+  updated_at: number;
+}
+
+export interface GitHubProduction {
+  branch: string;
+  deploy_id?: string;
+  deploy_status?: string;
+  health_status: string;
+  health_detail?: string;
+  url?: string;
+  rollback_available: boolean;
+  rollout_status?: string;
+}
+
+export interface GitHubProject {
+  app: string;
+  repo_full_name: string;
+  clone_url: string;
+  html_url: string;
+  production_branch: string;
+  preview_enabled: boolean;
+  production_enabled: boolean;
+  webhook_id?: number;
+  status_context: string;
+  auth_mode: "app" | "token";
+  installation_id?: number;
+  repository_id?: number;
+  webhook_url: string;
+  previews: GitHubPreview[];
+  production: GitHubProduction;
+  last_event?: {
+    event: string;
+    action?: string;
+    outcome: string;
+    received_at: number;
+  };
+}
+
+export interface GitHubAppStatus {
+  registered: boolean;
+  app_id?: number;
+  client_id?: string;
+  app_slug?: string;
+  app_name?: string;
+  owner_login?: string;
+  install_url?: string;
+  webhook_url: string;
+  registered_at?: number;
+}
+
+export interface GitHubAppManifestStart {
+  action: string;
+  state: string;
+  manifest: Record<string, unknown>;
+}
+
+export async function getGitHubApp(): Promise<GitHubAppStatus> {
+  return apiFetch<GitHubAppStatus>("/api/github/app");
+}
+
+export async function startGitHubAppManifest(organization?: string): Promise<GitHubAppManifestStart> {
+  return apiFetch<GitHubAppManifestStart>("/api/github/app/manifest", {
+    method: "POST",
+    body: JSON.stringify({ organization: organization?.trim() || "" }),
+  });
+}
+
+export async function startGitHubAppInstall(): Promise<{ install_url: string; state: string }> {
+  return apiFetch<{ install_url: string; state: string }>("/api/github/app/install", { method: "POST", body: "{}" });
+}
+
+export async function getGitHubConnection(): Promise<GitHubConnection> {
+  return apiFetch<GitHubConnection>("/api/github/connection");
+}
+
+export async function connectGitHub(token: string): Promise<GitHubConnection> {
+  return apiFetch<GitHubConnection>("/api/github/connection", {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  });
+}
+
+export async function disconnectGitHub(): Promise<GitHubConnection> {
+  return apiFetch<GitHubConnection>("/api/github/connection", {
+    method: "DELETE",
+  });
+}
+
+export async function getGitHubRepositories(): Promise<GitHubRepository[]> {
+  return apiFetch<GitHubRepository[]>("/api/github/repos");
+}
+
+export async function getGitHubProjects(app?: string): Promise<GitHubProject[]> {
+  const query = app ? `?app=${encodeURIComponent(app)}` : "";
+  return apiFetch<GitHubProject[]>(`/api/github/projects${query}`);
+}
+
+export async function connectGitHubProject(payload: {
+  app: string;
+  repo_full_name: string;
+  production_branch?: string;
+  preview_enabled?: boolean;
+  production_enabled?: boolean;
+}): Promise<GitHubProject> {
+  return apiFetch<GitHubProject>("/api/github/projects", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function disconnectGitHubProject(app: string): Promise<void> {
+  await apiFetch(`/api/github/projects?app=${encodeURIComponent(app)}`, {
+    method: "DELETE",
+  });
+}
+
 // ── Secrets ───────────────────────────────────────────────────────────────
 
 export interface Secret {
@@ -594,6 +742,9 @@ export interface ServerConfig {
   theme_name?: string;
   theme_css?: string;
   plugin_mutations_enabled?: boolean;
+  relay_secret_key?: string;
+  relay_secret_key_configured?: boolean;
+  relay_secret_key_source?: string;
   doctor?: DoctorReport;
   image_retention_per_lane?: number;
   unused_image_max_age_days?: number;

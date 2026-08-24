@@ -7,18 +7,18 @@
 /* ── Relay design tokens ───────────────────────────────────────────────── */
 :root {
   /* Relay brand palette */
-  --relay-bg:               #000000;
-  --relay-panel:            rgba(12, 8, 8, 0.97);
-  --relay-panel-strong:     rgba(18, 10, 10, 0.99);
-  --relay-line:             rgba(220, 60, 60, 0.12);
-  --relay-line-strong:      rgba(220, 60, 60, 0.22);
-  --relay-text:             #f0eaea;
-  --relay-muted:            #9a8a8a;
-  --relay-muted-deep:       #5e4a4a;
-  --relay-accent:           #cc2222;
-  --relay-accent-bright:    #ff3333;
-  --relay-teal:             #3b82f6;
-  --relay-teal-soft:        #60a5fa;
+  --relay-bg:               #eaf5fb;
+  --relay-panel:            rgba(255, 255, 255, 0.82);
+  --relay-panel-strong:     rgba(255, 255, 255, 0.96);
+  --relay-line:             rgba(22, 54, 64, 0.10);
+  --relay-line-strong:      rgba(22, 54, 64, 0.18);
+  --relay-text:             #142b33;
+  --relay-muted:            #647784;
+  --relay-muted-deep:       #95a8b4;
+  --relay-accent:           #0f7280;
+  --relay-accent-bright:    #28a5b5;
+  --relay-teal:             #0f7280;
+  --relay-teal-soft:        #5cd3c6;
   --relay-success:          #56d59a;
   --relay-warn:             #efb35c;
   --relay-danger:           #ff2222;
@@ -109,6 +109,175 @@ body {
   background-color: var(--relay-bg);
   color: var(--relay-text);
   font-family: var(--font-space-grotesk, 'Space Grotesk', sans-serif);
+}
+
+.relay-admin-shell {
+  background:
+    linear-gradient(135deg, rgba(226, 242, 250, 0.96), rgba(240, 248, 251, 0.96)),
+    repeating-linear-gradient(90deg, rgba(20, 43, 51, 0.025) 0 1px, transparent 1px 20px);
+  color: var(--relay-text);
+}
+
+.relay-admin-frame {
+  margin: 0 12px 12px;
+  border: 1px solid rgba(22, 54, 64, 0.12);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.50);
+  box-shadow: 0 24px 70px rgba(22, 54, 64, 0.16);
+  overflow: hidden;
+}
+
+.relay-topbar {
+  background: rgba(244, 250, 252, 0.82);
+  border-bottom: 1px solid rgba(22, 54, 64, 0.10);
+  backdrop-filter: blur(18px);
+}
+
+.relay-brand-tile {
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(145deg, #12313b, #0f7280);
+  box-shadow: 0 10px 24px rgba(15, 114, 128, 0.24);
+}
+
+.relay-icon-btn,
+.relay-topbar-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  height: 34px;
+  border-radius: 12px;
+  border: 1px solid rgba(22, 54, 64, 0.10);
+  background: rgba(255, 255, 255, 0.74);
+  color: #647784;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0 10px;
+  transition: transform 160ms ease, background 160ms ease, color 160ms ease, box-shadow 160ms ease;
+}
+
+.relay-icon-btn:hover,
+.relay-topbar-action:hover,
+.relay-icon-btn--active {
+  background: #ffffff;
+  color: #142b33;
+  box-shadow: 0 8px 18px rgba(22, 54, 64, 0.10);
+}
+
+.relay-icon-btn:active,
+.relay-topbar-action:active {
+  transform: translateY(1px) scale(0.98);
+}
+
+.relay-sidebar {
+  background: linear-gradient(180deg, #101a23, #12161d 54%, #0f141a);
+  color: rgba(255, 255, 255, 0.82);
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.06);
+}
+
+.relay-workspace {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0.10)),
+    rgba(234, 245, 251, 0.50);
+}
+
+.relay-workspace .text-white {
+  color: #142b33 !important;
+}
+
+.relay-workspace .bg-relay-accent.text-white,
+.relay-workspace .bg-slate-950.text-white,
+.relay-workspace .bg-black.text-white {
+  color: #ffffff !important;
+}
+
+.relay-workspace [class*="text-white/"] {
+  color: rgba(20, 43, 51, 0.62) !important;
+}
+
+.relay-workspace [class*="border-white"] {
+  border-color: rgba(22, 54, 64, 0.11) !important;
+}
+
+.relay-workspace [class*="bg-white/"] {
+  background-color: rgba(255, 255, 255, 0.74) !important;
+}
+
+.relay-workspace .rounded-xl,
+.relay-workspace .rounded-lg {
+  box-shadow: 0 14px 34px rgba(22, 54, 64, 0.075);
+}
+
+.relay-workspace code,
+.relay-workspace .font-mono {
+  color: #31515a;
+}
+
+.relay-workspace .text-input {
+  background: rgba(255, 255, 255, 0.82);
+  border-color: rgba(22, 54, 64, 0.14);
+  color: #142b33;
+  border-radius: 10px;
+}
+
+.relay-workspace .text-input::placeholder {
+  color: rgba(20, 43, 51, 0.38);
+}
+
+.relay-workspace .primary-btn {
+  background: #142b33;
+  color: #ffffff;
+  border-radius: 10px;
+  box-shadow: 0 10px 22px rgba(20, 43, 51, 0.18);
+}
+
+.relay-workspace .primary-btn:hover {
+  background: #203c46;
+}
+
+.relay-workspace .ghost-btn {
+  background: rgba(255, 255, 255, 0.62);
+  color: rgba(20, 43, 51, 0.72);
+  border-color: rgba(22, 54, 64, 0.14);
+  border-radius: 10px;
+}
+
+.relay-workspace .ghost-btn:hover {
+  color: #142b33;
+  background: #ffffff;
+}
+
+.relay-sidebar .eyebrow {
+  color: rgba(255, 255, 255, 0.36);
+}
+
+.relay-overview-hero {
+  position: relative;
+  overflow: hidden;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.92) 0%, rgba(235, 248, 250, 0.88) 52%, rgba(199, 233, 237, 0.78) 100%),
+    linear-gradient(160deg, transparent 0 52%, rgba(15, 114, 128, 0.18) 52% 62%, transparent 62%),
+    linear-gradient(150deg, transparent 0 58%, rgba(20, 43, 51, 0.12) 58% 70%, transparent 70%);
+}
+
+.relay-overview-hero::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0;
+  height: 46%;
+  background:
+    linear-gradient(150deg, transparent 0 40%, rgba(16, 78, 92, 0.16) 40% 52%, transparent 52%),
+    linear-gradient(25deg, rgba(20, 43, 51, 0.10), transparent 45%);
+  pointer-events: none;
+}
+
+.relay-overview-hero > * {
+  position: relative;
+  z-index: 1;
 }
 
 /* ── Typography helpers ──────────────────────────────────────────────────── */

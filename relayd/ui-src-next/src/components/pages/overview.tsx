@@ -96,11 +96,11 @@ export function OverviewPage({
   return (
     <div className="space-y-5">
       {/* Hero */}
-      <div className="bg-white/[0.02] border border-white/[0.06] rounded-xl p-6">
+      <div className="relay-overview-hero bg-white/[0.02] border border-white/[0.06] rounded-xl p-5 md:p-6">
         <div className="flex items-start justify-between gap-4 mb-5">
           <div>
-            <div className="eyebrow mb-1">Project control surface</div>
-            <h1 className="text-2xl font-semibold text-white">{project.name}</h1>
+            <div className="eyebrow mb-1">Project dashboard</div>
+            <h1 className="text-2xl md:text-3xl font-semibold text-white">{project.name}</h1>
             <div className="flex flex-wrap gap-2 mt-3">
               <span className="text-[10px] font-semibold uppercase tracking-wider bg-white/[0.04] border border-white/[0.08] px-2 py-0.5 rounded text-white/60">
                 {repoInfo.label}
@@ -121,19 +121,19 @@ export function OverviewPage({
                 href={selectedRoute}
                 target="_blank"
                 rel="noreferrer"
-                className="text-sm bg-white text-black font-semibold px-3 py-1.5 rounded hover:bg-white/90 transition-colors"
+                className="text-sm bg-slate-950 text-white font-semibold px-3 py-1.5 rounded-xl hover:bg-slate-800 transition-colors"
               >
                 Open route
               </a>
             ) : (
-              <button type="button" disabled className="text-sm bg-white/[0.08] text-white/40 px-3 py-1.5 rounded cursor-not-allowed">
+              <button type="button" disabled className="text-sm bg-white/[0.08] text-white/40 px-3 py-1.5 rounded-xl cursor-not-allowed">
                 Route pending
               </button>
             )}
             <button
               type="button"
               onClick={onNavigateSettings}
-              className="text-sm border border-white/[0.12] text-white/70 hover:text-white px-3 py-1.5 rounded hover:bg-white/[0.06] transition-colors"
+              className="text-sm border border-white/[0.12] text-white/70 hover:text-white px-3 py-1.5 rounded-xl hover:bg-white/[0.06] transition-colors"
             >
               Manage env
             </button>

@@ -13,9 +13,51 @@ permissions:
   packages: write
 
 jobs:
+  verify:
+    name: Verify release candidate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            relay-client/package-lock.json
+            relayd/ui-src-next/package-lock.json
+
+      - name: Test relay CLI
+        working-directory: relay-client
+        run: npm ci && npm test
+
+      - name: Verify dashboard
+        working-directory: relayd/ui-src-next
+        run: npm ci && npm run lint && npm run build
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+          cache-dependency-path: |
+            relayd/go.sum
+            station/go.sum
+
+      - name: Test relayd
+        working-directory: relayd
+        env:
+          CGO_ENABLED: "0"
+        run: go test -count=1 -parallel=4 ./...
+
+      - name: Test station
+        working-directory: station
+        env:
+          CGO_ENABLED: "0"
+        run: go test -count=1 -parallel=4 ./...
+
   # ── Resolve the version/commit/date stamped into relayd and station via ldflags ──
   version:
     name: Resolve version
+    needs: verify
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.version.outputs.tag }}
@@ -36,6 +78,7 @@ jobs:
   # ── Build + publish the custom Caddy image (Cloudflare DNS-01 plugin) ──────
   build-caddy-image:
     name: Build Caddy image (cloudflare-dns)
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

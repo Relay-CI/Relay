@@ -35,3 +35,15 @@ _Avoid_: endpoint copy, socket-only API
 **SQLite Store**:
 The primary and analytics connection pools plus schema migration runner that own Relay's embedded durable storage startup.
 _Avoid_: database helper, global DB setup
+
+**Schema Migration**:
+An ordered, transactional, replay-safe SQLite schema change recorded in Relay's migration ledger.
+_Avoid_: best-effort upgrade, startup ALTER
+
+**Analytics Module**:
+The log ingestion, traffic analytics, and administrative operations reporting implementation used by Relay's dashboard.
+_Avoid_: analytics helpers, dashboard stats block
+
+**GitHub Delivery Workflow**:
+The encrypted GitHub App or legacy token connection, installation-scoped repository mapping, signed webhook deliveries, preview and production deploy triggers, Check Runs, health watch, and rollback controls for one Relay project.
+_Avoid_: GitHub deploy helper, webhook automation

@@ -242,6 +242,25 @@ Every deploy is assigned a sequential **build number** per app (`#1`, `#2`, …)
 
 ---
 
+## GitHub Delivery Workflow
+
+Relay can own the complete branch-to-production path without a separate GitHub Actions workflow:
+
+`Connect GitHub -> push branch -> HTTPS preview -> merge -> production deploy -> health watch -> instant rollback`
+
+Before connecting, configure a public HTTPS dashboard hostname in **Server Settings** (or with `RELAY_DASHBOARD_HOST`) and enable secret encryption. Owners can set `RELAY_SECRET_KEY` from **Server Settings -> Security**, or continue to provide it as an environment variable. Relay will not persist a GitHub credential unless secret encryption is enabled.
+
+In **Dashboard -> GitHub**, choose **Create GitHub App**. Enter an organization name if the repositories are organization-owned, or leave it empty for your personal account. Relay uses GitHub's manifest flow to create a private App owned by that account with only these repository permissions:
+
+- **Contents: read** to clone the selected repository
+- **Checks: write** to publish build, preview, health, and production results
+
+After registration, install the App and select exactly which repositories Relay may access. Relay generates repository-scoped installation tokens on demand, keeps them only in memory, and renews them before GitHub's one-hour expiry. Non-production branch pushes create isolated preview lanes and publish the HTTPS route and log link through a GitHub Check Run. A push to the configured production branch—normally GitHub's push after a pull request merge—starts the production rollout. Relay reports build and rollout failures back to GitHub, monitors production health, automatically restores the previous slot when a canary fails, and exposes the same immediate rollback control in the GitHub dashboard page.
+
+The App private key and webhook secret are encrypted in SQLite. Webhook deliveries are signature-verified and idempotent. Removing or suspending an installation immediately blocks new GitHub deploys without deleting existing Relay lanes. Fine-grained personal tokens and manually configured push webhooks remain supported for existing installations.
+
+---
+
 The dashboard also exposes a manual deploy flow with a target lane picker. You can redeploy from the saved server workspace for another lane, or trigger from the saved `repo_url` and branch without opening a shell.
 
 ---
@@ -261,13 +280,15 @@ Current limitation: live usage metrics are available for Docker-backed lanes. St
 
 ## Secrets Encryption at Rest
 
-Set `RELAY_SECRET_KEY` to enable AES-256-GCM encryption for all secrets stored in `relay.db`:
+Set `RELAY_SECRET_KEY` to enable AES-256-GCM encryption for all secrets stored in `relay.db`. You can set it from **Dashboard -> Server Settings -> Security**, or provide it as an environment variable:
 
 ```bash
 RELAY_SECRET_KEY="your-strong-passphrase" relayd
 ```
 
 The key is hashed to 32 bytes (SHA-256) before use. Secrets written before this key was set remain readable as plain text. New writes are stored as `enc:<base64>`. The deploy path decrypts transparently.
+
+If the value is saved from the dashboard, Relay stores it in `server_config` and uses it on later restarts when the environment variable is absent. `RELAY_SECRET_KEY` from the process environment takes precedence. Relay blocks unsafe dashboard key changes when encrypted rows already exist because old encrypted values need the same key to decrypt.
 
 ---
 
@@ -321,7 +342,7 @@ Sample: [`plugins/astro-static.json`](plugins/astro-static.json)
 
 - Put `relayd` behind TLS + a reverse proxy (nginx, Caddy, Traefik)
 - Create an owner account through the dashboard on first boot (or set `RELAY_TOKEN` for legacy mode)
-- Set `RELAY_SECRET_KEY` to encrypt secrets at rest
+- Set `RELAY_SECRET_KEY` from the environment or **Server Settings -> Security** to encrypt secrets at rest
 - Set `RELAY_CORS_ORIGINS` to your domain allowlist
 - Set `RELAY_ENABLE_PLUGIN_MUTATIONS=false` unless actively managing plugins
 - Persist `RELAY_DATA_DIR` on a durable volume and back it up

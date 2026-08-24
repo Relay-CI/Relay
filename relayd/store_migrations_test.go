@@ -2,7 +2,10 @@ package main
 
 import (
 	"database/sql"
+	"errors"
+	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -14,6 +17,18 @@ func openMigrationFixture(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return db
+}
+
+func applyMigrationFixture(t *testing.T, db *sql.DB, name string) {
+	t.Helper()
+	fixturePath := filepath.Join("testdata", "migrations", name)
+	contents, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatalf("read migration fixture %s: %v", name, err)
+	}
+	if _, err := db.Exec(string(contents)); err != nil {
+		t.Fatalf("apply migration fixture %s: %v", name, err)
+	}
 }
 
 func fixtureHasTable(t *testing.T, db *sql.DB, table string) bool {
@@ -49,6 +64,27 @@ func fixtureColumns(t *testing.T, db *sql.DB, table string) map[string]bool {
 	return columns
 }
 
+func fixtureMigrationVersions(t *testing.T, db *sql.DB) []int {
+	t.Helper()
+	rows, err := db.Query(`SELECT version FROM schema_migrations ORDER BY version`)
+	if err != nil {
+		t.Fatalf("read migration versions: %v", err)
+	}
+	defer rows.Close()
+	var versions []int
+	for rows.Next() {
+		var version int
+		if err := rows.Scan(&version); err != nil {
+			t.Fatalf("scan migration version: %v", err)
+		}
+		versions = append(versions, version)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate migration versions: %v", err)
+	}
+	return versions
+}
+
 func TestMigrateDBCreatesFreshSchemaAndIsIdempotent(t *testing.T) {
 	db := openMigrationFixture(t)
 	if err := migrateDB(db); err != nil {
@@ -56,6 +92,10 @@ func TestMigrateDBCreatesFreshSchemaAndIsIdempotent(t *testing.T) {
 	}
 	if err := migrateDB(db); err != nil {
 		t.Fatalf("second migration: %v", err)
+	}
+	wantVersions := []int{1, 2, 3, 4, 5, 6, 7, 8}
+	if got := fixtureMigrationVersions(t, db); !reflect.DeepEqual(got, wantVersions) {
+		t.Fatalf("migration ledger = %v, want %v", got, wantVersions)
 	}
 
 	for _, table := range []string{
@@ -70,6 +110,15 @@ func TestMigrateDBCreatesFreshSchemaAndIsIdempotent(t *testing.T) {
 		"analytics_events",
 		"promotions",
 		"connected_servers",
+		"github_connections",
+		"github_projects",
+		"github_deliveries",
+		"github_previews",
+		"github_app_config",
+		"github_installations",
+		"github_installation_repositories",
+		"github_check_runs",
+		"github_app_states",
 	} {
 		if !fixtureHasTable(t, db, table) {
 			t.Errorf("fresh schema is missing table %s", table)
@@ -92,39 +141,105 @@ func TestMigrateDBCreatesFreshSchemaAndIsIdempotent(t *testing.T) {
 			t.Errorf("fresh app_state schema is missing column %s", column)
 		}
 	}
+
+	githubProjectColumns := fixtureColumns(t, db, "github_projects")
+	for _, column := range []string{"auth_mode", "installation_id", "repository_id"} {
+		if !githubProjectColumns[column] {
+			t.Errorf("fresh github_projects schema is missing column %s", column)
+		}
+	}
+}
+
+func TestMigrateDBCompletesPartiallyUpgradedConnectedServersFixture(t *testing.T) {
+	db := openMigrationFixture(t)
+	applyMigrationFixture(t, db, "partial_connected_servers.sql")
+
+	if err := migrateDB(db); err != nil {
+		t.Fatalf("upgrade partial fixture: %v", err)
+	}
+	columns := fixtureColumns(t, db, "connected_servers")
+	for _, column := range []string{"ws_session_id", "agent_version", "last_disconnect_at"} {
+		if !columns[column] {
+			t.Errorf("partial connected_servers fixture was not upgraded with %s", column)
+		}
+	}
+	var serverName string
+	if err := db.QueryRow(`SELECT server_name FROM connected_servers WHERE id='server-1'`).Scan(&serverName); err != nil {
+		t.Fatalf("read partial fixture row after migration: %v", err)
+	}
+	if serverName != "primary" {
+		t.Fatalf("partial fixture row changed: server_name=%q", serverName)
+	}
+}
+
+func TestMigrateGitHubAppPreservesVersionSevenTokenProjects(t *testing.T) {
+	db := openMigrationFixture(t)
+	applyMigrationFixture(t, db, "github_token_v7.sql")
+
+	if err := migrateDB(db); err != nil {
+		t.Fatalf("upgrade GitHub token fixture: %v", err)
+	}
+	var repo, authMode, secret string
+	var installationID, repositoryID int64
+	if err := db.QueryRow(
+		`SELECT repo_full_name, auth_mode, installation_id, repository_id, webhook_secret_enc
+		 FROM github_projects WHERE app='widget'`,
+	).Scan(&repo, &authMode, &installationID, &repositoryID, &secret); err != nil {
+		t.Fatalf("read migrated GitHub token project: %v", err)
+	}
+	if repo != "acme/widget" || authMode != "token" || installationID != 0 || repositoryID != 0 || secret != "enc:legacy-webhook-secret" {
+		t.Fatalf("version seven project changed during App expansion: repo=%q mode=%q installation=%d repository=%d secret=%q", repo, authMode, installationID, repositoryID, secret)
+	}
+	if got := fixtureMigrationVersions(t, db); !reflect.DeepEqual(got, []int{1, 2, 3, 4, 5, 6, 7, 8}) {
+		t.Fatalf("migration ledger = %v", got)
+	}
+}
+
+func TestSQLiteMigrationFailureRollsBackSchemaAndLedger(t *testing.T) {
+	db := openMigrationFixture(t)
+	migrations := []schemaMigration{{
+		version: 1,
+		name:    "deliberate failure",
+		up: func(tx *sql.Tx) error {
+			if _, err := tx.Exec(`CREATE TABLE should_roll_back (id INTEGER PRIMARY KEY)`); err != nil {
+				return err
+			}
+			return errors.New("stop migration")
+		},
+	}}
+
+	if err := runSQLiteMigrations(db, migrations); err == nil {
+		t.Fatal("failed migration unexpectedly succeeded")
+	}
+	if fixtureHasTable(t, db, "should_roll_back") {
+		t.Fatal("failed migration left its schema change behind")
+	}
+	if got := fixtureMigrationVersions(t, db); len(got) != 0 {
+		t.Fatalf("failed migration was recorded in ledger: %v", got)
+	}
+}
+
+func TestSQLiteMigrationRejectsUnknownSchemaVersion(t *testing.T) {
+	db := openMigrationFixture(t)
+	if _, err := db.Exec(`CREATE TABLE schema_migrations (
+		version INTEGER PRIMARY KEY,
+		name TEXT NOT NULL,
+		applied_at INTEGER NOT NULL
+	)`); err != nil {
+		t.Fatalf("create migration ledger: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (999, 'future', 0)`); err != nil {
+		t.Fatalf("seed future migration: %v", err)
+	}
+
+	if err := runSQLiteMigrations(db, sqliteSchemaMigrations); err == nil {
+		t.Fatal("unknown schema version was accepted")
+	}
 }
 
 func TestMigrateDBUpgradesLegacyFixtureWithoutLosingRows(t *testing.T) {
 	db := openMigrationFixture(t)
-	legacy := []string{
-		`CREATE TABLE app_state (
-			app TEXT,
-			env TEXT,
-			branch TEXT,
-			repo_url TEXT,
-			current_image TEXT,
-			previous_image TEXT,
-			mode TEXT,
-			host_port INTEGER,
-			service_port INTEGER,
-			public_host TEXT,
-			updated_at INTEGER,
-			PRIMARY KEY (app, env, branch)
-		)`,
-		`INSERT INTO app_state (app, env, branch, public_host) VALUES ('demo', 'prod', 'main', 'demo.example.com')`,
-		`CREATE TABLE users (
-			id TEXT PRIMARY KEY,
-			username TEXT UNIQUE NOT NULL,
-			password_hash TEXT NOT NULL,
-			role TEXT NOT NULL DEFAULT 'deployer'
-		)`,
-		`INSERT INTO users (id, username, password_hash, role) VALUES ('user-1', 'owner', 'hash', 'owner')`,
-	}
-	for _, statement := range legacy {
-		if _, err := db.Exec(statement); err != nil {
-			t.Fatalf("seed legacy fixture: %v", err)
-		}
-	}
+	applyMigrationFixture(t, db, "legacy_app_state_users.sql")
 
 	if err := migrateDB(db); err != nil {
 		t.Fatalf("upgrade legacy fixture: %v", err)

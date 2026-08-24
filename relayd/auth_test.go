@@ -138,6 +138,64 @@ func TestHandleServerConfigRejectsInvalidDashboardHost(t *testing.T) {
 	}
 }
 
+func TestHandleServerConfigSetsRelaySecretKey(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	ownerToken := createUserSessionForTest(t, s, "owner-user", "owner")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/server/config", strings.NewReader(`{"relay_secret_key":"dashboard-passphrase"}`))
+	req.AddCookie(&http.Cookie{Name: dashboardSessionCookie, Value: ownerToken})
+	rec := httptest.NewRecorder()
+
+	s.authWithRoles("owner")(s.handleServerConfig)(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected secret key save to pass, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body["relay_secret_key_configured"] != true {
+		t.Fatalf("expected relay_secret_key_configured=true, got %#v", body)
+	}
+	if body["relay_secret_key_source"] != "dashboard" {
+		t.Fatalf("expected dashboard key source, got %#v", body)
+	}
+	if got := s.serverConfigGet("relay_secret_key"); got != "dashboard-passphrase" {
+		t.Fatalf("expected persisted dashboard key, got %q", got)
+	}
+	if encrypted := s.encryptSecret("token"); !strings.HasPrefix(encrypted, "enc:") {
+		t.Fatalf("expected newly configured key to encrypt immediately, got %q", encrypted)
+	}
+}
+
+func TestHandleServerConfigRejectsUnsafeRelaySecretKeyRotation(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	s.setRelaySecretKey("first-passphrase", "dashboard")
+	encrypted := s.encryptSecret("admin-token")
+	if _, err := s.db.Exec(
+		`INSERT OR REPLACE INTO app_secrets (app, env, branch, key, value) VALUES (?, ?, ?, ?, ?)`,
+		"demo", "prod", "main", "TOKEN", encrypted,
+	); err != nil {
+		t.Fatalf("insert encrypted secret: %v", err)
+	}
+	ownerToken := createUserSessionForTest(t, s, "owner-user", "owner")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/server/config", strings.NewReader(`{"relay_secret_key":"different-passphrase"}`))
+	req.AddCookie(&http.Cookie{Name: dashboardSessionCookie, Value: ownerToken})
+	rec := httptest.NewRecorder()
+
+	s.authWithRoles("owner")(s.handleServerConfig)(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected unsafe rotation to be rejected, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if got := s.decryptSecret(encrypted); got != "admin-token" {
+		t.Fatalf("expected old key to remain active, got %q", got)
+	}
+}
+
 func TestHandleAuthCLIStartUsesExistingSession(t *testing.T) {
 	s := newPreviewPortTestServer(t)
 	ownerToken := createUserSessionForTest(t, s, "owner-user", "owner")

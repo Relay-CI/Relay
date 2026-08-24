@@ -8,6 +8,7 @@ import { Topbar } from "@/components/topbar";
 import { Sidebar } from "@/components/sidebar";
 import { OverviewPage } from "@/components/pages/overview";
 import { DeploymentsPage } from "@/components/pages/deployments";
+import { GitHubPage } from "@/components/pages/github";
 import { BuildLogsPage } from "@/components/pages/build-logs";
 import { RuntimeLogsPage } from "@/components/pages/runtime-logs";
 import { SettingsPage } from "@/components/pages/settings";
@@ -215,11 +216,30 @@ export default function DashboardShell() {
       .catch(() => setCliHandoff("failed"));
   }, [auth.authed]);
 
+  // GitHub Check Runs link directly to one Relay deployment. Resolve that
+  // stable ID after dashboard data arrives, then remove it from the address
+  // bar so later navigation does not reopen the dialog.
+  useEffect(() => {
+    if (!auth.authed) return;
+    const params = new URLSearchParams(window.location.search);
+    const deployID = params.get("deploy");
+    if (!deployID) return;
+    const deploy = dashboard.deploys.find((item) => item.id === deployID);
+    if (!deploy) return;
+    setSelectedProjectName(deploy.app);
+    setSelectedEnvKey(deployKey(deploy.app, deploy.env, deploy.branch));
+    setActiveTab("deployments");
+    setSelectedDeploy(deploy);
+    params.delete("deploy");
+    const query = params.toString();
+    window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
+  }, [auth.authed, dashboard.deploys]);
+
   /* ── Auth gating ──────────────────────────────────────────────────────── */
 
   if (auth.loading) {
     return (
-      <div className="min-h-screen bg-black flex items-center justify-center">
+      <div className="min-h-screen bg-[#eaf5fb] flex items-center justify-center">
         <div className="text-center">
           <div className="w-8 h-8 border-2 border-relay-accent border-t-transparent rounded-full animate-spin mx-auto mb-3" />
           <div className="eyebrow">Relayd Control Room</div>
@@ -234,7 +254,7 @@ export default function DashboardShell() {
   if (auth.authed && cliHandoff !== "idle") {
     const failed = cliHandoff === "failed";
     return (
-      <div className="min-h-screen bg-black flex items-center justify-center p-4">
+      <div className="min-h-screen bg-[#eaf5fb] flex items-center justify-center p-4">
         <div className="text-center max-w-sm">
           {failed ? (
             <>
@@ -315,6 +335,14 @@ export default function DashboardShell() {
             onCancelDeploy={cancelDeploy}
           />
         );
+      case "github":
+        return (
+          <GitHubPage
+            project={selectedProject}
+            currentUser={auth.user}
+            onUpdated={refreshDashboard}
+          />
+        );
       case "logs":
         return (
           <BuildLogsPage
@@ -378,7 +406,7 @@ export default function DashboardShell() {
     : null;
 
   return (
-    <div className="flex flex-col h-screen bg-black overflow-hidden">
+    <div className="relay-admin-shell flex h-screen overflow-hidden">
       <Topbar
         projects={projectOptions}
         selectedProjectName={selectedProjectName}
@@ -399,7 +427,7 @@ export default function DashboardShell() {
         activeTab={activeTab}
       />
 
-      <div className="flex flex-1 min-h-0 overflow-hidden">
+      <div className="relay-admin-frame flex flex-1 min-h-0 overflow-hidden">
         <Sidebar
           activeTab={activeTab}
           onTabChange={setActiveTab}
@@ -414,7 +442,7 @@ export default function DashboardShell() {
           onClose={() => setSidebarOpen(false)}
         />
 
-        <main className="flex-1 min-w-0 overflow-y-auto p-5">
+        <main className="relay-workspace flex-1 min-w-0 overflow-y-auto p-4 md:p-5">
           {!selectedProject && !dashboard.loading ? (
             <div className="flex flex-col items-center justify-center h-full text-center gap-3">
               <div className="eyebrow">No Projects Yet</div>
@@ -498,11 +526,11 @@ function CreateProjectModal({ onClose, onCreated }: CreateProjectModalProps) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-      <div className="bg-zinc-950 border border-white/[0.1] rounded-xl w-full max-w-md shadow-2xl">
-        <div className="flex items-center justify-between p-5 border-b border-white/[0.06]">
-          <h2 className="text-base font-semibold text-white">New project</h2>
-          <button type="button" onClick={onClose} className="text-white/40 hover:text-white transition-colors">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 backdrop-blur-sm p-4">
+      <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-md shadow-2xl">
+        <div className="flex items-center justify-between p-5 border-b border-slate-100">
+          <h2 className="text-base font-semibold text-slate-950">New project</h2>
+          <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-950 transition-colors">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
         </div>
@@ -511,7 +539,7 @@ function CreateProjectModal({ onClose, onCreated }: CreateProjectModalProps) {
             <label className="eyebrow block mb-1.5">Project name</label>
             <input
               type="text"
-              className="w-full bg-white/[0.04] border border-white/[0.08] rounded px-3 py-2 text-sm text-white placeholder:text-white/30 outline-none focus:border-relay-accent/50"
+              className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm text-slate-950 placeholder:text-slate-400 outline-none focus:border-relay-accent/50"
               placeholder="my-app"
               value={name}
               onChange={(e) => setName(e.target.value)}
@@ -525,7 +553,7 @@ function CreateProjectModal({ onClose, onCreated }: CreateProjectModalProps) {
               <select
                 value={env}
                 onChange={(e) => setEnv(e.target.value)}
-                className="w-full bg-zinc-900 border border-white/[0.08] rounded px-3 py-2 text-sm text-white outline-none focus:border-relay-accent/50"
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm text-slate-950 outline-none focus:border-relay-accent/50"
               >
                 <option value="prod">prod</option>
                 <option value="staging">staging</option>
@@ -537,7 +565,7 @@ function CreateProjectModal({ onClose, onCreated }: CreateProjectModalProps) {
               <label className="eyebrow block mb-1.5">Branch</label>
               <input
                 type="text"
-                className="w-full bg-white/[0.04] border border-white/[0.08] rounded px-3 py-2 text-sm text-white placeholder:text-white/30 outline-none focus:border-relay-accent/50"
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm text-slate-950 placeholder:text-slate-400 outline-none focus:border-relay-accent/50"
                 placeholder="main"
                 value={branch}
                 onChange={(e) => setBranch(e.target.value)}
@@ -550,7 +578,7 @@ function CreateProjectModal({ onClose, onCreated }: CreateProjectModalProps) {
               <select
                 value={engine}
                 onChange={(e) => setEngine(e.target.value)}
-                className="w-full bg-zinc-900 border border-white/[0.08] rounded px-3 py-2 text-sm text-white outline-none focus:border-relay-accent/50"
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm text-slate-950 outline-none focus:border-relay-accent/50"
               >
                 <option value="docker">docker</option>
                 <option value="station">station</option>
@@ -561,7 +589,7 @@ function CreateProjectModal({ onClose, onCreated }: CreateProjectModalProps) {
               <select
                 value={mode}
                 onChange={(e) => setMode(e.target.value)}
-                className="w-full bg-zinc-900 border border-white/[0.08] rounded px-3 py-2 text-sm text-white outline-none focus:border-relay-accent/50"
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-sm text-slate-950 outline-none focus:border-relay-accent/50"
               >
                 <option value="port">HTTP</option>
                 <option value="static">Static</option>
@@ -573,14 +601,14 @@ function CreateProjectModal({ onClose, onCreated }: CreateProjectModalProps) {
             <button
               type="button"
               onClick={onClose}
-              className="flex-1 px-4 py-2 rounded-md border border-white/[0.1] text-sm text-white/60 hover:text-white hover:bg-white/[0.06] transition-colors"
+              className="flex-1 px-4 py-2 rounded-xl border border-slate-200 text-sm text-slate-600 hover:text-slate-950 hover:bg-slate-50 transition-colors"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={saving}
-              className="flex-1 px-4 py-2 rounded-md bg-relay-accent text-white text-sm font-semibold hover:bg-relay-accent/80 disabled:opacity-50 transition-colors"
+              className="flex-1 px-4 py-2 rounded-xl bg-relay-accent text-white text-sm font-semibold hover:bg-relay-accent/80 disabled:opacity-50 transition-colors"
             >
               {saving ? "Creating…" : "Create"}
             </button>

@@ -45,6 +45,9 @@ const NAV_ITEMS = [
   { id: "deployments", label: "Deployments", icon: (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
   )},
+  { id: "github", label: "GitHub", icon: (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7A5.4 5.4 0 0 0 19.4 4 5 5 0 0 0 19.3.5S18.2.1 15 1.8a13.4 13.4 0 0 0-7 0C4.8.1 3.7.5 3.7.5A5 5 0 0 0 3.6 4a5.4 5.4 0 0 0-1.4 3.7c0 5.3 3.5 6.5 6.8 7A4.8 4.8 0 0 0 8 18v4"/><path d="M8 19c-3 .9-3-1.5-4.2-2"/></svg>
+  )},
   { id: "logs", label: "Build Logs", icon: (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
   )},
@@ -160,19 +163,19 @@ export function Sidebar({
 
 
   const sidebarContent = (
-    <aside className="flex flex-col w-56 h-full border-r border-white/[0.06] bg-zinc-950 overflow-y-auto">
+    <aside className="relay-sidebar flex flex-col w-56 h-full overflow-y-auto">
       {/* Mobile close row */}
       <button
         type="button"
         onClick={onClose}
-        className="md:hidden flex items-center justify-between p-3 border-b border-white/[0.06] text-white/50 hover:text-white transition-colors"
+        className="md:hidden flex items-center justify-between p-3 border-b border-white/[0.08] text-white/55 hover:text-white transition-colors"
       >
         <span className="text-xs font-semibold">Navigation</span>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
 
       {/* Project card */}
-      <div className="p-3 border-b border-white/[0.06]">
+      <div className="p-3 border-b border-white/[0.08]">
         {selectedProject ? (
           <>
             <div className="flex items-start justify-between mb-1.5">
@@ -180,7 +183,7 @@ export function Sidebar({
                 <div className="eyebrow mb-0.5">Project</div>
                 <div className="text-sm font-semibold text-white truncate">{selectedProject.name}</div>
               </div>
-              <span className="text-[10px] text-white/40 border border-white/[0.1] rounded px-1.5 py-0.5 shrink-0 ml-2">
+              <span className="text-[10px] text-white/45 border border-white/[0.12] rounded-lg px-1.5 py-0.5 shrink-0 ml-2">
                 {selectedProject.envs.length}L
               </span>
             </div>
@@ -188,15 +191,15 @@ export function Sidebar({
               <div className="text-[11px] text-white/40 mb-2">{repoInfo.label}</div>
             )}
             <div className="grid grid-cols-3 gap-1">
-              <div className="text-center bg-white/[0.03] rounded p-1.5">
+              <div className="text-center bg-white/[0.06] rounded-lg p-1.5">
                 <div className="text-xs font-semibold text-white">{formatPercent(projectStats.successRate)}</div>
                 <div className="text-[10px] text-white/40">success</div>
               </div>
-              <div className="text-center bg-white/[0.03] rounded p-1.5">
+              <div className="text-center bg-white/[0.06] rounded-lg p-1.5">
                 <div className="text-xs font-semibold text-white">{projectStats.failures}</div>
                 <div className="text-[10px] text-white/40">failures</div>
               </div>
-              <div className="text-center bg-white/[0.03] rounded p-1.5">
+              <div className="text-center bg-white/[0.06] rounded-lg p-1.5">
                 <div className="text-xs font-semibold text-white">{projectStats.total}</div>
                 <div className="text-[10px] text-white/40">deploys</div>
               </div>
@@ -208,15 +211,15 @@ export function Sidebar({
       </div>
 
       {/* Navigation */}
-      <div className="px-1.5 py-2 flex-1">
-        <div className="text-[10px] uppercase tracking-widest text-white/25 px-2 mb-1">Navigate</div>
+      <div className="px-2 py-3 flex-1">
+        <div className="text-[10px] uppercase tracking-widest text-white/25 px-2 mb-2">Main menu</div>
         <nav className="flex flex-col gap-0.5">
           {NAV_ITEMS.map(({ id, label, icon }) => (
             <button
               key={id}
               type="button"
               onClick={() => { onTabChange(id); onClose(); }}
-              className={`flex items-center gap-2 px-2 py-1.5 rounded text-sm text-white/60 hover:text-white hover:bg-white/[0.06] transition-colors w-full text-left ${activeTab === id ? "text-white bg-relay-accent/15 border-l-2 border-relay-accent pl-[6px]" : ""}`}
+              className={`flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-sm text-white/62 hover:text-white hover:bg-white/[0.08] transition-colors w-full text-left ${activeTab === id ? "text-white bg-white/[0.12] shadow-[inset_3px_0_0_rgba(92,211,198,0.9)]" : ""}`}
             >
               <span className="shrink-0 text-inherit">{icon}</span>
               <span>{label}</span>
@@ -227,7 +230,7 @@ export function Sidebar({
 
       {/* Lane selector */}
       {envOptions.length > 0 && (
-        <div className="p-3 border-t border-white/[0.06]">
+        <div className="p-3 border-t border-white/[0.08]">
           <div className="eyebrow mb-1.5">Lane</div>
           <LaneDropdown
             envOptions={envOptions}

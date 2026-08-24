@@ -167,6 +167,8 @@ Environment variables:
 | `RELAY_TOKEN`               |                              *(auto)* | API auth token (if empty, generated and saved to `data/token.txt`) |
 | `RELAY_MAX_UPLOAD_BYTES`    |                           `524288000` | Max bytes per sync session (default 500MB)                         |
 | `RELAY_CORS_ORIGINS`        |                                  `""` | Comma-separated browser origin allowlist; empty means same-origin only |
+| `RELAY_DASHBOARD_HOST`      |                                  `""` | Public HTTPS hostname used for the dashboard, GitHub webhook, and status links |
+| `RELAY_SECRET_KEY`          |                                  `""` | Passphrase used to encrypt GitHub credentials and other stored secrets; can also be set from Server Settings -> Security |
 | `RELAY_ENABLE_PLUGIN_MUTATIONS` |                           `false` | Allows plugin install/remove API mutations                         |
 | `RELAY_PGBOUNCER_IMAGE`      | `edoburu/pgbouncer:v1.25.2-p0` | PgBouncer image used by RelayDB                                    |
 | `RELAY_VESSEL_BIN`          |                                  `""` | Explicit path to a `vessel` binary for the experimental engine     |
@@ -233,11 +235,44 @@ curl -H "X-Relay-Token: $RELAY_TOKEN" http://localhost:8080/api/deploys
 
 ## Deploy API
 
-### GitHub Webhooks (Auto-deploy on Push)
+### Connected GitHub Delivery Workflow
+
+Configure a public HTTPS dashboard hostname and enable secret encryption, then open **Dashboard -> GitHub**. Owners can set `RELAY_SECRET_KEY` from **Server Settings -> Security** or provide it as an environment variable. Choose the owning organization when needed; leaving it empty creates the App under the current personal account. Relay creates a private GitHub App through the manifest flow with:
+
+- **Contents: read**
+- **Checks: write**
+
+Install the App, select repositories, link a Relay app to one repository, and choose its production branch. GitHub sends signed App-level `push` and `pull_request` events. The resulting flow is:
+
+1. A non-production branch push queues an isolated preview deploy.
+2. Relay publishes a `Relay Preview` Check Run with the HTTPS route and full log link.
+3. Pull-request updates reuse the matching branch deploy instead of building the same SHA twice.
+4. GitHub's push after merge to the configured production branch queues production.
+5. Relay publishes a `Relay Production` Check Run, keeps it in progress during the health window, and automatically restores the previous slot if health checks fail.
+6. The dashboard's **Rollback instantly** control aborts an active rollout immediately or queues restoration of the previous image after graduation.
+
+The App private key and webhook secret are encrypted in SQLite. Installation tokens are repository-scoped, cached in memory, and refreshed before their one-hour expiry. Relay refuses to register the App until secret encryption is configured. If the key is saved from the dashboard, Relay uses it on later restarts when `RELAY_SECRET_KEY` is not present in the process environment. Delivery IDs are idempotent and all App payloads require a valid SHA-256 signature. Installation deletion, suspension, unsuspension, permission acceptance, and repository additions/removals update Relay's access state without deleting lanes.
+
+The authenticated management routes are:
+
+- `GET|POST|DELETE /api/github/connection`
+- `GET|DELETE /api/github/app`
+- `POST /api/github/app/manifest`
+- `GET /api/github/app/manifest/callback`
+- `POST /api/github/app/install`
+- `GET /api/github/app/setup`
+- `GET /api/github/repos`
+- `GET|POST|DELETE /api/github/projects`
+
+GitHub sends signed events to the public `POST /api/webhooks/github` route.
+
+The personal-token connection endpoints remain available as a compatibility fallback for existing projects.
+
+### Legacy Manual GitHub Webhook
 
 You can link a GitHub repository to Relay by adding a webhook in your GitHub repo settings.
 
-1.  **URL:** `http://<your-agent-ip>:8080/api/webhooks/github`
+1.  **URL:** `https://<your-relay-host>/api/webhooks/github`
 2.  **Content type:** `application/json`
 3.  **Events:** `Just the push event`
 

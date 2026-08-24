@@ -1,5 +1,7 @@
 "use client";
 
+import { useMemo, useState } from "react";
+import { Menu, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { RelayMark } from "@/components/relay-mark";
 import { ProjectSelector } from "@/components/project-selector";
@@ -44,34 +46,40 @@ export function Topbar({
   const initials = currentUser?.username
     ? currentUser.username.slice(0, 2).toUpperCase()
     : "RL";
+  const [query, setQuery] = useState("");
+  const searchMatches = useMemo(() => {
+    const value = query.trim().toLowerCase();
+    if (!value) return [];
+    return projects
+      .filter((project) => project.name.toLowerCase().includes(value))
+      .slice(0, 5);
+  }, [projects, query]);
 
   return (
-    <header className="flex items-center h-12 px-4 gap-4 border-b border-white/[0.06] bg-zinc-950 shrink-0 z-40">
+    <header className="relay-topbar flex items-center h-16 px-4 md:px-5 gap-3 shrink-0 z-40">
       {/* Brand */}
       <div className="flex items-center gap-2 shrink-0">
         {onToggleSidebar && (
           <button
             type="button"
             onClick={onToggleSidebar}
-            className="md:hidden p-1.5 text-white/50 hover:text-white transition-colors rounded hover:bg-white/[0.06] -ml-1"
+            className="md:hidden p-2 text-slate-500 hover:text-slate-950 transition-colors rounded-lg hover:bg-white -ml-1"
             aria-label="Toggle navigation"
           >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <line x1="3" y1="6" x2="21" y2="6"/>
-              <line x1="3" y1="12" x2="21" y2="12"/>
-              <line x1="3" y1="18" x2="21" y2="18"/>
-            </svg>
+            <Menu size={17} strokeWidth={2} />
           </button>
         )}
-        <RelayMark className="w-6 h-6 text-white" />
+        <div className="relay-brand-tile">
+          <RelayMark className="w-5 h-5 text-white" />
+        </div>
         <div className="hidden sm:block">
-          <div className="text-sm font-semibold text-white leading-none">Relayd</div>
-          <div className="text-[10px] text-white/30 leading-none mt-0.5">Control Room</div>
+          <div className="text-sm font-semibold text-slate-950 leading-none">Relay</div>
+          <div className="text-[10px] text-slate-400 leading-none mt-0.5">Admin</div>
         </div>
       </div>
 
       {/* Divider */}
-      <div className="w-px h-5 bg-white/[0.08] shrink-0" />
+      <div className="hidden sm:block w-px h-6 bg-slate-200 shrink-0" />
 
       {/* Project selector */}
       <ProjectSelector
@@ -81,12 +89,47 @@ export function Topbar({
         onCreateNew={onCreateProject}
       />
 
-      {/* Spacer */}
-      <div className="flex-1" />
+      <div className="relative hidden lg:flex items-center gap-2 flex-1 max-w-md ml-auto rounded-xl border border-slate-200 bg-white/80 px-3 py-2 shadow-sm">
+        <Search size={14} className="text-slate-400 shrink-0" />
+        <input
+          className="min-w-0 flex-1 bg-transparent text-xs text-slate-700 placeholder:text-slate-400 outline-none"
+          placeholder="Search projects, deploys, logs..."
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && searchMatches[0]) {
+              onSelectProject(searchMatches[0].name);
+              setQuery("");
+            }
+            if (event.key === "Escape") {
+              setQuery("");
+            }
+          }}
+        />
+        <span className="rounded-md border border-slate-200 px-1.5 py-0.5 text-[10px] text-slate-400">Enter</span>
+        {searchMatches.length > 0 && (
+          <div className="absolute left-0 right-0 top-full mt-2 rounded-2xl border border-slate-200 bg-white p-1 shadow-2xl">
+            {searchMatches.map((project) => (
+              <button
+                key={project.name}
+                type="button"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  onSelectProject(project.name);
+                  setQuery("");
+                }}
+                className="w-full rounded-xl px-3 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50"
+              >
+                {project.name}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* Live indicator */}
       <div className={cn(
-        "hidden sm:flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border",
+        "hidden sm:flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-xl border shadow-sm",
         isLive
           ? "border-amber-500/30 bg-amber-500/10 text-amber-400"
           : "border-emerald-500/20 bg-emerald-500/[0.08] text-emerald-500",
@@ -103,7 +146,7 @@ export function Topbar({
         type="button"
         onClick={onRefresh}
         disabled={refreshing}
-        className="text-xs text-white/50 hover:text-white transition-colors px-2 py-1 rounded hover:bg-white/[0.06]"
+        className="relay-topbar-action"
       >
         {refreshing ? "Refreshing…" : "Refresh"}
       </button>
@@ -115,10 +158,10 @@ export function Topbar({
           onClick={onAppearanceClick}
           title="Appearance"
           className={cn(
-            "p-1.5 rounded transition-colors",
+            "relay-icon-btn",
             activeTab === "appearance"
-              ? "text-white bg-relay-accent/20 border border-relay-accent/40"
-              : "text-white/50 hover:text-white hover:bg-white/[0.06]"
+              ? "relay-icon-btn--active"
+              : ""
           )}
         >
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -136,10 +179,10 @@ export function Topbar({
           onClick={onAdminClick}
           title="Server admin"
           className={cn(
-            "p-1.5 rounded transition-colors",
+            "relay-icon-btn",
             activeTab === "admin"
-              ? "text-white bg-relay-accent/20 border border-relay-accent/40"
-              : "text-white/50 hover:text-white hover:bg-white/[0.06]"
+              ? "relay-icon-btn--active"
+              : ""
           )}
         >
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -150,18 +193,18 @@ export function Topbar({
 
       {/* User */}
       {currentUser && (
-        <div className="flex items-center gap-2 pl-2 border-l border-white/[0.08]">
-          <div className="w-6 h-6 rounded-full bg-relay-accent/20 border border-relay-accent/30 flex items-center justify-center text-[10px] font-bold text-relay-accent">
+        <div className="flex items-center gap-2 pl-2 border-l border-slate-200">
+          <div className="w-8 h-8 rounded-xl bg-slate-950 flex items-center justify-center text-[10px] font-bold text-white shadow-sm">
             {initials}
           </div>
           <div className="hidden sm:block">
-            <div className="text-xs font-medium text-white leading-none">{currentUser.username}</div>
-            <div className="text-[10px] text-white/30 leading-none mt-0.5">{currentUser.role}</div>
+            <div className="text-xs font-medium text-slate-950 leading-none">{currentUser.username}</div>
+            <div className="text-[10px] text-slate-400 leading-none mt-0.5">{currentUser.role}</div>
           </div>
           <button
             type="button"
             onClick={onLogout}
-            className="text-xs text-white/40 hover:text-white transition-colors px-2 py-1 rounded hover:bg-white/[0.06]"
+            className="relay-topbar-action"
           >
             Sign out
           </button>
