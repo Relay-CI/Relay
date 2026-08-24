@@ -54,10 +54,15 @@ const {
   normalizeLaneEnv,
 } = require("./deploy");
 const {
+  findRepositoryRoot,
   loadRelayConfig,
   saveRelayConfig,
   loadRelayState,
   saveRelayState,
+  normalizeServerUrl,
+  getServerSession,
+  setServerSession,
+  deleteServerSession,
   getWorkspaceVersion,
   setWorkspaceVersion,
   getWorkspaceLocalFingerprint,
@@ -752,9 +757,10 @@ async function runSetupWizard(args, cfgPath, missingFields = []) {
 
   // ── 1. Connection type ──
   const needConn = needAll || missing.has("url") || missing.has("token") || missing.has("socket");
-  let socket = existingCfg.socket || args.socket || process.env.RELAY_SOCKET || null;
-  let url = existingCfg.url || args.url || process.env.RELAY_URL || null;
-  let token = args.token || process.env.RELAY_TOKEN || existingCfg.token || null;
+  let socket = args.socket || existingCfg.socket || process.env.RELAY_SOCKET || null;
+  let url = args.url || existingCfg.url || process.env.RELAY_URL || null;
+  const savedSession = url ? getServerSession(url) : null;
+  let token = args.token || existingCfg.token || savedSession?.token || process.env.RELAY_TOKEN || null;
 
   let useSocket = Boolean(socket && !url);
   if (needConn) {
@@ -776,6 +782,15 @@ async function runSetupWizard(args, cfgPath, missingFields = []) {
       } else {
         showConfigField("Server URL", url);
       }
+      const configMatchesServer =
+        !existingCfg.url ||
+        normalizeServerUrl(existingCfg.url) === normalizeServerUrl(url);
+      token =
+        args.token ||
+        (configMatchesServer ? existingCfg.token : null) ||
+        getServerSession(url)?.token ||
+        process.env.RELAY_TOKEN ||
+        null;
       if (!token) {
         token = await promptSecret("Auth token (hidden)");
       } else {
@@ -1947,7 +1962,8 @@ async function main() {
   // â”€â”€ projects â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // ── login ─────────────────────────────────────────────────────────────────────
   if (cmd === "login") {
-    const existingCfg = loadRelayConfig(process.cwd()).data || {};
+    const existingConfig = loadRelayConfig(process.cwd());
+    const existingCfg = existingConfig.data || {};
     const explicitLoginUrl = args.url || process.env.RELAY_URL || "";
     const defaultLoginUrl = existingCfg.url || "http://127.0.0.1:8080";
     const rawServerUrl =
@@ -2015,12 +2031,39 @@ async function main() {
     if (!tokenResp || !tokenResp.token)
       die(`Login failed: ${tokenResp?.error || "no token returned"}`);
 
-    const savedPath = saveRelayConfig({
-      url: serverUrl,
+    setServerSession(serverUrl, {
       token: tokenResp.token,
+      username: tokenResp.username || "",
+      role: tokenResp.role || "",
     });
+    const repositoryRoot = findRepositoryRoot(process.cwd());
+    let projectBinding = "";
+    if (repositoryRoot) {
+      const bindingDir = existingConfig.path
+        ? path.basename(existingConfig.path) === "config.json" &&
+          path.basename(path.dirname(existingConfig.path)) === ".relay"
+          ? path.dirname(path.dirname(existingConfig.path))
+          : path.dirname(existingConfig.path)
+        : repositoryRoot;
+      projectBinding = saveRelayConfig(
+        { url: serverUrl, token: undefined },
+        bindingDir,
+      );
+    } else if (
+      existingConfig.path &&
+      path.dirname(existingConfig.path) === path.resolve(process.cwd()) &&
+      path.resolve(process.cwd()) !== path.resolve(os.homedir())
+    ) {
+      projectBinding = saveRelayConfig(
+        { url: serverUrl, token: undefined },
+        process.cwd(),
+      );
+    }
+    const savedPath = projectBinding
+      ? `session saved for ${serverUrl}; project bound in ${projectBinding}`
+      : `session saved for ${serverUrl} in ~/.relay-state.json`;
     ok(
-      `Logged in as ${c.bold}${tokenResp.username}${c.reset} (${tokenResp.role})  →  saved to ${savedPath}`,
+      `Logged in as ${c.bold}${tokenResp.username}${c.reset} (${tokenResp.role})  →  ${savedPath}`,
     );
     process.exit(0);
   }
@@ -2030,6 +2073,9 @@ async function main() {
     const { transport } = await resolveOrSetup(args);
     try {
       await apiJSON(transport, "DELETE", "/api/auth/session");
+      if (transport.kind === "http") {
+        deleteServerSession(transport.baseUrl);
+      }
       ok("Logged out");
     } catch (e) {
       die(e.message);

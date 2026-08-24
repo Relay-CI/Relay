@@ -356,6 +356,35 @@ func TestSaveAndLoadAppStatePersistsPublicHosts(t *testing.T) {
 	}
 }
 
+func TestPersistedPublicHostsKeepsAliasesAcrossStateReplacement(t *testing.T) {
+	current := &AppState{
+		PublicHost:  "demo.example.com",
+		PublicHosts: []string{"demo.example.com", "www.demo.example.com"},
+	}
+	previous := &AppState{
+		PublicHost:  "old.example.com",
+		PublicHosts: []string{"old.example.com", "www.old.example.com"},
+	}
+
+	hosts := persistedPublicHosts(DeployRequest{PublicHost: "demo.example.com"}, current, previous)
+	if got := strings.Join(hosts, ","); got != "demo.example.com,www.demo.example.com" {
+		t.Fatalf("redeploy lost configured aliases: %q", got)
+	}
+
+	hosts = persistedPublicHosts(DeployRequest{PublicHost: "demo.example.com"}, nil, current)
+	if got := strings.Join(hosts, ","); got != "demo.example.com,www.demo.example.com" {
+		t.Fatalf("rollback fallback lost configured aliases: %q", got)
+	}
+
+	hosts = persistedPublicHosts(DeployRequest{
+		PublicHost:  "new.example.com",
+		PublicHosts: []string{"new.example.com", "www.new.example.com"},
+	}, current)
+	if got := strings.Join(hosts, ","); got != "new.example.com,www.new.example.com" {
+		t.Fatalf("explicit deploy hosts should win over persisted aliases: %q", got)
+	}
+}
+
 func TestRepairLegacyAppHostPortsFromRuntime(t *testing.T) {
 	s := newPreviewPortTestServer(t)
 	containerName := appBaseContainerName("myhltv", EnvProd, "main")

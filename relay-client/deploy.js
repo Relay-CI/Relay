@@ -1,4 +1,9 @@
-const { loadRelayConfig } = require("./config");
+const path = require("path");
+const {
+  loadRelayConfig,
+  getServerSession,
+  normalizeServerUrl,
+} = require("./config");
 
 function pick(...vals) {
   for (const v of vals) {
@@ -19,17 +24,47 @@ function normalizeLaneEnv(value) {
   return raw;
 }
 
+function loadCommandConfig(cli = {}) {
+  const startDir = cli.dir && cli.dir !== true
+    ? path.resolve(String(cli.dir))
+    : process.cwd();
+  return loadRelayConfig(startDir);
+}
+
+function resolveConnection(cli = {}) {
+  const cfg = loadCommandConfig(cli);
+  const socket = pick(cli.socket, cfg.data.socket, process.env.RELAY_SOCKET);
+  const url = pick(
+    cli.url,
+    cfg.data.url,
+    process.env.RELAY_URL,
+    "http://127.0.0.1:8080",
+  );
+  const normalizedUrl = normalizeServerUrl(url);
+  const configuredUrl = normalizeServerUrl(cfg.data.url);
+  const configuredToken = !configuredUrl || configuredUrl === normalizedUrl
+    ? cfg.data.token
+    : undefined;
+  const savedSession = getServerSession(normalizedUrl);
+  const token = pick(
+    cli.token,
+    configuredToken,
+    savedSession && savedSession.token,
+    process.env.RELAY_TOKEN,
+  );
+  return { cfg, socket: socket || null, url: normalizedUrl, token };
+}
+
 function resolveDeployArgs(cli = {}) {
-  const cfg = loadRelayConfig();
-  const socket = pick(cli.socket, process.env.RELAY_SOCKET, cfg.data.socket);
+  const { cfg, socket, url, token } = resolveConnection(cli);
 
   const resolved = {
-    url:    pick(cli.url,    process.env.RELAY_URL,    cfg.data.url,    "http://127.0.0.1:8080"),
-    token:  pick(cli.token,  process.env.RELAY_TOKEN,  cfg.data.token),
+    url,
+    token,
     socket: socket || null,
-    app:    pick(cli.app,    process.env.RELAY_APP,    cfg.data.app),
-    env:    normalizeLaneEnv(pick(cli.env,    process.env.RELAY_ENV,    cfg.data.env,    "preview")),
-    branch: pick(cli.branch, process.env.RELAY_BRANCH, cfg.data.branch, "main"),
+    app:    pick(cli.app,    cfg.data.app,    process.env.RELAY_APP),
+    env:    normalizeLaneEnv(pick(cli.env,    cfg.data.env,    process.env.RELAY_ENV,    "preview")),
+    branch: pick(cli.branch, cfg.data.branch, process.env.RELAY_BRANCH, "main"),
     dir:    pick(cli.dir,    cfg.data.dir, "."),
   };
 
@@ -49,11 +84,10 @@ function resolveDeployArgs(cli = {}) {
 }
 
 function resolveServerArgs(cli = {}) {
-  const cfg = loadRelayConfig();
-  const socket = pick(cli.socket, process.env.RELAY_SOCKET, cfg.data.socket);
+  const { cfg, socket, url, token } = resolveConnection(cli);
   const resolved = {
-    url:    pick(cli.url,   process.env.RELAY_URL,   cfg.data.url,   "http://127.0.0.1:8080"),
-    token:  pick(cli.token, process.env.RELAY_TOKEN, cfg.data.token),
+    url,
+    token,
     socket: socket || null,
   };
   if (!resolved.socket && !resolved.token) {
@@ -70,18 +104,15 @@ function resolveServerArgs(cli = {}) {
  *   { kind: "http",   baseUrl: "...",    token: "..." }
  */
 function resolveTransport(cli = {}) {
-  const cfg    = loadRelayConfig();
-  const socket = pick(cli.socket, process.env.RELAY_SOCKET, cfg.data.socket);
+  const { cfg, socket, url, token } = resolveConnection(cli);
   if (socket) {
-    return { kind: "socket", socketPath: socket, token: pick(cli.token, process.env.RELAY_TOKEN, cfg.data.token) || "" };
+    return { kind: "socket", socketPath: socket, token: token || "" };
   }
-  const baseUrl = pick(cli.url, process.env.RELAY_URL, cfg.data.url, "http://127.0.0.1:8080");
-  const token   = pick(cli.token, process.env.RELAY_TOKEN, cfg.data.token);
   if (!token) {
     const used = cfg.path ? `Loaded config: ${cfg.path}` : "No config found";
     throw new Error(`${used}\nMissing --token (or RELAY_TOKEN or config token), or --socket for local auth`);
   }
-  return { kind: "http", baseUrl, token };
+  return { kind: "http", baseUrl: url, token };
 }
 
 module.exports = { resolveDeployArgs, resolveServerArgs, resolveTransport, normalizeLaneEnv };

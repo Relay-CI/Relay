@@ -49,6 +49,8 @@ relay status                       Latest deploy status
 relay logs <id>                    Stream build logs
 relay list                         Recent deploys
 relay projects                     All projects and environments
+relay login --url <server>         Save a browser login for one server
+relay logout                       Clear the current server's saved login
 relay rollback                     Roll back to previous image
 relay start / stop / restart       Control a running container
 relay secrets list/add/rm          Manage app secrets
@@ -186,11 +188,24 @@ The CLI merges settings in this order (highest priority first):
 
 1. CLI flags (`--token`, `--app`, etc.)
 2. Local `.relay.json` (created by `init`)
-3. `relay.config.json` (build hints and optional monorepo layout: `install_cmd`, `build_cmd`, `start_cmd`, `service_port`, `project_root`, `build_context`, `dockerfile`)
+3. The saved login for that exact server URL in `~/.relay-state.json`
 4. Environment variables (`RELAY_URL`, `RELAY_TOKEN`, `RELAY_APP`, `RELAY_ENV`, `RELAY_BRANCH`)
 5. Fallback defaults (`url=http://127.0.0.1:8080`, `env=preview`, `branch=main`, `dir=.`)
 
-`relay.json` is not part of CLI connection resolution. It is reserved for project companion services such as Postgres and Redis.
+`.relay.json` lookup stops at the current Git repository root, so a config in your home directory or another repository cannot silently select the deployment server. When `--dir` is supplied, Relay loads connection settings from that directory rather than the shell's current directory.
+
+`relay.config.json` contains build hints and optional monorepo layout. `relay.json` is reserved for project companion services such as Postgres and Redis. Neither file selects the CLI server.
+
+### Multiple servers
+
+Log in once to each server; credentials are stored separately by normalized server URL:
+
+```bash
+relay login --url https://relay-a.example.com
+relay login --url https://relay-b.example.com
+```
+
+Then run `relay init --url https://relay-a.example.com` or `relay init --url https://relay-b.example.com` in each project. The project `.relay.json` stores the server URL, while the bearer token remains in the per-user state file.
 
 ### Monorepo build layout
 

@@ -168,6 +168,7 @@ Environment variables:
 | `RELAY_MAX_UPLOAD_BYTES`    |                           `524288000` | Max bytes per sync session (default 500MB)                         |
 | `RELAY_CORS_ORIGINS`        |                                  `""` | Comma-separated browser origin allowlist; empty means same-origin only |
 | `RELAY_ENABLE_PLUGIN_MUTATIONS` |                           `false` | Allows plugin install/remove API mutations                         |
+| `RELAY_PGBOUNCER_IMAGE`      | `edoburu/pgbouncer:v1.25.2-p0` | PgBouncer image used by RelayDB                                    |
 | `RELAY_VESSEL_BIN`          |                                  `""` | Explicit path to a `vessel` binary for the experimental engine     |
 | `RELAY_VESSEL_SOURCE_DIR`   |                                  `""` | Explicit path to `vessel/`; Relay rebuilds `vessel` from it when newer |
 | `RELAY_NODE_IMAGE`          |                             `node:22` | Build image for Node builds                                        |

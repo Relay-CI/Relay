@@ -128,6 +128,41 @@ Supported lanes: `preview`, `dev`, `staging`, `prod`
 
 ---
 
+## RelayDB
+
+RelayDB is Relay's production-oriented PostgreSQL companion. It provisions a
+PostgreSQL 17 primary plus PgBouncer transaction pooling on the lane's private
+network, generates a unique encrypted credential, waits for both containers to
+be ready, and injects `DATABASE_URL` into the app.
+
+Create `relay.json` in the app repository:
+
+```json
+{
+  "project": "my-app",
+  "services": [
+    {
+      "name": "db",
+      "type": "relaydb",
+      "profile": "auto"
+    }
+  ]
+}
+```
+
+Profiles are `auto`, `starter` (512 MB), `balanced` (2 GB), and `throughput`
+(8 GB). `auto` selects conservatively from host memory. The database volume and
+credential are stable across deploys and container replacement. Back up both
+`relay.db` and `relaydb.key`; losing `relaydb.key` makes stored RelayDB
+credentials unrecoverable.
+
+RelayDB removes connection setup overhead and gives applications a strong
+single-node foundation. Discord- or YouTube-scale deployments still require
+application-specific indexes, caching, partitioning, replicas, object storage,
+and eventually multiple nodes; no single database setting replaces that work.
+
+---
+
 `relay.config.json` also supports `project_root`, `build_context`, and `dockerfile` for monorepos and custom Docker builds.
 
 ## Monorepos And Dockerfiles
@@ -180,7 +215,7 @@ On first run with an empty `users` table, the dashboard prompts for setup. Creat
 | `deployer` | ✓          | ✓                  | —                |
 | `viewer`   | —          | —                  | —                |
 
-Use `relay login` for browser-based CLI auth — opens a browser tab, you log in once, and the token is saved to `~/.relay-state.json`.
+Use `relay login --url https://your-relay-server.example` for browser-based CLI auth. Sessions are saved in `~/.relay-state.json` keyed by server URL, so logging into another Relay server does not replace the first session. Each project stores its own server URL in its repository-local `.relay.json`.
 
 ### Legacy token mode
 
@@ -290,7 +325,7 @@ Sample: [`plugins/astro-static.json`](plugins/astro-static.json)
 - Set `RELAY_CORS_ORIGINS` to your domain allowlist
 - Set `RELAY_ENABLE_PLUGIN_MUTATIONS=false` unless actively managing plugins
 - Persist `RELAY_DATA_DIR` on a durable volume and back it up
-- `relayd` creates `relay.db`, `logs/`, and `token.txt` inside `RELAY_DATA_DIR` (defaults to `./data`)
+- `relayd` creates `relay.db`, `relaydb.key`, `logs/`, and `token.txt` inside `RELAY_DATA_DIR` (defaults to `./data`)
 - Review the Audit Log in the dashboard regularly — especially after onboarding new team members
 
 ---
