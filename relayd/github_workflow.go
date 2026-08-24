@@ -823,7 +823,7 @@ func (s *Server) processConnectedGitHubEvent(project *githubProjectRecord, event
 				return "failed", "", fmt.Errorf("store GitHub preview: %w", err)
 			}
 		}
-		go s.emitGitHubDeployStatusByID(deploy.ID)
+		s.emitGitHubDeployStatusAsync(deploy.ID)
 		return outcome, deploy.ID, nil
 	case "pull_request":
 		prNumber := payload.PullRequest.Number
@@ -874,7 +874,7 @@ func (s *Server) processConnectedGitHubEvent(project *githubProjectRecord, event
 		}); err != nil {
 			return "failed", "", fmt.Errorf("store GitHub pull request preview: %w", err)
 		}
-		go s.emitGitHubDeployStatusByID(deploy.ID)
+		s.emitGitHubDeployStatusAsync(deploy.ID)
 		return "preview_queued", deploy.ID, nil
 	default:
 		return "ignored", "", nil
@@ -981,6 +981,38 @@ func (s *Server) upsertGitHubPreview(item githubPreviewRecord) error {
 	return err
 }
 
+func (s *Server) emitGitHubDeployStatusAsync(deployID string) {
+	if strings.TrimSpace(deployID) == "" {
+		return
+	}
+	s.githubStatusWG.Add(1)
+	go func() {
+		defer s.githubStatusWG.Done()
+		s.emitGitHubDeployStatusByID(deployID)
+	}()
+}
+
+func (s *Server) waitGitHubDeployStatusAsync() {
+	s.githubStatusWG.Wait()
+}
+
+func (s *Server) updateGitHubPreviewDeployStatus(deploy *Deploy, targetURL string) {
+	if deploy == nil || deploy.Env != EnvPreview {
+		return
+	}
+	_, _ = s.db.Exec(
+		`UPDATE github_previews
+		 SET status=CASE
+		   WHEN status IN ('success', 'failed') AND ? IN ('queued', 'running') THEN status
+		   ELSE ?
+		 END,
+		 preview_url=COALESCE(NULLIF(?, ''), preview_url),
+		 updated_at=?
+		 WHERE deploy_id=?`,
+		string(deploy.Status), string(deploy.Status), targetURL, time.Now().UnixMilli(), deploy.ID,
+	)
+}
+
 func (s *Server) emitGitHubDeployStatusByID(deployID string) {
 	deploy, err := s.getDeployFromDB(deployID)
 	if err != nil || deploy == nil || strings.TrimSpace(deploy.CommitSHA) == "" {
@@ -1038,10 +1070,7 @@ func (s *Server) emitGitHubDeployStatusByID(deployID string) {
 		description = "Relay deployment is healthy"
 	}
 	if previewErr == nil {
-		_, _ = s.db.Exec(
-			`UPDATE github_previews SET status=?, preview_url=?, updated_at=? WHERE deploy_id=?`,
-			string(deploy.Status), targetURL, time.Now().UnixMilli(), deploy.ID,
-		)
+		s.updateGitHubPreviewDeployStatus(deploy, targetURL)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -1123,10 +1152,7 @@ func (s *Server) emitGitHubCheckRun(deploy *Deploy, project *githubProjectRecord
 		summary += "\n\n[Open deployment](" + targetURL + ")"
 	}
 	if deploy.Env == EnvPreview {
-		_, _ = s.db.Exec(
-			`UPDATE github_previews SET status=?, preview_url=?, updated_at=? WHERE deploy_id=?`,
-			string(deploy.Status), targetURL, time.Now().UnixMilli(), deploy.ID,
-		)
+		s.updateGitHubPreviewDeployStatus(deploy, targetURL)
 	}
 	detailsURL := s.githubDeployDetailsURL(deploy.ID)
 	if detailsURL != "" {

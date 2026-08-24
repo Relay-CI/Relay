@@ -400,6 +400,7 @@ type Server struct {
 	githubTokenMu    sync.Mutex
 	githubTokens     map[string]githubCachedInstallationToken
 	githubCheckMu    sync.Mutex
+	githubStatusWG   sync.WaitGroup
 
 	rolloutWatchMu sync.Mutex
 	rolloutWatches map[string]struct{}
@@ -6990,7 +6991,7 @@ func (s *Server) graduateCanary(app string, env DeployEnv, branch string, total 
 	s.broadcastSnapshot()
 	s.auditLog("relay-rollout", "rollout.graduate", app, fmt.Sprintf("env=%s branch=%s requests=%d error_percent=%.2f err=%v", env, branch, total, errorPercent, assessErr))
 	if deployID := strings.TrimSpace(st.RolloutDeployID); deployID != "" {
-		go s.emitGitHubDeployStatusByID(deployID)
+		s.emitGitHubDeployStatusAsync(deployID)
 	}
 	s.cleanupStandbySlotAfter(app, env, branch, st.ActiveSlot, st.StandbySlot, st.ServicePort, st.HostPort, st.Mode, st.TrafficMode, st.PublicHost, rolloutDrainDuration())
 	return nil
@@ -9001,7 +9002,7 @@ func (s *Server) updateDeployStatus(id string, status DeployStatus, errMsg strin
 	if err == nil {
 		s.broadcastSnapshot()
 		s.emitDeployNotificationsByID(id)
-		go s.emitGitHubDeployStatusByID(id)
+		s.emitGitHubDeployStatusAsync(id)
 	}
 	return err
 }

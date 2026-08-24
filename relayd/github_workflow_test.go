@@ -165,7 +165,7 @@ func newGitHubWorkflowTestServer(t *testing.T, fake *fakeGitHubServer) *Server {
 	if _, err := db.Exec(`INSERT INTO server_config(key,value) VALUES('dashboard_host','relay.example.com')`); err != nil {
 		t.Fatalf("configure dashboard host: %v", err)
 	}
-	return &Server{
+	s := &Server{
 		deploys:          map[string]*Deploy{},
 		queue:            make(chan DeployJob, 16),
 		eventsChans:      map[chan []byte]struct{}{},
@@ -179,6 +179,8 @@ func newGitHubWorkflowTestServer(t *testing.T, fake *fakeGitHubServer) *Server {
 		githubHTTPClient: fake.server.Client(),
 		runtime:          &mockRuntime{running: map[string]bool{}, exists: map[string]bool{}, published: map[string]int{}},
 	}
+	t.Cleanup(s.waitGitHubDeployStatusAsync)
+	return s
 }
 
 func invokeJSONHandler(t *testing.T, handler http.HandlerFunc, method string, path string, body string) *httptest.ResponseRecorder {
