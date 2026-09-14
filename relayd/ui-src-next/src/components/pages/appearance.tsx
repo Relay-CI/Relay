@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
 import { getServerConfig, saveServerConfig } from "@/lib/api";
 import { useTheme, BUILT_IN_THEMES } from "@/components/theme-provider";
+import type { ColorMode } from "@/components/theme-provider";
 
 type CurrentUser = { username: string; role: string } | null;
 
@@ -134,6 +135,32 @@ export function AppearancePage({ currentUser }: AppearancePageProps) {
           Customize the look and feel of the Relay control room.
           {!isOwner && " Some options require owner access to persist across sessions."}
         </p>
+      </div>
+
+      <div className="bg-white/[0.02] border border-white/[0.06] rounded-xl p-5 space-y-4">
+        <div>
+          <div className="eyebrow mb-0.5">Display</div>
+          <h2 className="text-base font-semibold text-white">Color mode</h2>
+          <p className="text-xs text-white/40 mt-1">Saved on this device. System follows your operating system automatically.</p>
+        </div>
+        <div className="grid grid-cols-3 gap-2" role="group" aria-label="Color mode">
+          {(["system", "light", "dark"] as ColorMode[]).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              aria-pressed={theme.mode === mode}
+              onClick={() => theme.setMode(mode)}
+              className={cn(
+                "rounded-lg border px-3 py-2.5 text-sm font-medium capitalize transition-all",
+                theme.mode === mode
+                  ? "border-relay-accent bg-relay-accent/10 text-white"
+                  : "border-white/[0.08] text-white/50 hover:text-white hover:bg-white/[0.04]",
+              )}
+            >
+              {mode}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Color themes */}

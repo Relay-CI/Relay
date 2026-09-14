@@ -13,6 +13,13 @@ INSERT INTO schema_migrations(version, name, applied_at) VALUES
     (6, 'lane policies', 0),
     (7, 'github delivery workflow', 0);
 
+CREATE TABLE user_sessions (
+    token TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    created_at INTEGER,
+    expires_at INTEGER
+);
+
 CREATE TABLE lane_policies (
     env TEXT PRIMARY KEY,
     display_name TEXT DEFAULT '',

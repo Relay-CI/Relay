@@ -17,6 +17,7 @@ func (s *Server) registerControlRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/api/version", s.handleVersion)
 	mux.HandleFunc("/api/public/theme", s.handlePublicTheme)
+	mux.HandleFunc("/api/public/update", s.handlePublicUpdate)
 	mux.HandleFunc("/api/auth/session", s.handleDashboardSession)
 	mux.HandleFunc("/api/auth/setup", s.handleAuthSetup)
 	mux.HandleFunc("/api/auth/login", s.handleAuthLogin)

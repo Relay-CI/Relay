@@ -1064,9 +1064,9 @@ func (b *GoBuildpack) Plan(req DeployRequest, repoDir string, cfg *RelayConfig) 
 			df := fmt.Sprintf(`FROM %s AS builder
 		WORKDIR /src
 		COPY go.mod go.sum ./
-		RUN go mod download
+		RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build go mod download
 		COPY . .
-		RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/app ./
+		RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/app ./
 
 		FROM %s
 		WORKDIR /app
@@ -1193,19 +1193,42 @@ func (b *PythonBuildpack) Plan(req DeployRequest, repoDir string, cfg *RelayConf
 		WriteDockerfile: func(repoDir string) error {
 			install := firstNonEmpty(req.InstallCmd, pythonInstallCmd(repoDir))
 			if strings.TrimSpace(install) == "" {
-				install = `sh -lc "pip install --no-cache-dir -U pip"`
+				install = `sh -lc "pip install -U pip"`
 			}
+			cacheMount := "--mount=type=cache,target=/root/.cache/pip"
 
-			df := fmt.Sprintf(`FROM %s
+			// requirements.txt fully determines the install, so copy it
+			// alone first: an unchanged manifest reuses this Docker layer
+			// and skips reinstalling on a source-only change. Other manifest
+			// kinds (pyproject.toml "pip install .", Pipfile) need the whole
+			// project present to install, so they fall back to installing
+			// after the full COPY . . — still backed by the pip cache mount,
+			// just without the layer-cache skip.
+			var df string
+			if manifests := pythonDependencyManifests(repoDir); len(manifests) > 0 && req.InstallCmd == "" {
+				df = fmt.Sprintf(`FROM %s
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PORT=%d
+COPY %s ./
+RUN %s %s
+COPY . .
+EXPOSE %d
+CMD %s
+`, firstNonEmpty(cfgStr(cfg, "RunImage"), runImg), port, strings.Join(manifests, " "), cacheMount, install, port, shellForm(start))
+			} else {
+				df = fmt.Sprintf(`FROM %s
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PORT=%d
 COPY . .
-RUN %s
+RUN %s %s
 EXPOSE %d
 CMD %s
-`, firstNonEmpty(cfgStr(cfg, "RunImage"), runImg), port, install, port, shellForm(start))
+`, firstNonEmpty(cfgStr(cfg, "RunImage"), runImg), port, cacheMount, install, port, shellForm(start))
+			}
 			return os.WriteFile(filepath.Join(repoDir, "Dockerfile"), []byte(df), 0644)
 		},
 		Cleanup: func(repoDir string) error {
@@ -1308,7 +1331,7 @@ WORKDIR /src
 COPY pom.xml mvnw* .
 COPY .mvn .mvn
 COPY src ./src
-RUN mvn -q -DskipTests package
+RUN --mount=type=cache,target=/root/.m2 mvn -q -DskipTests package
 
 FROM %s
 WORKDIR /app
@@ -1327,7 +1350,7 @@ CMD %s
 				df := fmt.Sprintf(`FROM %s AS builder
 WORKDIR /src
 COPY . .
-RUN %s
+RUN --mount=type=cache,target=/root/.gradle %s
 
 FROM %s
 WORKDIR /app

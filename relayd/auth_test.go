@@ -1,13 +1,176 @@
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+func TestControlMiddlewareAddsSecurityHeaders(t *testing.T) {
+	s := &Server{}
+	handler := s.withCORS(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "https://relay.example/", nil)
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+	for _, name := range []string{"Content-Security-Policy", "X-Content-Type-Options", "X-Frame-Options", "Referrer-Policy", "Permissions-Policy", "Strict-Transport-Security"} {
+		if rec.Header().Get(name) == "" {
+			t.Fatalf("missing security header %s", name)
+		}
+	}
+}
+
+func TestConcurrentFirstOwnerSetupCreatesOnlyOneOwner(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	statuses := make(chan int, 2)
+	var wg sync.WaitGroup
+	for _, username := range []string{"first-owner", "second-owner"} {
+		wg.Add(1)
+		go func(username string) {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodPost, "/api/auth/setup", strings.NewReader(`{"username":"`+username+`","password":"password123"}`))
+			rec := httptest.NewRecorder()
+			s.handleAuthSetup(rec, req)
+			statuses <- rec.Code
+		}(username)
+	}
+	wg.Wait()
+	close(statuses)
+	ok, conflict := 0, 0
+	for status := range statuses {
+		if status == http.StatusOK {
+			ok++
+		}
+		if status == http.StatusConflict {
+			conflict++
+		}
+	}
+	if ok != 1 || conflict != 1 {
+		t.Fatalf("expected one owner and one conflict, got ok=%d conflict=%d", ok, conflict)
+	}
+}
+
+func TestVerifyPasswordAcceptsLegacyHashAndFlagsUpgrade(t *testing.T) {
+	legacy := checkLegacyPasswordFixture(t, "correct horse")
+	valid, upgrade := verifyPassword("correct horse", legacy)
+	if !valid || !upgrade {
+		t.Fatalf("legacy hash: valid=%v upgrade=%v, want valid=true upgrade=true", valid, upgrade)
+	}
+	if valid, _ := verifyPassword("wrong password", legacy); valid {
+		t.Fatal("legacy hash accepted wrong password")
+	}
+}
+
+func TestVerifyPasswordAcceptsArgon2idAndSkipsUpgrade(t *testing.T) {
+	hash, err := hashPassword("correct horse")
+	if err != nil {
+		t.Fatalf("hashPassword: %v", err)
+	}
+	valid, upgrade := verifyPassword("correct horse", hash)
+	if !valid || upgrade {
+		t.Fatalf("argon2id hash: valid=%v upgrade=%v, want valid=true upgrade=false", valid, upgrade)
+	}
+	if valid, _ := verifyPassword("wrong password", hash); valid {
+		t.Fatal("argon2id hash accepted wrong password")
+	}
+}
+
+func checkLegacyPasswordFixture(t *testing.T, password string) string {
+	t.Helper()
+	salt := make([]byte, 16)
+	for i := range salt {
+		salt[i] = byte(i + 1)
+	}
+	h := pbkdf2HMACSHA256([]byte(password), salt, pwHashIter)
+	return hex.EncodeToString(salt) + ":" + hex.EncodeToString(h)
+}
+
+func TestLoginThrottledAfterRepeatedFailures(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	setupReq := httptest.NewRequest(http.MethodPost, "/api/auth/setup", strings.NewReader(`{"username":"owner","password":"password123"}`))
+	setupRec := httptest.NewRecorder()
+	s.handleAuthSetup(setupRec, setupReq)
+	if setupRec.Code != http.StatusOK {
+		t.Fatalf("setup: status=%d body=%s", setupRec.Code, setupRec.Body.String())
+	}
+
+	var lastCode int
+	for i := 0; i < loginMaxPerUser+2; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"owner","password":"wrong"}`))
+		req.RemoteAddr = "203.0.113.5:9999"
+		rec := httptest.NewRecorder()
+		s.handleAuthLogin(rec, req)
+		lastCode = rec.Code
+	}
+	if lastCode != http.StatusTooManyRequests {
+		t.Fatalf("expected final attempt throttled with 429, got %d", lastCode)
+	}
+
+}
+
+func TestLoginThrottledPerIPAcrossUsernames(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	setupReq := httptest.NewRequest(http.MethodPost, "/api/auth/setup", strings.NewReader(`{"username":"owner","password":"password123"}`))
+	setupRec := httptest.NewRecorder()
+	s.handleAuthSetup(setupRec, setupReq)
+	if setupRec.Code != http.StatusOK {
+		t.Fatalf("setup: status=%d body=%s", setupRec.Code, setupRec.Body.String())
+	}
+
+	var lastCode int
+	for i := 0; i < loginMaxPerIP+2; i++ {
+		body := `{"username":"guess-` + strconv.Itoa(i) + `","password":"wrong"}`
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(body))
+		req.RemoteAddr = "203.0.113.7:9999"
+		rec := httptest.NewRecorder()
+		s.handleAuthLogin(rec, req)
+		lastCode = rec.Code
+	}
+	if lastCode != http.StatusTooManyRequests {
+		t.Fatalf("expected per-IP throttle across usernames, got %d", lastCode)
+	}
+}
+
+func TestDashboardLoginUsesShortIdleSessionKind(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	setupReq := httptest.NewRequest(http.MethodPost, "/api/auth/setup", strings.NewReader(`{"username":"owner","password":"password123"}`))
+	setupRec := httptest.NewRecorder()
+	s.handleAuthSetup(setupRec, setupReq)
+	if setupRec.Code != http.StatusOK {
+		t.Fatalf("setup: status=%d body=%s", setupRec.Code, setupRec.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"username":"owner","password":"password123"}`))
+	req.RemoteAddr = "203.0.113.6:9999"
+	rec := httptest.NewRecorder()
+	s.handleAuthLogin(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var cookieToken string
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == dashboardSessionCookie {
+			cookieToken = c.Value
+		}
+	}
+	if cookieToken == "" {
+		t.Fatal("login did not set dashboard session cookie")
+	}
+	var kind string
+	if err := s.db.QueryRow(`SELECT kind FROM user_sessions WHERE token=?`, storedSessionToken(cookieToken)).Scan(&kind); err != nil {
+		t.Fatalf("read session kind: %v", err)
+	}
+	if kind != "dashboard" {
+		t.Fatalf("dashboard login session kind = %q, want %q", kind, "dashboard")
+	}
+}
 
 func createUserSessionForTest(t *testing.T, s *Server, username string, role string) string {
 	t.Helper()

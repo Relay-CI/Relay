@@ -234,6 +234,8 @@ func (m *relayDBManager) Ensure(runtime ContainerRuntime, target relayDBTarget, 
 		Command:       command,
 		CPULimit:      profile.CPUs,
 		MemLimit:      strconv.Itoa(profile.MemoryMB) + "m",
+		NoNewPrivileges: true,
+		PIDsLimit:      512,
 	}
 	if log != nil {
 		log("starting RelayDB primary (profile=%s memory=%dMB image=%s)", profile.Name, profile.MemoryMB, primaryImage)
@@ -266,6 +268,8 @@ func (m *relayDBManager) Ensure(runtime ContainerRuntime, target relayDBTarget, 
 		HealthArgs:    healthArgs(relayDBPoolHealth()),
 		CPULimit:      "0.5",
 		MemLimit:      "128m",
+		NoNewPrivileges: true,
+		PIDsLimit:      256,
 	}
 	if target.HostPort > 0 {
 		poolerSpec.PortBindings = []string{fmt.Sprintf("%d:5432", target.HostPort)}

@@ -5,6 +5,7 @@ import (
 	"archive/tar"
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -36,6 +37,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"golang.org/x/crypto/argon2"
 	_ "modernc.org/sqlite"
 )
 
@@ -322,6 +324,7 @@ type SyncSession struct {
 	DeleteList    []string
 	UploadedBytes int64
 	MaxBytes      int64
+	Manifest      map[string]ManifestFile
 	uploadMu      sync.Mutex
 }
 
@@ -390,11 +393,19 @@ type Server struct {
 
 	building sync.Map // key: "app__env__branch" → bool; guards per-lane build dedup
 
+	// Drain timers outlive the deploy that created them, so route changes must
+	// be serialized per lane and stale timers must never race a newer switch.
+	edgeProxyLocks sync.Map // key: "app__env__branch" → *sync.Mutex
+	authSetupMu    sync.Mutex
+
 	buildCancelsMu sync.Mutex
 	buildCancels   map[string]context.CancelFunc // deployID → active cancel func
 
 	webhookRateMu    sync.Mutex
 	webhookHits      map[string][]time.Time // repoURL → recent trigger timestamps
+	loginRateMu      sync.Mutex
+	loginHitsByIP    map[string][]time.Time // client IP → recent failed-login timestamps
+	loginHitsByUser  map[string][]time.Time // lowercased username → recent failed-login timestamps
 	githubAPIURL     string
 	githubHTTPClient *http.Client
 	githubTokenMu    sync.Mutex
@@ -2139,6 +2150,8 @@ func main() {
 		buildpacks:            defaultBuildpacks(),
 		buildCancels:          make(map[string]context.CancelFunc),
 		webhookHits:           make(map[string][]time.Time),
+		loginHitsByIP:         make(map[string][]time.Time),
+		loginHitsByUser:       make(map[string][]time.Time),
 		rolloutWatches:        make(map[string]struct{}),
 		eventsChans:           make(map[chan []byte]struct{}),
 		runtime:               &DockerRuntime{},
@@ -3561,6 +3574,9 @@ func (s *Server) handleSyncPlan(w http.ResponseWriter, r *http.Request) {
 		}
 		client[p] = f
 	}
+	sess.uploadMu.Lock()
+	sess.Manifest = client
+	sess.uploadMu.Unlock()
 
 	serverPaths := map[string]bool{}
 	need := make([]string, 0)
@@ -3612,6 +3628,13 @@ func (s *Server) handleSyncPlan(w http.ResponseWriter, r *http.Request) {
 		serverSize := info.Size()
 		serverMtime := info.ModTime().UnixMilli()
 
+		// The CLI preserves normalized mtimes when uploading. Most deploys can
+		// therefore diff via metadata alone instead of rereading and hashing the
+		// entire server workspace on every push.
+		if cf.Size == serverSize && cf.Mtime == serverMtime {
+			return nil
+		}
+
 		algo := strings.ToLower(strings.TrimSpace(cf.HashAlgo))
 		expected := strings.TrimSpace(cf.Hash)
 		if expected == "" {
@@ -3627,9 +3650,6 @@ func (s *Server) handleSyncPlan(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 
-		if cf.Size == serverSize && cf.Mtime == serverMtime {
-			return nil
-		}
 		need = append(need, rel)
 		return nil
 	})
@@ -3706,6 +3726,10 @@ func (s *Server) handleSyncUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sess.UploadedBytes += n
+	if meta, ok := sess.Manifest[rel]; ok && meta.Mtime > 0 {
+		mtime := time.UnixMilli(meta.Mtime)
+		_ = os.Chtimes(dst, mtime, mtime)
+	}
 	if err := s.saveSessionToDB(sess); err != nil {
 		fmt.Fprintf(os.Stderr, "saveSessionToDB %s: %v\n", sess.ID, err)
 	}
@@ -3738,18 +3762,38 @@ func (s *Server) handleSyncBundle(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 413, "bundle exceeds session remaining quota")
 			return
 		}
-	} else {
-		r.Body = http.MaxBytesReader(w, r.Body, remaining)
 	}
 
-	dec, err := zstd.NewReader(r.Body)
-	if err != nil {
-		httpError(w, 400, "invalid zstd stream")
+	// Limit compressed bytes as well as extracted bytes. gzip lets the Node
+	// CLI stream one constant-memory bundle using built-in primitives; zstd
+	// remains supported for compatibility.
+	limited := http.MaxBytesReader(w, r.Body, remaining)
+	var decoded io.Reader
+	var closeDecoder func()
+	switch strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding"))) {
+	case "gzip":
+		dec, err := gzip.NewReader(limited)
+		if err != nil {
+			httpError(w, 400, "invalid gzip stream")
+			return
+		}
+		decoded = dec
+		closeDecoder = func() { _ = dec.Close() }
+	case "", "zstd":
+		dec, err := zstd.NewReader(limited)
+		if err != nil {
+			httpError(w, 400, "invalid zstd stream")
+			return
+		}
+		decoded = dec
+		closeDecoder = dec.Close
+	default:
+		httpError(w, http.StatusUnsupportedMediaType, "bundle content encoding must be gzip or zstd")
 		return
 	}
-	defer dec.Close()
+	defer closeDecoder()
 
-	tr := tar.NewReader(dec)
+	tr := tar.NewReader(decoded)
 	totalWritten := int64(0)
 	count := 0
 
@@ -3768,6 +3812,10 @@ func (s *Server) handleSyncBundle(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 400, "invalid path in bundle")
 			return
 		}
+		if hdr.Size < 0 || hdr.Size > (remaining-totalWritten) {
+			httpError(w, 413, "bundle entry exceeds session remaining quota")
+			return
+		}
 		if isIgnoredWorkspaceEnvPath(name) {
 			wn, err := io.Copy(io.Discard, tr)
 			if err != nil {
@@ -3780,11 +3828,6 @@ func (s *Server) handleSyncBundle(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			continue
-		}
-
-		if hdr.Size > (remaining - totalWritten) {
-			httpError(w, 413, "bundle entry exceeds session remaining quota")
-			return
 		}
 
 		switch hdr.Typeflag {
@@ -3815,6 +3858,9 @@ func (s *Server) handleSyncBundle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		totalWritten += wn
+		if !hdr.ModTime.IsZero() {
+			_ = os.Chtimes(dst, hdr.ModTime, hdr.ModTime)
+		}
 		if totalWritten > remaining {
 			httpError(w, 413, "bundle exceeds session remaining quota")
 			return
@@ -5971,11 +6017,14 @@ func (s *Server) runDeploy(job DeployJob) {
 		if buildEnvB64 != "" {
 			buildArgs = map[string]string{relayBuildEnvArg: buildEnvB64}
 		}
-		if err := s.runtime.Build(buildCtx, artifactRef, buildContextDir, wrappedDockerfilePath, buildArgs, logf, plan.Kind); err != nil {
+		buildStartedAt := time.Now()
+		buildErr := s.runtime.Build(buildCtx, artifactRef, buildContextDir, wrappedDockerfilePath, buildArgs, logf, plan.Kind)
+		log("docker build finished in %s", time.Since(buildStartedAt).Round(time.Millisecond))
+		if buildErr != nil {
 			end := time.Now()
 			d.Status = StatusFailed
 			d.EndedAt = &end
-			errMsg := err.Error()
+			errMsg := buildErr.Error()
 			if strings.Contains(strings.ToLower(errMsg), "no space left on device") {
 				log("build host out of disk space — reclaiming build cache and dangling images so the next deploy can proceed")
 				s.pruneDeployImages()
@@ -6334,16 +6383,12 @@ func (s *Server) waitForRuntimeContainerReady(runtime ContainerRuntime, log func
 		}
 		if runtime.IsRunning(name) {
 			if hostPort := runtime.PublishedPort(name, port); hostPort > 0 {
-				conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(hostPort)), 2*time.Second)
-				if err == nil {
-					_ = conn.Close()
+				if runtimeHTTPReady(net.JoinHostPort("127.0.0.1", strconv.Itoa(hostPort))) {
 					return nil
 				}
 			}
 			if ip := runtime.ContainerIP(name); ip != "" {
-				conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, strconv.Itoa(port)), 2*time.Second)
-				if err == nil {
-					_ = conn.Close()
+				if runtimeHTTPReady(net.JoinHostPort(ip, strconv.Itoa(port))) {
 					return nil
 				}
 				if vr, ok := runtime.(*StationRuntime); ok {
@@ -6398,6 +6443,28 @@ func (s *Server) waitForRuntimeContainerReady(runtime ContainerRuntime, log func
 
 func (s *Server) waitForContainerReady(log func(string, ...any), name string, port int, timeout time.Duration) error {
 	return s.waitForRuntimeContainerReady(s.runtime, log, name, port, timeout)
+}
+
+func runtimeHTTPReady(address string) bool {
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+		Transport: &http.Transport{
+			DisableKeepAlives: true,
+		},
+	}
+	req, err := http.NewRequest(http.MethodGet, "http://"+address+"/", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("User-Agent", "Relay-Readiness/1")
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	// Any valid HTTP response proves the process is accepting and parsing HTTP.
+	// Application-level response policy remains the app's responsibility.
+	return true
 }
 
 func (s *Server) edgeProxyConfigPath(app string, env DeployEnv, branch string) string {
@@ -6589,6 +6656,12 @@ func (s *Server) runSlotContainerWithRuntime(runtime ContainerRuntime, log func(
 		Env:           envPairs,
 		ExtraHosts:    s.serviceHostAliasesForRuntime(runtime, app, env, branch),
 		PortBindings:  []string{fmt.Sprintf("127.0.0.1::%d", firstNonZero(servicePort, 3000))},
+		NoNewPrivileges: true,
+		DropCapabilities: []string{"ALL"},
+		ReadOnlyRootFS: getenvBool("RELAY_APP_READ_ONLY_ROOTFS", true),
+		PIDsLimit:      256,
+		User:           strings.TrimSpace(os.Getenv("RELAY_APP_RUN_AS")),
+		Tmpfs:          []string{"/tmp:rw,noexec,nosuid,size=64m", "/run:rw,noexec,nosuid,size=8m"},
 	}
 	if st, err := s.getAppState(app, env, branch); err == nil && st != nil {
 		if st.ResourceMode != "auto" {
@@ -6625,7 +6698,20 @@ func (s *Server) runSlotContainer(log func(string, ...any), app string, env Depl
 	return s.runSlotContainerWithRuntime(s.runtime, log, app, env, branch, slot, image, servicePort, networkName, extraEnv)
 }
 
+func (s *Server) edgeProxyLock(app string, env DeployEnv, branch string) *sync.Mutex {
+	key := fmt.Sprintf("%s__%s__%s", app, env, branch)
+	lock, _ := s.edgeProxyLocks.LoadOrStore(key, &sync.Mutex{})
+	return lock.(*sync.Mutex)
+}
+
 func (s *Server) ensureEdgeProxy(log func(string, ...any), app string, env DeployEnv, branch string, networkName string, activeSlot string, standbySlot string, servicePort int, hostPort int, mode string, trafficMode string, publicHost string, splitPercent int, recreate bool) error {
+	lock := s.edgeProxyLock(app, env, branch)
+	lock.Lock()
+	defer lock.Unlock()
+	return s.ensureEdgeProxyLocked(log, app, env, branch, networkName, activeSlot, standbySlot, servicePort, hostPort, mode, trafficMode, publicHost, splitPercent, recreate)
+}
+
+func (s *Server) ensureEdgeProxyLocked(log func(string, ...any), app string, env DeployEnv, branch string, networkName string, activeSlot string, standbySlot string, servicePort int, hostPort int, mode string, trafficMode string, publicHost string, splitPercent int, recreate bool) error {
 	activeSlot = normalizeActiveSlot(activeSlot)
 	standbySlot = normalizeActiveSlot(standbySlot)
 	if standbySlot != "" && !s.runtime.IsRunning(appSlotContainerName(app, env, branch, standbySlot)) {
@@ -6671,6 +6757,15 @@ func (s *Server) ensureEdgeProxy(log func(string, ...any), app string, env Deplo
 			Volumes:       volumes,
 			PortBindings:  portBindings,
 			ExtraHosts:    []string{"host.docker.internal:host-gateway"},
+			NoNewPrivileges: true,
+			DropCapabilities: []string{"ALL"},
+			ReadOnlyRootFS: true,
+			PIDsLimit:      128,
+			Tmpfs: []string{
+				"/var/cache/nginx:rw,noexec,nosuid,size=16m",
+				"/var/run:rw,noexec,nosuid,size=4m",
+				"/tmp:rw,noexec,nosuid,size=8m",
+			},
 		}
 		if log != nil {
 			log("runtime run edge: %s", containerName)
@@ -6683,6 +6778,9 @@ func (s *Server) ensureEdgeProxy(log func(string, ...any), app string, env Deplo
 
 	if log != nil {
 		log("reloading edge proxy %s -> active=%s standby=%s traffic=%s split=%d%%", containerName, appSlotContainerName(app, env, branch, activeSlot), normalizeActiveSlot(standbySlot), firstNonEmpty(normalizeTrafficMode(trafficMode), "edge"), normalizeTrafficSplitPercent(splitPercent))
+	}
+	if out, testErr := s.runtime.Exec(containerName, []string{"nginx", "-t"}); testErr != nil {
+		return fmt.Errorf("edge proxy config test failed: %v (%s)", testErr, strings.TrimSpace(string(out)))
 	}
 	out, reloadErr := s.runtime.Exec(containerName, []string{"nginx", "-s", "reload"})
 	if reloadErr != nil {
@@ -6786,8 +6884,22 @@ func validateEdgeProxyLogPaths(configPath string, volumes []string) error {
 // reload gives nginx's already-established connections to the old upstream
 // a moment to finish before the process under them disappears.
 func (s *Server) retireStandbySlot(app string, env DeployEnv, branch string, activeSlot string, oldSlot string, servicePort int, hostPort int, mode string, trafficMode string, publicHost string) {
+	lock := s.edgeProxyLock(app, env, branch)
+	lock.Lock()
+	defer lock.Unlock()
+
+	// A cleanup timer belongs to one exact active/standby pair. If a newer
+	// deployment changed that pair, this timer is stale and must do nothing.
+	if st, err := s.getAppState(app, env, branch); err == nil && st != nil {
+		if normalizeActiveSlot(st.ActiveSlot) != normalizeActiveSlot(activeSlot) ||
+			normalizeActiveSlot(st.StandbySlot) != normalizeActiveSlot(oldSlot) {
+			return
+		}
+	}
 	name := appSlotContainerName(app, env, branch, oldSlot)
-	_ = s.ensureEdgeProxy(nil, app, env, branch, appNetworkName(app, env, branch), activeSlot, "", servicePort, hostPort, mode, trafficMode, publicHost, 100, false)
+	if err := s.ensureEdgeProxyLocked(nil, app, env, branch, appNetworkName(app, env, branch), activeSlot, "", servicePort, hostPort, mode, trafficMode, publicHost, 100, false); err != nil {
+		return
+	}
 	time.Sleep(2 * time.Second)
 	s.runtime.Remove(name)
 	if st, err := s.getAppState(app, env, branch); err == nil && st != nil {
@@ -7337,6 +7449,8 @@ func (s *Server) ensureGlobalProxy() error {
 			},
 			PortBindings: []string{"80:80", "443:443", "443:443/udp"},
 			ExtraHosts:   []string{"host.docker.internal:host-gateway"},
+			NoNewPrivileges: true,
+			PIDsLimit:      256,
 		}
 		if cfToken != "" {
 			spec.Env = append(spec.Env, "CLOUDFLARE_API_TOKEN="+cfToken)
@@ -7517,7 +7631,12 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 	if state != nil && normalizeActiveSlot(activeSlot) != "" {
 		splitPercent = state.TrafficSplitPercent
 	}
-	if err := s.ensureEdgeProxy(log, req.App, req.Env, req.Branch, networkName, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, splitPercent, recreateEdge); err != nil {
+	// Keep the route reload and its matching state transition atomic with
+	// respect to delayed drain cleanup from earlier deployments.
+	proxyLock := s.edgeProxyLock(req.App, req.Env, req.Branch)
+	proxyLock.Lock()
+	defer proxyLock.Unlock()
+	if err := s.ensureEdgeProxyLocked(log, req.App, req.Env, req.Branch, networkName, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, splitPercent, recreateEdge); err != nil {
 		if log != nil {
 			log("edge proxy failed: %v", err)
 		}
@@ -7665,11 +7784,10 @@ func (s *Server) requestToken(r *http.Request) (string, string) {
 	if c, err := r.Cookie(dashboardSessionCookie); err == nil && strings.TrimSpace(c.Value) != "" {
 		return strings.TrimSpace(c.Value), "cookie"
 	}
-	if r.Method == http.MethodGet && (strings.HasPrefix(r.URL.Path, "/api/logs/stream/") || strings.HasPrefix(r.URL.Path, "/api/runtime/logs/stream")) {
-		if token := strings.TrimSpace(r.URL.Query().Get("token")); token != "" {
-			return token, "query"
-		}
-	}
+	// No query-string token fallback: durable credentials must never appear
+	// in a URL (browser history, proxy/access logs, Referer headers). Every
+	// current caller (dashboard fetch(), CLI transport) sends the token via
+	// header or cookie instead.
 	return "", ""
 }
 
@@ -7854,7 +7972,7 @@ func (s *Server) handleDashboardSession(w http.ResponseWriter, r *http.Request) 
 		if s.hasUsers() {
 			token, _ := s.requestToken(r)
 			if token != "" {
-				_, _ = s.db.Exec(`DELETE FROM user_sessions WHERE token=?`, token)
+				_, _ = s.db.Exec(`DELETE FROM user_sessions WHERE token IN (?, ?)`, token, storedSessionToken(token))
 			}
 		}
 		s.clearDashboardSessionCookie(w, r)
@@ -7967,26 +8085,139 @@ func (s *Server) validateUserSession(r *http.Request) *UserSession {
 		return nil
 	}
 	var sess UserSession
-	var expiresAt int64
+	var expiresAt, lastSeenAt int64
+	var kind string
 	err := s.db.QueryRow(
-		`SELECT us.token, us.user_id, u.username, u.role, us.expires_at
+		`SELECT us.token, us.user_id, u.username, u.role, us.expires_at, us.last_seen_at, us.kind
 		 FROM user_sessions us JOIN users u ON u.id = us.user_id
-		 WHERE us.token=? AND us.expires_at>?`,
-		token, time.Now().UnixMilli(),
-	).Scan(&sess.Token, &sess.UserID, &sess.Username, &sess.Role, &expiresAt)
+		 WHERE us.token IN (?, ?) AND us.expires_at>?`,
+		token, storedSessionToken(token), time.Now().UnixMilli(),
+	).Scan(&sess.Token, &sess.UserID, &sess.Username, &sess.Role, &expiresAt, &lastSeenAt, &kind)
 	if err != nil {
 		return nil
 	}
+	now := time.Now()
+	idleLimit := 12 * time.Hour
+	if kind == "dashboard" {
+		idleLimit = 30 * time.Minute
+	} else if kind == "cli" {
+		idleLimit = 7 * 24 * time.Hour
+	}
+	if lastSeenAt > 0 && now.Sub(time.UnixMilli(lastSeenAt)) > idleLimit {
+		_, _ = s.db.Exec(`DELETE FROM user_sessions WHERE token=?`, sess.Token)
+		return nil
+	}
+	if lastSeenAt == 0 || now.Sub(time.UnixMilli(lastSeenAt)) >= time.Minute {
+		_, _ = s.db.Exec(`UPDATE user_sessions SET last_seen_at=? WHERE token=?`, now.UnixMilli(), sess.Token)
+	}
+	sess.Token = token
 	return &sess
 }
 
+// slidingWindowCount prunes hits[key] to only entries within window (evicting
+// stale keys opportunistically once the map grows large) and returns how
+// many remain.
+func slidingWindowCount(hits map[string][]time.Time, key string, window time.Duration) int {
+	cutoff := time.Now().Add(-window)
+	if len(hits) > 4096 {
+		for k, v := range hits {
+			if len(v) == 0 || !v[len(v)-1].After(cutoff) {
+				delete(hits, k)
+			}
+		}
+	}
+	var recent []time.Time
+	for _, t := range hits[key] {
+		if t.After(cutoff) {
+			recent = append(recent, t)
+		}
+	}
+	hits[key] = recent
+	return len(recent)
+}
+
+func loginClientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		return strings.TrimSpace(r.RemoteAddr)
+	}
+	return host
+}
+
+const (
+	loginRateWindow  = 15 * time.Minute
+	loginMaxPerIP    = 20
+	loginMaxPerUser  = 10
+)
+
+// ensureLoginRateMaps lazily initializes the throttle maps for servers built
+// via a bare struct literal (tests) rather than the production constructor.
+// Callers must hold s.loginRateMu.
+func (s *Server) ensureLoginRateMaps() {
+	if s.loginHitsByIP == nil {
+		s.loginHitsByIP = make(map[string][]time.Time)
+	}
+	if s.loginHitsByUser == nil {
+		s.loginHitsByUser = make(map[string][]time.Time)
+	}
+}
+
+// loginRateLimited reports whether either the source IP or the username has
+// already hit its failed-login budget for the current window. It only reads
+// state — call recordLoginFailure to add to it — so a burst of successful
+// logins never counts against the budget.
+func (s *Server) loginRateLimited(r *http.Request, username string) bool {
+	s.loginRateMu.Lock()
+	defer s.loginRateMu.Unlock()
+	s.ensureLoginRateMaps()
+	if slidingWindowCount(s.loginHitsByIP, loginClientIP(r), loginRateWindow) >= loginMaxPerIP {
+		return true
+	}
+	if slidingWindowCount(s.loginHitsByUser, strings.ToLower(username), loginRateWindow) >= loginMaxPerUser {
+		return true
+	}
+	return false
+}
+
+// recordLoginFailure throttles brute-forcing by source IP and by username
+// (OWASP recommends throttling over permanent account lockout, since lockout
+// is itself a denial-of-service on the legitimate user — so this only ever
+// slows attempts down within a rolling window, never disables an account).
+func (s *Server) recordLoginFailure(r *http.Request, username string) {
+	s.loginRateMu.Lock()
+	defer s.loginRateMu.Unlock()
+	s.ensureLoginRateMaps()
+	now := time.Now()
+	ip := loginClientIP(r)
+	s.loginHitsByIP[ip] = append(s.loginHitsByIP[ip], now)
+	user := strings.ToLower(username)
+	s.loginHitsByUser[user] = append(s.loginHitsByUser[user], now)
+}
+
 func (s *Server) createUserSession(userID string) (string, error) {
+	return s.createUserSessionKind(userID, "dashboard")
+}
+
+func (s *Server) createUserSessionKind(userID, kind string) (string, error) {
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	duration := 12 * time.Hour
+	if kind == "cli" {
+		duration = 30 * 24 * time.Hour
+	} else {
+		kind = "dashboard"
+	}
 	token := newID() + newID() // 64 hex chars
+	now := time.Now()
 	_, err := s.db.Exec(
-		`INSERT INTO user_sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)`,
-		token, userID, time.Now().UnixMilli(), time.Now().Add(30*24*time.Hour).UnixMilli(),
+		`INSERT INTO user_sessions (token, user_id, created_at, expires_at, last_seen_at, kind) VALUES (?, ?, ?, ?, ?, ?)`,
+		storedSessionToken(token), userID, now.UnixMilli(), now.Add(duration).UnixMilli(), now.UnixMilli(), kind,
 	)
 	return token, err
+}
+
+func storedSessionToken(token string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func (s *Server) userPermissions(userID string) ([]UserPermission, error) {
@@ -8155,6 +8386,10 @@ func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 405, "method not allowed")
 		return
 	}
+	// The first account becomes owner. Serialize the check + insert so two
+	// concurrent setup requests cannot both cross the empty-user boundary.
+	s.authSetupMu.Lock()
+	defer s.authSetupMu.Unlock()
 	if s.hasUsers() {
 		httpError(w, 409, "already set up")
 		return
@@ -8213,22 +8448,38 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, "invalid json")
 		return
 	}
+	username := strings.TrimSpace(body.Username)
+	if s.loginRateLimited(r, username) {
+		s.auditLog("anonymous", "auth.login_throttled", username, "")
+		time.Sleep(300 * time.Millisecond)
+		httpError(w, 429, "too many attempts, try again later")
+		return
+	}
 	var u User
 	err := s.db.QueryRow(
 		`SELECT id, username, password_hash, role FROM users WHERE username=?`,
-		strings.TrimSpace(body.Username),
+		username,
 	).Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role)
-	if err != nil || !checkPassword(body.Password, u.PasswordHash) {
+	validPassword, upgradeHash := verifyPassword(body.Password, u.PasswordHash)
+	if err != nil || !validPassword {
+		s.recordLoginFailure(r, username)
+		s.auditLog("anonymous", "auth.login_failed", username, "")
 		time.Sleep(300 * time.Millisecond) // slow down brute-force
 		httpError(w, 403, "invalid credentials")
 		return
 	}
-	token, err := s.createUserSession(u.ID)
+	if upgradeHash {
+		if nextHash, hashErr := hashPassword(body.Password); hashErr == nil {
+			_, _ = s.db.Exec(`UPDATE users SET password_hash=? WHERE id=? AND password_hash=?`, nextHash, u.ID, u.PasswordHash)
+		}
+	}
+	token, err := s.createUserSessionKind(u.ID, "dashboard")
 	if err != nil {
 		httpError(w, 500, "session error")
 		return
 	}
 	s.setDashboardSessionCookie(w, r, token)
+	s.auditLog(u.Username, "auth.login", u.Username, "dashboard")
 	resp := map[string]any{"username": u.Username, "role": u.Role}
 	// CLI browser flow: if cli_port given, generate a short-lived auth code
 	// that the CLI can exchange for a bearer token.
@@ -8339,11 +8590,12 @@ func (s *Server) handleAuthCLIExchange(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, "user lookup failed")
 		return
 	}
-	token, err := s.createUserSession(u.ID)
+	token, err := s.createUserSessionKind(u.ID, "cli")
 	if err != nil {
 		httpError(w, 500, "session error")
 		return
 	}
+	s.auditLog(u.Username, "auth.cli_token", u.Username, "issued")
 	writeJSON(w, 200, map[string]any{"token": token, "username": u.Username, "role": u.Role})
 }
 
@@ -8398,20 +8650,55 @@ func (s *Server) handleSyncPull(w http.ResponseWriter, r *http.Request) {
 	_ = tw.Close()
 }
 
-// ─── Password hashing (PBKDF2-style, stdlib only) ─────────────────────────────
+// ─── Password hashing (Argon2id, with legacy PBKDF2 verification) ─────────────
+//
+// New hashes use Argon2id per OWASP guidance (19 MiB memory, 2 passes, 1 lane),
+// prefixed "argon2id:". Old hashes are the legacy "salt:hash" PBKDF2-SHA256
+// format (100k iterations) and remain verifiable but are upgraded to Argon2id
+// on next successful login.
 
-const pwHashIter = 100_000
+const (
+	argon2Memory  = 19 * 1024 // KiB
+	argon2Time    = 2
+	argon2Threads = 1
+	argon2KeyLen  = 32
+	pwHashIter    = 100_000
+)
 
 func hashPassword(password string) (string, error) {
 	salt := make([]byte, 16)
 	if _, err := rand.Read(salt); err != nil {
 		return "", err
 	}
-	h := pbkdf2HMACSHA256([]byte(password), salt, pwHashIter)
-	return hex.EncodeToString(salt) + ":" + hex.EncodeToString(h), nil
+	h := argon2.IDKey([]byte(password), salt, argon2Time, argon2Memory, argon2Threads, argon2KeyLen)
+	return "argon2id:" + hex.EncodeToString(salt) + ":" + hex.EncodeToString(h), nil
 }
 
-func checkPassword(password, stored string) bool {
+// verifyPassword checks password against stored, which may be either the
+// current "argon2id:salt:hash" format or the legacy "salt:hash" PBKDF2
+// format. It returns whether the password is valid and whether the caller
+// should re-hash and persist an upgraded hash (true for legacy hashes).
+func verifyPassword(password, stored string) (valid bool, needsUpgrade bool) {
+	if rest, ok := strings.CutPrefix(stored, "argon2id:"); ok {
+		parts := strings.SplitN(rest, ":", 2)
+		if len(parts) != 2 {
+			return false, false
+		}
+		salt, err := hex.DecodeString(parts[0])
+		if err != nil {
+			return false, false
+		}
+		expected, err2 := hex.DecodeString(parts[1])
+		if err2 != nil {
+			return false, false
+		}
+		got := argon2.IDKey([]byte(password), salt, argon2Time, argon2Memory, argon2Threads, uint32(len(expected)))
+		return subtle.ConstantTimeCompare(got, expected) == 1, false
+	}
+	return checkLegacyPassword(password, stored), true
+}
+
+func checkLegacyPassword(password, stored string) bool {
 	parts := strings.SplitN(stored, ":", 2)
 	if len(parts) != 2 {
 		return false
@@ -8450,6 +8737,7 @@ func pbkdf2HMACSHA256(password, salt []byte, iter int) []byte {
 
 func (s *Server) withCORS(next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		setControlSecurityHeaders(w, r)
 		origin := strings.TrimSpace(r.Header.Get("Origin"))
 		if origin != "" && s.isOriginAllowed(r) {
 			if s.allowAllCORS {
@@ -8471,6 +8759,17 @@ func (s *Server) withCORS(next http.Handler) http.HandlerFunc {
 			return
 		}
 		next.ServeHTTP(w, r)
+	}
+}
+
+func setControlSecurityHeaders(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+	w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data:; font-src 'self' data: https://fonts.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self' 'unsafe-inline'; connect-src 'self' https: ws: wss:; form-action 'self'")
+	if isHTTPSRequest(r) {
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000")
 	}
 }
 
@@ -8532,12 +8831,18 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
 
 	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
 		return err
 	}
 	_ = os.Chmod(dst, mode)
+	if info, err := os.Stat(src); err == nil {
+		_ = os.Chtimes(dst, info.ModTime(), info.ModTime())
+	}
 	return nil
 }
 

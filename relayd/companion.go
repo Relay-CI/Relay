@@ -643,6 +643,8 @@ func (s *Server) startProjectService(
 		PortBindings:  ports,
 		HealthArgs:    healthArgs(svc.Health),
 		Command:       cmd,
+		NoNewPrivileges: true,
+		PIDsLimit:      512,
 	}
 
 	log("starting companion service %s (image=%s container=%s)", svc.Name, image, containerName)

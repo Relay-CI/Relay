@@ -85,6 +85,8 @@
   --color-relay-success:    var(--relay-success);
   --color-relay-warn:       var(--relay-warn);
   --color-relay-danger:     var(--relay-danger);
+  --color-relay-accent:     var(--relay-accent);
+  --color-relay-accent-bright: var(--relay-accent-bright);
   --color-relay-teal:       var(--relay-teal);
   --color-relay-teal-soft:  var(--relay-teal-soft);
   --color-relay-muted:      var(--relay-muted);
@@ -108,7 +110,7 @@ body {
   margin: 0;
   background-color: var(--relay-bg);
   color: var(--relay-text);
-  font-family: var(--font-space-grotesk, 'Space Grotesk', sans-serif);
+  font-family: "Aptos", "Segoe UI Variable Display", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
 }
 
 .relay-admin-shell {
@@ -173,6 +175,12 @@ body {
   transform: translateY(1px) scale(0.98);
 }
 
+@media (max-width: 639px) {
+  .relay-refresh-action {
+    display: none;
+  }
+}
+
 .relay-sidebar {
   background: linear-gradient(180deg, #101a23, #12161d 54%, #0f141a);
   color: rgba(255, 255, 255, 0.82);
@@ -185,25 +193,25 @@ body {
     rgba(234, 245, 251, 0.50);
 }
 
-.relay-workspace .text-white {
+html:not([data-color-mode="dark"]) .relay-workspace .text-white {
   color: #142b33 !important;
 }
 
-.relay-workspace .bg-relay-accent.text-white,
-.relay-workspace .bg-slate-950.text-white,
-.relay-workspace .bg-black.text-white {
+html:not([data-color-mode="dark"]) .relay-workspace .bg-relay-accent.text-white,
+html:not([data-color-mode="dark"]) .relay-workspace .bg-slate-950.text-white,
+html:not([data-color-mode="dark"]) .relay-workspace .bg-black.text-white {
   color: #ffffff !important;
 }
 
-.relay-workspace [class*="text-white/"] {
+html:not([data-color-mode="dark"]) .relay-workspace [class*="text-white/"] {
   color: rgba(20, 43, 51, 0.62) !important;
 }
 
-.relay-workspace [class*="border-white"] {
+html:not([data-color-mode="dark"]) .relay-workspace [class*="border-white"] {
   border-color: rgba(22, 54, 64, 0.11) !important;
 }
 
-.relay-workspace [class*="bg-white/"] {
+html:not([data-color-mode="dark"]) .relay-workspace [class*="bg-white/"] {
   background-color: rgba(255, 255, 255, 0.74) !important;
 }
 
@@ -212,47 +220,202 @@ body {
   box-shadow: 0 14px 34px rgba(22, 54, 64, 0.075);
 }
 
-.relay-workspace code,
-.relay-workspace .font-mono {
+html:not([data-color-mode="dark"]) .relay-workspace code,
+html:not([data-color-mode="dark"]) .relay-workspace .font-mono {
   color: #31515a;
 }
 
-.relay-workspace .text-input {
+html:not([data-color-mode="dark"]) .relay-workspace .text-input {
   background: rgba(255, 255, 255, 0.82);
   border-color: rgba(22, 54, 64, 0.14);
   color: #142b33;
   border-radius: 10px;
 }
 
-.relay-workspace .text-input::placeholder {
+html:not([data-color-mode="dark"]) .relay-workspace .text-input::placeholder {
   color: rgba(20, 43, 51, 0.38);
 }
 
-.relay-workspace .primary-btn {
+html:not([data-color-mode="dark"]) .relay-workspace .primary-btn {
   background: #142b33;
   color: #ffffff;
   border-radius: 10px;
   box-shadow: 0 10px 22px rgba(20, 43, 51, 0.18);
 }
 
-.relay-workspace .primary-btn:hover {
+html:not([data-color-mode="dark"]) .relay-workspace .primary-btn:hover {
   background: #203c46;
 }
 
-.relay-workspace .ghost-btn {
+html:not([data-color-mode="dark"]) .relay-workspace .ghost-btn {
   background: rgba(255, 255, 255, 0.62);
   color: rgba(20, 43, 51, 0.72);
   border-color: rgba(22, 54, 64, 0.14);
   border-radius: 10px;
 }
 
-.relay-workspace .ghost-btn:hover {
+html:not([data-color-mode="dark"]) .relay-workspace .ghost-btn:hover {
   color: #142b33;
   background: #ffffff;
 }
 
 .relay-sidebar .eyebrow {
   color: rgba(255, 255, 255, 0.36);
+}
+
+.relay-mode-control {
+  align-items: center;
+  min-width: 7.5rem;
+  height: 34px;
+  border: 1px solid rgba(22, 54, 64, 0.10);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.74);
+  color: #526975;
+  padding: 0 8px;
+}
+
+.relay-mode-control select {
+  width: 100%;
+  appearance: none;
+  cursor: pointer;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+html[data-color-mode="dark"] {
+  color-scheme: dark;
+  --relay-bg: #0b1116;
+  --relay-panel: rgba(18, 27, 34, 0.88);
+  --relay-panel-strong: rgba(20, 30, 38, 0.97);
+  --relay-line: rgba(188, 211, 222, 0.10);
+  --relay-line-strong: rgba(188, 211, 222, 0.18);
+  --relay-text: #e8f0f3;
+  --relay-muted: #91a3ad;
+  --relay-muted-deep: #50636d;
+  --background: oklch(0.12 0.015 220);
+  --foreground: oklch(0.94 0.008 220);
+  --card: oklch(0.16 0.015 220);
+  --card-foreground: oklch(0.94 0.008 220);
+  --popover: oklch(0.14 0.015 220);
+  --popover-foreground: oklch(0.94 0.008 220);
+  --secondary: oklch(0.20 0.015 220);
+  --secondary-foreground: oklch(0.94 0.008 220);
+  --muted: oklch(0.20 0.015 220);
+  --muted-foreground: oklch(0.68 0.02 220);
+  --accent: oklch(0.22 0.018 220);
+  --accent-foreground: oklch(0.94 0.008 220);
+  --border: oklch(0.30 0.02 220 / 55%);
+  --input: oklch(0.18 0.015 220);
+}
+
+html[data-color-mode="dark"] body {
+  background: #0b1116;
+  color: var(--relay-text);
+}
+
+html[data-color-mode="dark"] .relay-admin-shell {
+  background:
+    radial-gradient(circle at 88% 0%, rgba(15, 114, 128, 0.16), transparent 28rem),
+    linear-gradient(145deg, #0b1116, #0e171d 58%, #0a1015);
+  color: var(--relay-text);
+}
+
+html[data-color-mode="dark"] .relay-admin-frame {
+  border-color: rgba(188, 211, 222, 0.10);
+  background: rgba(10, 16, 21, 0.72);
+  box-shadow: 0 26px 80px rgba(0, 0, 0, 0.34);
+}
+
+html[data-color-mode="dark"] .relay-topbar {
+  border-color: rgba(188, 211, 222, 0.09);
+  background: rgba(11, 17, 22, 0.82);
+}
+
+html[data-color-mode="dark"] .relay-workspace {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 18rem),
+    #0e151b;
+}
+
+html[data-color-mode="dark"] .relay-topbar .text-slate-950,
+html[data-color-mode="dark"] .relay-topbar .text-slate-700 {
+  color: #e8f0f3 !important;
+}
+
+html[data-color-mode="dark"] .relay-topbar .text-slate-400,
+html[data-color-mode="dark"] .relay-topbar .text-slate-500 {
+  color: #82959f !important;
+}
+
+html[data-color-mode="dark"] .relay-topbar .border-slate-200 {
+  border-color: rgba(188, 211, 222, 0.12) !important;
+}
+
+html[data-color-mode="dark"] .relay-topbar [class*="bg-white"] {
+  background-color: rgba(255, 255, 255, 0.05) !important;
+}
+
+html[data-color-mode="dark"] .relay-icon-btn,
+html[data-color-mode="dark"] .relay-topbar-action,
+html[data-color-mode="dark"] .relay-mode-control {
+  border-color: rgba(188, 211, 222, 0.12);
+  background: rgba(255, 255, 255, 0.045);
+  color: #a5b5bd;
+}
+
+html[data-color-mode="dark"] .relay-icon-btn:hover,
+html[data-color-mode="dark"] .relay-topbar-action:hover,
+html[data-color-mode="dark"] .relay-icon-btn--active {
+  background: rgba(255, 255, 255, 0.10);
+  color: #f5fafc;
+  box-shadow: none;
+}
+
+html[data-color-mode="dark"] .relay-workspace .text-white {
+  color: #edf4f6 !important;
+}
+
+html[data-color-mode="dark"] .relay-workspace [class*="text-white/"] {
+  color: rgba(224, 236, 241, 0.58) !important;
+}
+
+html[data-color-mode="dark"] .relay-workspace [class*="border-white"] {
+  border-color: rgba(188, 211, 222, 0.11) !important;
+}
+
+html[data-color-mode="dark"] .relay-workspace [class*="bg-white/"] {
+  background-color: rgba(255, 255, 255, 0.035) !important;
+}
+
+html[data-color-mode="dark"] .relay-overview-hero {
+  background:
+    radial-gradient(circle at 90% 12%, rgba(40, 165, 181, 0.16), transparent 34%),
+    linear-gradient(145deg, rgba(22, 35, 43, 0.98), rgba(13, 24, 30, 0.96));
+}
+
+html[data-color-mode="dark"] .text-input {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(188, 211, 222, 0.12);
+  color: #edf4f6;
+}
+
+:where(button, a, input, select, textarea):focus-visible {
+  outline: 2px solid var(--relay-accent-bright);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 .relay-overview-hero {
@@ -282,7 +445,7 @@ body {
 
 /* ── Typography helpers ──────────────────────────────────────────────────── */
 .font-mono {
-  font-family: var(--font-ibm-plex-mono, 'IBM Plex Mono', monospace) !important;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, ui-monospace, monospace !important;
 }
 
 .eyebrow {
@@ -320,7 +483,7 @@ body {
 
 /* ── Log stream ──────────────────────────────────────────────────────────── */
 .log-line {
-  font-family: var(--font-ibm-plex-mono, 'IBM Plex Mono', monospace);
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, ui-monospace, monospace;
   font-size: 0.72rem;
   line-height: 1.6;
   color: var(--relay-text);

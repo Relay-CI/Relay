@@ -66,12 +66,27 @@ type ContainerSpec struct {
 	Command       []string // optional command override
 	CPULimit      string   // docker --cpus value e.g. "0.5"
 	MemLimit      string   // docker --memory value e.g. "512m"
+	NoNewPrivileges bool     // prevent setuid/file-capability privilege escalation
+	DropCapabilities []string // Linux capabilities removed from the container
+	ReadOnlyRootFS bool       // mount the image root filesystem read-only
+	PIDsLimit      int        // maximum number of processes/threads (0 = Docker default)
+	User           string     // optional numeric/name UID:GID override
+	Tmpfs          []string   // writable in-memory mounts, e.g. /tmp:rw,noexec,nosuid,size=64m
 }
 
 // DockerRuntime implements ContainerRuntime by calling the local Docker CLI.
 type DockerRuntime struct{}
 
 func (r *DockerRuntime) RunDetached(spec ContainerSpec) error {
+	args := dockerRunArgs(spec)
+	out, err := exec.Command("docker", args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("docker run %s: %v — %s", spec.Name, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func dockerRunArgs(spec ContainerSpec) []string {
 	args := []string{"run", "-d", "--name", spec.Name}
 	if spec.RestartPolicy != "" {
 		args = append(args, "--restart="+spec.RestartPolicy)
@@ -97,14 +112,32 @@ func (r *DockerRuntime) RunDetached(spec ContainerSpec) error {
 	if spec.MemLimit != "" {
 		args = append(args, "--memory="+spec.MemLimit)
 	}
+	if spec.NoNewPrivileges {
+		args = append(args, "--security-opt=no-new-privileges:true")
+	}
+	for _, capability := range spec.DropCapabilities {
+		if capability = strings.TrimSpace(capability); capability != "" {
+			args = append(args, "--cap-drop="+capability)
+		}
+	}
+	if spec.ReadOnlyRootFS {
+		args = append(args, "--read-only")
+	}
+	if spec.PIDsLimit > 0 {
+		args = append(args, "--pids-limit="+strconv.Itoa(spec.PIDsLimit))
+	}
+	if user := strings.TrimSpace(spec.User); user != "" {
+		args = append(args, "--user="+user)
+	}
+	for _, mount := range spec.Tmpfs {
+		if mount = strings.TrimSpace(mount); mount != "" {
+			args = append(args, "--tmpfs", mount)
+		}
+	}
 	args = append(args, spec.HealthArgs...)
 	args = append(args, spec.Image)
 	args = append(args, spec.Command...)
-	out, err := exec.Command("docker", args...).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("docker run %s: %v — %s", spec.Name, err, strings.TrimSpace(string(out)))
-	}
-	return nil
+	return args
 }
 
 func (r *DockerRuntime) Remove(name string) {

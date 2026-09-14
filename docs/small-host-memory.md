@@ -17,8 +17,10 @@ e2-small) the defaults below apply with no configuration.
   run with `NODE_OPTIONS=--max-old-space-size` derived from host RAM
   (half of RAM minus 256 MB, clamped to 384–2048 MB). On 2 GB hosts that is
   768 MB, which leaves room for Docker, relayd, and the apps already running.
-- **Build deprioritization** — Node build steps run under `nice -n 10`, so a
-  deploy never starves the apps already serving traffic of CPU.
+- **Adaptive build priority** — Node build steps use `nice -n 10` on hosts up
+  to 2.2 GB so a deploy does not starve live apps. Hosts with more memory run
+  builds at normal CPU priority; this avoids turning a busy 4 GB host into a
+  multi-minute build queue.
 - **Build caching** — npm/pnpm/yarn stores and `.next/cache` persist across
   builds via BuildKit cache mounts, and unchanged inputs reuse the previous
   image entirely, so repeat deploys skip the expensive work.
@@ -59,7 +61,7 @@ owner-authenticated Go profiling endpoints under `/debug/pprof/`.
 | --- | --- |
 | `RELAY_NODE_BUILD_HEAP_MB` | Explicit V8 heap cap for Node builds (MB). |
 | `RELAY_NODE_BUILD_MEMORY_GUARD=0` | Disable the Node build heap cap entirely. |
-| `RELAY_BUILD_NICE=0` | Run Node build steps at normal CPU priority. |
+| `RELAY_BUILD_NICE` | `0` forces normal CPU priority; `1` forces `nice -n 10`. Default: nice only on hosts up to 2.2 GB. |
 | `RELAY_APP_MEM_LIMIT_MB` | Default app container memory cap (MB); `0` disables. |
 | `RELAY_GOMEMLIMIT_MB` | Explicit soft memory limit for the relayd daemon (MB). |
 | `GOMEMLIMIT` / `GOGC` | Standard Go runtime knobs; when set, relayd does not override them. |

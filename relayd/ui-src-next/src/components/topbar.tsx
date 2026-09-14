@@ -1,12 +1,13 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Menu, Search } from "lucide-react";
+import { LogOut, Menu, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { RelayMark } from "@/components/relay-mark";
 import { ProjectSelector } from "@/components/project-selector";
 import type { NormalizedProject } from "@/lib/relay-utils";
 import type { SessionInfo } from "@/lib/api";
+import { useTheme, type ColorMode } from "@/components/theme-provider";
 
 type CurrentUser = { username: string; role: string } | null;
 
@@ -43,6 +44,7 @@ export function Topbar({
   onAppearanceClick,
   activeTab,
 }: TopbarProps) {
+  const theme = useTheme();
   const initials = currentUser?.username
     ? currentUser.username.slice(0, 2).toUpperCase()
     : "RL";
@@ -56,7 +58,7 @@ export function Topbar({
   }, [projects, query]);
 
   return (
-    <header className="relay-topbar flex items-center h-16 px-4 md:px-5 gap-3 shrink-0 z-40">
+    <header className="relay-topbar flex items-center h-16 px-3 md:px-5 gap-2 md:gap-3 shrink-0 z-40">
       {/* Brand */}
       <div className="flex items-center gap-2 shrink-0">
         {onToggleSidebar && (
@@ -146,10 +148,23 @@ export function Topbar({
         type="button"
         onClick={onRefresh}
         disabled={refreshing}
-        className="relay-topbar-action"
+        className="relay-topbar-action relay-refresh-action"
       >
         {refreshing ? "Refreshing…" : "Refresh"}
       </button>
+
+      <label className="relay-mode-control hidden sm:flex" title="Color mode">
+        <span className="sr-only">Color mode</span>
+        <select
+          value={theme.mode}
+          onChange={(event) => theme.setMode(event.target.value as ColorMode)}
+          aria-label="Color mode"
+        >
+          <option value="system">System theme</option>
+          <option value="light">Light theme</option>
+          <option value="dark">Dark theme</option>
+        </select>
+      </label>
 
       {/* Appearance */}
       {onAppearanceClick && (
@@ -193,8 +208,8 @@ export function Topbar({
 
       {/* User */}
       {currentUser && (
-        <div className="flex items-center gap-2 pl-2 border-l border-slate-200">
-          <div className="w-8 h-8 rounded-xl bg-slate-950 flex items-center justify-center text-[10px] font-bold text-white shadow-sm">
+        <div className="flex items-center gap-2 sm:pl-2 sm:border-l sm:border-slate-200">
+          <div className="hidden sm:flex w-8 h-8 rounded-xl bg-slate-950 items-center justify-center text-[10px] font-bold text-white shadow-sm">
             {initials}
           </div>
           <div className="hidden sm:block">
@@ -205,8 +220,11 @@ export function Topbar({
             type="button"
             onClick={onLogout}
             className="relay-topbar-action"
+            title="Sign out"
+            aria-label="Sign out"
           >
-            Sign out
+            <LogOut className="sm:hidden" size={15} strokeWidth={2} />
+            <span className="hidden sm:inline">Sign out</span>
           </button>
         </div>
       )}

@@ -404,6 +404,7 @@ export default function DashboardShell() {
         ),
       ) ?? null)
     : null;
+  const showsGlobalPanel = activeTab === "admin" || activeTab === "appearance";
 
   return (
     <div className="relay-admin-shell flex flex-col h-screen overflow-hidden">
@@ -443,7 +444,7 @@ export default function DashboardShell() {
         />
 
         <main className="relay-workspace flex-1 min-w-0 overflow-y-auto p-4 md:p-5">
-          {!selectedProject && !dashboard.loading ? (
+          {!selectedProject && !dashboard.loading && !showsGlobalPanel ? (
             <div className="flex flex-col items-center justify-center h-full text-center gap-3">
               <div className="eyebrow">No Projects Yet</div>
               <h2 className="text-xl font-semibold text-white/70">

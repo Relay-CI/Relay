@@ -1,21 +1,6 @@
 import type { Metadata } from "next";
-import { Space_Grotesk, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
-
-const spaceGrotesk = Space_Grotesk({
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
-  variable: "--font-space-grotesk",
-  display: "swap",
-});
-
-const ibmPlexMono = IBM_Plex_Mono({
-  subsets: ["latin"],
-  weight: ["400", "500"],
-  variable: "--font-ibm-plex-mono",
-  display: "swap",
-});
 
 export const metadata: Metadata = {
   title: "Relay Control Room",
@@ -28,8 +13,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className="dark">
-      <body className={`${spaceGrotesk.variable} ${ibmPlexMono.variable} antialiased`}>
+    <html lang="en" suppressHydrationWarning>
+      <body className="antialiased">
         <ThemeProvider>
           {children}
         </ThemeProvider>

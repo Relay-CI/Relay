@@ -21,6 +21,7 @@ var sqliteSchemaMigrations = []schemaMigration{
 	{version: 6, name: "lane policies", up: migrateLanePolicyTables},
 	{version: 7, name: "github delivery workflow", up: migrateGitHubWorkflowTables},
 	{version: 8, name: "github app installations", up: migrateGitHubAppTables},
+	{version: 9, name: "session activity tracking", up: migrateSessionSecurityColumns},
 }
 
 func migrateDB(db *sql.DB) error {
@@ -239,6 +240,19 @@ func migrateAuthenticationTables(tx *sql.Tx) error {
 		return err
 	}
 	return ensureSQLiteColumn(tx, sqliteColumn{table: "users", name: "created_at", definition: "INTEGER"})
+}
+
+func migrateSessionSecurityColumns(tx *sql.Tx) error {
+	for _, column := range []sqliteColumn{
+		{table: "user_sessions", name: "last_seen_at", definition: "INTEGER NOT NULL DEFAULT 0"},
+		{table: "user_sessions", name: "kind", definition: "TEXT NOT NULL DEFAULT 'legacy'"},
+	} {
+		if err := ensureSQLiteColumn(tx, column); err != nil {
+			return err
+		}
+	}
+	_, err := tx.Exec(`UPDATE user_sessions SET last_seen_at=COALESCE(NULLIF(last_seen_at, 0), created_at, ?)`, time.Now().UTC().UnixMilli())
+	return err
 }
 
 func migrateOperationsTables(tx *sql.Tx) error {

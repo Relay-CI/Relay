@@ -144,6 +144,66 @@ func TestJavaBuildpackDockerfileExportsServerPort(t *testing.T) {
 	}
 }
 
+func TestPythonBuildpackRequirementsTxtCopiedBeforeSourceForLayerCache(t *testing.T) {
+	repoDir := t.TempDir()
+	mustWriteTestFile(t, filepath.Join(repoDir, "requirements.txt"), "flask==3.0\n")
+	mustWriteTestFile(t, filepath.Join(repoDir, "app.py"), `app = None`)
+
+	plan, err := (&PythonBuildpack{}).Plan(DeployRequest{}, repoDir, nil)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if err := plan.WriteDockerfile(repoDir); err != nil {
+		t.Fatalf("write dockerfile: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(repoDir, "Dockerfile"))
+	if err != nil {
+		t.Fatalf("read dockerfile: %v", err)
+	}
+	content := string(b)
+	if !strings.Contains(content, "--mount=type=cache,target=/root/.cache/pip") {
+		t.Fatalf("expected pip cache mount, got:\n%s", content)
+	}
+	if strings.Contains(content, "--no-cache-dir") {
+		t.Fatalf("pip install should rely on the cache mount, not --no-cache-dir, got:\n%s", content)
+	}
+	copyManifest := strings.Index(content, "COPY requirements.txt")
+	runInstall := strings.Index(content, "RUN --mount=type=cache,target=/root/.cache/pip")
+	copySource := strings.Index(content, "COPY . .")
+	if copyManifest < 0 || runInstall < 0 || copySource < 0 {
+		t.Fatalf("expected manifest copy, cached install, then source copy, got:\n%s", content)
+	}
+	if !(copyManifest < runInstall && runInstall < copySource) {
+		t.Fatalf("expected COPY requirements.txt -> RUN install -> COPY . . ordering so unchanged deps reuse the Docker layer cache, got:\n%s", content)
+	}
+}
+
+func TestGoBuildpackDockerfileUsesPersistentModuleAndBuildCache(t *testing.T) {
+	repoDir := t.TempDir()
+	mustWriteTestFile(t, filepath.Join(repoDir, "go.mod"), "module demo\n\ngo 1.22\n")
+	mustWriteTestFile(t, filepath.Join(repoDir, "go.sum"), "")
+	mustWriteTestFile(t, filepath.Join(repoDir, "main.go"), `package main
+func main() {}`)
+
+	plan, err := (&GoBuildpack{}).Plan(DeployRequest{}, repoDir, nil)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if err := plan.WriteDockerfile(repoDir); err != nil {
+		t.Fatalf("write dockerfile: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(repoDir, "Dockerfile"))
+	if err != nil {
+		t.Fatalf("read dockerfile: %v", err)
+	}
+	content := string(b)
+	for _, want := range []string{"--mount=type=cache,target=/go/pkg/mod", "--mount=type=cache,target=/root/.cache/go-build"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("expected %q in dockerfile, got:\n%s", want, content)
+		}
+	}
+}
+
 // SvelteKit and Remix apps both ship a vite.config.ts (their Vite plugin
 // requires it), so without a higher-priority, framework-aware buildpack they
 // used to be misdetected as a static Vite SPA by NodeViteBuildpack and

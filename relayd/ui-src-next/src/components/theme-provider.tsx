@@ -4,9 +4,14 @@ import { createContext, useContext, useEffect, useRef, useState, useCallback } f
 import { getPublicTheme } from "@/lib/api";
 import { buildThemeCSS, BUILT_IN_THEMES } from "@/lib/themes";
 
+export type ColorMode = "light" | "dark" | "system";
+
 interface ThemeContextValue {
   themeName: string;
   customCSS: string;
+  mode: ColorMode;
+  resolvedMode: "light" | "dark";
+  setMode: (mode: ColorMode) => void;
   /** Preview a theme live without persisting. Pass "" to revert to server state. */
   previewTheme: (name: string, css?: string) => void;
   /** Clear preview and revert to last saved server theme. */
@@ -16,6 +21,9 @@ interface ThemeContextValue {
 const ThemeContext = createContext<ThemeContextValue>({
   themeName: "default",
   customCSS: "",
+  mode: "system",
+  resolvedMode: "light",
+  setMode: () => {},
   previewTheme: () => {},
   clearPreview: () => {},
 });
@@ -29,6 +37,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [serverCustomCSS, setServerCustomCSS] = useState("");
   const [previewName, setPreviewName] = useState<string | null>(null);
   const [previewCSS, setPreviewCSS] = useState<string | null>(null);
+  const [mode, setModeState] = useState<ColorMode>("system");
+  const [resolvedMode, setResolvedMode] = useState<"light" | "dark">("light");
   const styleRef = useRef<HTMLStyleElement | null>(null);
 
   // Fetch theme from server once on mount
@@ -41,6 +51,32 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       .catch(() => {
         // Server unreachable or unauthenticated — use defaults
       });
+  }, []);
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem("relay-color-mode");
+    if (saved === "light" || saved === "dark" || saved === "system") {
+      setModeState(saved);
+    }
+  }, []);
+
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => {
+      const next = mode === "system" ? (media.matches ? "dark" : "light") : mode;
+      setResolvedMode(next);
+      document.documentElement.dataset.colorMode = next;
+      document.documentElement.classList.toggle("dark", next === "dark");
+      document.documentElement.style.colorScheme = next;
+    };
+    apply();
+    media.addEventListener("change", apply);
+    window.localStorage.setItem("relay-color-mode", mode);
+    return () => media.removeEventListener("change", apply);
+  }, [mode]);
+
+  const setMode = useCallback((next: ColorMode) => {
+    setModeState(next);
   }, []);
 
   // Inject/update the <style> tag whenever active theme changes
@@ -73,6 +109,9 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       value={{
         themeName: serverThemeName,
         customCSS: serverCustomCSS,
+        mode,
+        resolvedMode,
+        setMode,
         previewTheme,
         clearPreview,
       }}

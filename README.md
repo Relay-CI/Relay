@@ -240,6 +240,31 @@ Every deploy is assigned a sequential **build number** per app (`#1`, `#2`, …)
 - **Deployed by** — the username who triggered each deploy (for sync/CLI deploys)
 - **Commit message** — first line of the git commit message (for webhook-triggered deploys)
 
+### Notify users when a new release is live
+
+Browser apps on a public Relay lane can poll the update endpoint without exposing an admin token. The returned `version` is opaque: it does not reveal the image tag, repository, or commit.
+
+```js
+const endpoint = "https://relay.example.com/api/public/update?app=my-app&env=prod&branch=main";
+let loadedVersion = sessionStorage.getItem("relay-version") || "";
+
+async function checkForUpdate() {
+  const url = `${endpoint}&current=${encodeURIComponent(loadedVersion)}`;
+  const status = await fetch(url, { cache: "no-store" }).then((response) => response.json());
+  if (!loadedVersion) {
+    loadedVersion = status.version;
+    sessionStorage.setItem("relay-version", loadedVersion);
+  } else if (status.refresh_recommended) {
+    showRefreshBanner();
+  }
+}
+
+checkForUpdate();
+setInterval(checkForUpdate, 30_000);
+```
+
+Protected lanes keep their configured Relay login, signed-link, or IP-allowlist policy. The endpoint returns `poll_after_seconds` so clients can honor the server-recommended interval.
+
 ---
 
 ## GitHub Delivery Workflow

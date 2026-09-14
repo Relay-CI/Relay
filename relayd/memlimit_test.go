@@ -35,6 +35,18 @@ func TestNodeBuildHeapMBEnvOverrideWins(t *testing.T) {
 	}
 }
 
+func TestNodeBuildNicePrefixKeepsFourGBHostsAtFullSpeed(t *testing.T) {
+	if got := nodeBuildNicePrefix(4096, ""); got != "" {
+		t.Fatalf("4 GB host should use normal build priority, got %q", got)
+	}
+	if got := nodeBuildNicePrefix(2048, ""); got == "" {
+		t.Fatal("2 GB host should still protect live workloads with nice")
+	}
+	if got := nodeBuildNicePrefix(4096, "1"); got == "" {
+		t.Fatal("explicit RELAY_BUILD_NICE=1 should force deprioritization")
+	}
+}
+
 func TestShouldAutoSwap(t *testing.T) {
 	cases := []struct {
 		env     string

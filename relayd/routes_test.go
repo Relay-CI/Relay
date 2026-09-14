@@ -25,6 +25,7 @@ func TestControlRoutesAreSharedAcrossNetworkAndSocketTransports(t *testing.T) {
 		"/api/promotions",
 		"/api/webhooks/github",
 		"/api/edge/authz",
+		"/api/public/update",
 		"/api/doctor",
 		"/api/users",
 		"/api/audit",

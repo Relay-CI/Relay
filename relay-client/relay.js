@@ -47,6 +47,7 @@ const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
 const { execSync, spawnSync } = require("child_process");
+const { putBundle } = require("./sync-bundle");
 const {
   resolveDeployArgs,
   resolveServerArgs,
@@ -1518,9 +1519,11 @@ async function buildManifest(rootDir) {
   let hashed = 0;
   for (const f of list) {
     const st = await fsp.stat(f.abs);
-    const mtime = st.mtimeMs
-      ? Math.floor(st.mtimeMs)
-      : Math.floor(st.mtime.getTime());
+    // Tar headers use whole-second precision. Normalize here so the server can
+    // use a fast size+mtime comparison on the next push instead of hashing
+    // every file again.
+    const rawMtime = st.mtimeMs || st.mtime.getTime();
+    const mtime = Math.floor(rawMtime / 1000) * 1000;
     let sh = "";
     const cached = cache[f.rel];
     if (cached && cached.size === st.size && cached.mtime === mtime && cached.sha) {
@@ -3049,21 +3052,38 @@ async function main() {
   const need = plan.need || [];
   const del = plan.delete || [];
 
-  const uploadStartedAt = nowMs();
-  if (need.length) {
-    info(`upload ${need.length} changed file${need.length === 1 ? "" : "s"}`);
-    for (let i = 0; i < need.length; i++) {
-      const rel = need[i];
-      const abs = path.join(rootDir, rel.split("/").join(path.sep));
-      process.stdout.write(
-        `   [${i + 1}/${need.length}] ${c.dim}${rel}${c.reset}\n`,
+    const uploadStartedAt = nowMs();
+    if (need.length) {
+      let uploadMode = "1 request";
+      info(`upload ${need.length} changed file${need.length === 1 ? "" : "s"} as one compressed bundle`);
+    try {
+      await putBundle(
+        transport,
+        `/api/sync/bundle/${sessionId}`,
+        rootDir,
+        need,
       );
-      const uploadPath = `/api/sync/upload/${sessionId}?path=${encodeURIComponent(rel)}`;
-      await putFile(transport, uploadPath, abs);
+    } catch (bundleErr) {
+      const oldServer = [400, 404, 405, 415].includes(bundleErr.status);
+      if (!oldServer) throw bundleErr;
+      warn("server does not support gzip bundles; using compatibility upload");
+      uploadMode = "compatibility mode";
+      // Keep the compatibility path bounded: enough parallelism to hide WAN
+      // latency without flooding relayd or exhausting file descriptors.
+      const concurrency = Math.min(8, need.length);
+      let cursor = 0;
+      await Promise.all(Array.from({ length: concurrency }, async () => {
+        while (cursor < need.length) {
+          const rel = need[cursor++];
+          const abs = path.join(rootDir, rel.split("/").join(path.sep));
+          const uploadPath = `/api/sync/upload/${sessionId}?path=${encodeURIComponent(rel)}`;
+          await putFile(transport, uploadPath, abs);
+        }
+      }));
     }
-    ok(
-      `uploaded ${need.length} file${need.length === 1 ? "" : "s"} in ${formatDuration(nowMs() - uploadStartedAt)}`,
-    );
+      ok(
+        `uploaded ${need.length} file${need.length === 1 ? "" : "s"} in ${formatDuration(nowMs() - uploadStartedAt)} (${uploadMode})`,
+      );
   }
 
   if (del.length) {

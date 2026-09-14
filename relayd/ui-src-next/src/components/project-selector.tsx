@@ -28,7 +28,7 @@ export function ProjectSelector({ projects, selected, onSelect, onCreateNew }: P
 
   return (
     <div
-      className="relative"
+      className="relative min-w-0 flex-1 sm:flex-none"
       ref={ref}
       onBlur={(e) => {
         if (!ref.current?.contains(e.relatedTarget as Node)) setOpen(false);
@@ -37,7 +37,7 @@ export function ProjectSelector({ projects, selected, onSelect, onCreateNew }: P
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex items-center gap-2.5 h-10 px-3 rounded-xl border border-slate-200 bg-white/80 hover:bg-white transition-colors min-w-[160px] max-w-[240px] shadow-sm"
+        className="flex h-10 w-full min-w-0 items-center gap-2 px-2.5 rounded-xl border border-slate-200 bg-white/80 hover:bg-white transition-colors sm:min-w-[160px] sm:max-w-[240px] sm:gap-2.5 sm:px-3 shadow-sm"
       >
         <RelayMark className="w-5 h-5 text-relay-accent shrink-0" />
         <div className="flex flex-col items-start min-w-0">
@@ -55,7 +55,7 @@ export function ProjectSelector({ projects, selected, onSelect, onCreateNew }: P
       </button>
 
       {open && (
-        <div className="absolute top-full left-0 mt-2 w-72 z-50 rounded-2xl border border-slate-200 bg-white shadow-2xl overflow-hidden">
+        <div className="absolute top-full left-0 mt-2 w-[min(18rem,calc(100vw-1.5rem))] z-50 rounded-2xl border border-slate-200 bg-white shadow-2xl overflow-hidden">
           <div className="p-2 border-b border-slate-100">
             <input
               type="text"

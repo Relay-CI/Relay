@@ -539,15 +539,23 @@ func nodeBuildCmdWithMemoryGuard(cmd string) string {
 	if strings.Contains(cmd, "NODE_OPTIONS=") {
 		return cmd
 	}
-	// The nice prefix deprioritizes the build relative to the apps already
-	// serving traffic on the same host — container processes all share the
-	// kernel scheduler, so niceness works across container boundaries. The
-	// command substitution degrades to a no-op on images without `nice`.
-	nice := ""
-	if strings.TrimSpace(os.Getenv("RELAY_BUILD_NICE")) != "0" {
-		nice = `$(command -v nice >/dev/null 2>&1 && echo nice -n 10) `
-	}
+	nice := nodeBuildNicePrefix(hostTotalMemMB(), os.Getenv("RELAY_BUILD_NICE"))
 	return fmt.Sprintf(`NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=%s" NEXT_TELEMETRY_DISABLED=1 %s%s`, nodeBuildHeapMB(), nice, cmd)
+}
+
+func nodeBuildNicePrefix(totalMB int, configured string) string {
+	configured = strings.ToLower(strings.TrimSpace(configured))
+	if configured == "0" || configured == "false" || configured == "off" {
+		return ""
+	}
+	// On 4 GB hosts the old unconditional nice -n 10 could stretch a build
+	// dramatically whenever live apps were busy. Memory cgroups already
+	// protect the host, so run at normal CPU priority above the small-host tier.
+	// Operators can still force deprioritization with RELAY_BUILD_NICE=1.
+	if configured == "" && (totalMB == 0 || totalMB > 2200) {
+		return ""
+	}
+	return `$(command -v nice >/dev/null 2>&1 && echo nice -n 10) `
 }
 
 func nodeDefaultStartCmd(repoDir string) string {
@@ -839,17 +847,36 @@ func stripJSComments(src string) string {
 }
 
 // Python helpers
+// pythonInstallCmd returns the install command with no cache-disabling flag:
+// the Dockerfile wraps it in a BuildKit cache mount targeting pip's cache
+// dir instead, so repeat installs reuse downloaded wheels across builds and
+// across apps.
 func pythonInstallCmd(repoDir string) string {
 	if fileExists(filepath.Join(repoDir, "requirements.txt")) {
-		return `sh -lc "pip install --no-cache-dir -r requirements.txt"`
+		return `sh -lc "pip install -r requirements.txt"`
 	}
 	if fileExists(filepath.Join(repoDir, "pyproject.toml")) {
-		return `sh -lc "pip install --no-cache-dir ."`
+		return `sh -lc "pip install ."`
 	}
 	if fileExists(filepath.Join(repoDir, "Pipfile")) {
-		return `sh -lc "pip install --no-cache-dir pipenv && pipenv install --system --deploy"`
+		return `sh -lc "pip install pipenv && pipenv install --system --deploy"`
 	}
 	return ""
+}
+
+// pythonDependencyManifests returns the manifest files (if any) that fully
+// determine pythonInstallCmd's output for repoDir, in COPY order. When
+// non-empty, the Dockerfile can COPY just these before installing so an
+// unchanged manifest reuses Docker's layer cache and skips reinstalling on a
+// source-only change — the requirements.txt case, which installs from the
+// manifest alone. pyproject.toml/Pipfile installs (`pip install .`, pipenv)
+// need the whole project present, so those return nil and fall back to
+// installing after a full COPY . .
+func pythonDependencyManifests(repoDir string) []string {
+	if fileExists(filepath.Join(repoDir, "requirements.txt")) {
+		return []string{"requirements.txt"}
+	}
+	return nil
 }
 
 func pythonEntryModule(repoDir string) string {

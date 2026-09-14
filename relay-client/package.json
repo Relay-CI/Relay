@@ -39,6 +39,7 @@
   },
   "files": [
     "relay.js",
+    "sync-bundle.js",
     "deploy.js",
     "config.js",
     "README.md"

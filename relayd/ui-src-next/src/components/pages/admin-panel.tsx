@@ -18,6 +18,7 @@ const ADMIN_TABS = [
   {
     id: "server",
     label: "Server config",
+    description: "Domains, TLS and retention",
     icon: (
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
         <rect x="2" y="2" width="20" height="8" rx="2"/>
@@ -30,6 +31,7 @@ const ADMIN_TABS = [
   {
     id: "operations",
     label: "Operations",
+    description: "Health and resource pressure",
     icon: (
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
         <path d="M4 19h16"/>
@@ -43,6 +45,7 @@ const ADMIN_TABS = [
   {
     id: "users",
     label: "Users",
+    description: "Roles and lane access",
     icon: (
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
         <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
@@ -55,6 +58,7 @@ const ADMIN_TABS = [
   {
     id: "audit",
     label: "Audit log",
+    description: "Review administrative activity",
     icon: (
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
@@ -68,6 +72,7 @@ const ADMIN_TABS = [
   {
     id: "plugins",
     label: "Plugins",
+    description: "Manage buildpack extensions",
     icon: (
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
         <path d="M12 2l3 3-2 2 2 2-3 3-2-2-2 2-3-3 2-2-2-2 3-3 2 2 2-2z"/>
@@ -83,51 +88,71 @@ export function AdminPanel({ currentUser }: AdminPanelProps) {
 
   if (currentUser?.role !== "owner") {
     return (
-      <div className="flex items-center justify-center h-full text-white/30 text-sm">
-        Owner access required.
+      <div className="min-h-[24rem] grid place-items-center">
+        <div className="max-w-md rounded-2xl border border-white/[0.08] bg-white/[0.025] p-7 text-center">
+          <div className="eyebrow mb-2">Restricted area</div>
+          <h1 className="text-xl font-semibold text-white">Owner access required</h1>
+          <p className="mt-2 text-sm leading-6 text-white/40">Server configuration and account controls are available only to Relay owners.</p>
+        </div>
       </div>
     );
   }
 
+  const active = ADMIN_TABS.find((tab) => tab.id === subTab) ?? ADMIN_TABS[0];
+
   return (
-    <div className="space-y-5">
-      {/* Header */}
-      <div>
-        <div className="eyebrow mb-0.5">Administration</div>
-        <h1 className="text-xl font-semibold text-white">Server admin</h1>
-        <p className="text-sm text-white/40 mt-1">
-          Server-wide configuration, user management, and audit trail.
-        </p>
-      </div>
+    <section className="admin-workspace space-y-5">
+      <header className="flex flex-col gap-4 border-b border-white/[0.07] pb-5 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <div className="eyebrow mb-1">Administration</div>
+          <h1 className="text-2xl font-semibold tracking-[-0.035em] text-white">Server control</h1>
+          <p className="mt-1 max-w-2xl text-sm leading-6 text-white/40">Configure Relay, inspect host health, and control who can deploy.</p>
+        </div>
+        <div className="inline-flex w-fit items-center gap-2 rounded-xl border border-emerald-500/20 bg-emerald-500/[0.07] px-3 py-2 text-xs font-medium text-emerald-500">
+          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+          Owner session
+        </div>
+      </header>
 
-      {/* Sub-navigation */}
-      <div className="flex gap-1 border-b border-white/[0.06] pb-0 -mb-0">
-        {ADMIN_TABS.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            onClick={() => setSubTab(tab.id)}
-            className={cn(
-              "flex items-center gap-1.5 px-3 py-2 text-sm font-medium border-b-2 transition-colors -mb-px",
-              subTab === tab.id
-                ? "border-relay-accent text-white"
-                : "border-transparent text-white/40 hover:text-white/70"
-            )}
-          >
-            <span className="shrink-0">{tab.icon}</span>
-            {tab.label}
-          </button>
-        ))}
-      </div>
+      <div className="grid items-start gap-5 lg:grid-cols-[15rem_minmax(0,1fr)]">
+        <aside className="rounded-2xl border border-white/[0.08] bg-white/[0.025] p-2 lg:sticky lg:top-0" aria-label="Admin sections">
+          <div className="px-3 pb-2 pt-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-white/25">Control groups</div>
+          <nav className="grid grid-cols-1 gap-1 sm:grid-cols-2 lg:grid-cols-1">
+            {ADMIN_TABS.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setSubTab(tab.id)}
+                aria-current={subTab === tab.id ? "page" : undefined}
+                className={cn(
+                  "group flex min-w-0 items-start gap-3 rounded-xl px-3 py-3 text-left transition-[background-color,color,transform] active:translate-y-px",
+                  subTab === tab.id
+                    ? "bg-white/[0.09] text-white shadow-sm"
+                    : "text-white/45 hover:bg-white/[0.045] hover:text-white/80",
+                )}
+              >
+                <span className={cn("mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-lg border", subTab === tab.id ? "border-relay-accent/30 bg-relay-accent/10 text-relay-accent-bright" : "border-white/[0.07] bg-white/[0.025]")}>{tab.icon}</span>
+                <span className="min-w-0">
+                  <span className="block text-sm font-semibold leading-5">{tab.label}</span>
+                  <span className="block truncate text-[11px] leading-4 text-white/30">{tab.description}</span>
+                </span>
+              </button>
+            ))}
+          </nav>
+        </aside>
 
-      {/* Sub-page content */}
-      <div>
-        {subTab === "server" && <ServerSettingsPage currentUser={currentUser} />}
-        {subTab === "operations" && <OperationsPage />}
-        {subTab === "users" && <UsersPage currentUser={currentUser} />}
-        {subTab === "audit" && <AuditPage />}
-        {subTab === "plugins" && <PluginsPage />}
+        <div className="min-w-0 rounded-2xl border border-white/[0.08] bg-white/[0.018] p-4 sm:p-6">
+          <div className="mb-5 flex items-center gap-2 border-b border-white/[0.06] pb-3 lg:hidden">
+            <span className="text-relay-accent-bright">{active.icon}</span>
+            <span className="text-sm font-semibold text-white">{active.label}</span>
+          </div>
+          {subTab === "server" && <ServerSettingsPage currentUser={currentUser} />}
+          {subTab === "operations" && <OperationsPage />}
+          {subTab === "users" && <UsersPage currentUser={currentUser} />}
+          {subTab === "audit" && <AuditPage />}
+          {subTab === "plugins" && <PluginsPage />}
+        </div>
       </div>
-    </div>
+    </section>
   );
 }

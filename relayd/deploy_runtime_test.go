@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -731,6 +733,27 @@ func TestRetireStandbySlotReloadsBeforeRemoving(t *testing.T) {
 	}
 }
 
+func TestRetireStandbySlotIgnoresStaleCleanupAfterNewerSwitch(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	app, env, branch := "demo", EnvPreview, "main"
+	rt := s.runtime.(*mockRuntime)
+	rt.running[appBaseContainerName(app, env, branch)] = true
+	if err := s.saveAppState(&AppState{
+		App: app, Env: env, Branch: branch,
+		ActiveSlot: "blue", StandbySlot: "green",
+	}); err != nil {
+		t.Fatalf("save app state: %v", err)
+	}
+
+	// This timer belonged to the preceding green/blue pair. A newer deploy has
+	// already made blue active, so it must not reload nginx or remove blue.
+	s.retireStandbySlot(app, env, branch, "green", "blue", 3000, 0, "port", "edge", "")
+
+	if len(rt.events) != 0 {
+		t.Fatalf("stale cleanup changed runtime state: %v", rt.events)
+	}
+}
+
 func TestWaitForRuntimeContainerReadyFailsFastForExitedContainer(t *testing.T) {
 	s := newPreviewPortTestServer(t)
 	rt := &mockRuntime{
@@ -749,6 +772,34 @@ func TestWaitForRuntimeContainerReadyFailsFastForExitedContainer(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("expected fast failure for exited container, took %s", elapsed)
+	}
+}
+
+func TestRuntimeReadinessRequiresHTTPNotJustOpenTCP(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	if runtimeHTTPReady(listener.Addr().String()) {
+		t.Fatal("a socket that closes without an HTTP response must not be ready")
+	}
+
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer httpServer.Close()
+	if !runtimeHTTPReady(strings.TrimPrefix(httpServer.URL, "http://")) {
+		t.Fatal("a valid HTTP response should mark the process transport-ready")
 	}
 }
 
