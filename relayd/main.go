@@ -6995,14 +6995,17 @@ func (s *Server) ensureEdgeProxyLocked(log func(string, ...any), app string, env
 			Volumes:       volumes,
 			PortBindings:  portBindings,
 			ExtraHosts:    []string{"host.docker.internal:host-gateway"},
+			// Run as the nginx user (uid=101) so the master process never needs
+			// CAP_CHOWN or CAP_SETUID. nginx skips chowning temp dirs when it
+			// detects it is already running as a non-root user, and workers fork
+			// as the same uid without any setresuid() call.
+			User:            "101:101",
 			NoNewPrivileges: true,
 			DropCapabilities: []string{"ALL"},
 			ReadOnlyRootFS: true,
 			PIDsLimit:      128,
-			// Only /tmp needs to be writable: pid, all temp/cache paths, and
-			// the nginx socket all go there via the generated nginx.conf.
-			// mode=1777 lets the root-started master create subdirs; noexec/nosuid
-			// preserve the security boundary. No uid=/gid= so root can write.
+			// /tmp is the only writable mount: pid file, all temp/cache paths,
+			// and client body buffers go there via the generated nginx.conf.
 			Tmpfs: []string{
 				"/tmp:rw,noexec,nosuid,size=64m,mode=1777",
 			},
