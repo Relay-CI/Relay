@@ -15,30 +15,35 @@ export function RelayMark({ title, ...props }: RelayMarkProps) {
       {...props}
     >
       {title && <title>{title}</title>}
-      {/* Relay mark: stylized R with a relay signal arc */}
-      <rect x="4" y="4" width="10" height="24" rx="1.5" fill="currentColor" />
+      {/* R cap and bowl */}
       <path
-        d="M14 4 Q28 4 28 11 Q28 18 14 18"
+        d="M10 8H21Q26 8 26 12Q26 19 21 19L17 20"
+        stroke="currentColor"
+        strokeWidth="3.5"
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      {/* R leg */}
+      <path
+        d="M17 20L23 28"
+        stroke="currentColor"
+        strokeWidth="3.5"
+        fill="none"
+        strokeLinecap="round"
+      />
+      {/* Crescent arc through hub */}
+      <path
+        d="M10 8Q5 10 7 15Q9 20 17 20"
         stroke="currentColor"
         strokeWidth="3"
         fill="none"
         strokeLinecap="round"
       />
-      <path
-        d="M14 18 L24 28"
-        stroke="currentColor"
-        strokeWidth="3"
-        strokeLinecap="round"
-      />
-      {/* Signal arc */}
-      <path
-        d="M20 8 Q32 16 20 24"
-        stroke="var(--relay-accent, #cc2222)"
-        strokeWidth="2"
-        fill="none"
-        strokeLinecap="round"
-        opacity="0.7"
-      />
+      {/* Hub node */}
+      <circle cx="7" cy="15" r="3" fill="currentColor" />
+      {/* Terminal node */}
+      <circle cx="23" cy="28" r="2.5" fill="currentColor" />
     </svg>
   );
 }

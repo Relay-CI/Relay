@@ -75,7 +75,7 @@ export function Topbar({
           <RelayMark className="w-5 h-5 text-white" />
         </div>
         <div className="hidden sm:block">
-          <div className="text-sm font-semibold text-slate-950 leading-none">Relay</div>
+          <div className="text-sm font-bold text-slate-950 leading-none" style={{ fontFamily: '"Relay Form", sans-serif' }}>Relay</div>
           <div className="text-[10px] text-slate-400 leading-none mt-0.5">Admin</div>
         </div>
       </div>

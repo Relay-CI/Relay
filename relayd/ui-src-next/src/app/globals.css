@@ -2,6 +2,15 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
+@font-face {
+  font-family: "Relay Form";
+  src: url("/fonts/RelayForm-Bold.woff2") format("woff2"),
+       url("/fonts/RelayForm-Bold.woff") format("woff");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 @custom-variant dark (&:is(.dark *));
 
 /* ── Relay design tokens ───────────────────────────────────────────────── */
@@ -110,7 +119,7 @@ body {
   margin: 0;
   background-color: var(--relay-bg);
   color: var(--relay-text);
-  font-family: "Aptos", "Segoe UI Variable Display", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  font-family: "Relay Form", "Aptos", "Segoe UI Variable Display", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
 }
 
 .relay-admin-shell {

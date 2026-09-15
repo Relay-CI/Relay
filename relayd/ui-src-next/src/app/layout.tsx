@@ -5,6 +5,11 @@ import { ThemeProvider } from "@/components/theme-provider";
 export const metadata: Metadata = {
   title: "Relay Control Room",
   description: "Relay deployment administration panel",
+  icons: {
+    icon: "/relay-app-icon.png",
+    shortcut: "/relay-app-icon.png",
+    apple: "/relay-app-icon.png",
+  },
 };
 
 export default function RootLayout({
