@@ -6719,8 +6719,17 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 	}
 	var conf strings.Builder
 	conf.WriteString("worker_processes auto;\n")
+	// Redirect pid to /tmp so /var/run does not need to be writable.
+	conf.WriteString("pid /tmp/nginx.pid;\n")
 	conf.WriteString("events { worker_connections 1024; }\n")
 	conf.WriteString("http {\n")
+	// Route all nginx temp/cache paths into /tmp so the container only needs
+	// one writable tmpfs mount and /var/cache/nginx stays on the read-only fs.
+	conf.WriteString("  client_body_temp_path /tmp/client_temp;\n")
+	conf.WriteString("  proxy_temp_path       /tmp/proxy_temp;\n")
+	conf.WriteString("  fastcgi_temp_path     /tmp/fastcgi_temp;\n")
+	conf.WriteString("  uwsgi_temp_path       /tmp/uwsgi_temp;\n")
+	conf.WriteString("  scgi_temp_path        /tmp/scgi_temp;\n")
 	conf.WriteString("  map $http_upgrade $connection_upgrade {\n")
 	conf.WriteString("    default upgrade;\n")
 	conf.WriteString("    '' close;\n")
@@ -6990,10 +6999,12 @@ func (s *Server) ensureEdgeProxyLocked(log func(string, ...any), app string, env
 			DropCapabilities: []string{"ALL"},
 			ReadOnlyRootFS: true,
 			PIDsLimit:      128,
+			// Only /tmp needs to be writable: pid, all temp/cache paths, and
+			// the nginx socket all go there via the generated nginx.conf.
+			// mode=1777 lets the root-started master create subdirs; noexec/nosuid
+			// preserve the security boundary. No uid=/gid= so root can write.
 			Tmpfs: []string{
-				"/var/cache/nginx:rw,noexec,nosuid,size=16m,uid=101,gid=101",
-				"/var/run:rw,noexec,nosuid,size=4m,uid=101,gid=101",
-				"/tmp:rw,noexec,nosuid,size=8m,uid=101,gid=101",
+				"/tmp:rw,noexec,nosuid,size=64m,mode=1777",
 			},
 		}
 		if log != nil {
