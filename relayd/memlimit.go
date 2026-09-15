@@ -67,6 +67,30 @@ func hostSwapTotalMB() int {
 	return readMeminfoMB().swapMB
 }
 
+// hostAvailableMemMB reads MemAvailable from /proc/meminfo. Returns 0 on
+// non-Linux or if the field is absent (older kernels).
+func hostAvailableMemMB() int {
+	f, err := os.Open("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		if strings.HasPrefix(line, "MemAvailable:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				if kb, err := strconv.Atoi(fields[1]); err == nil {
+					return kb / 1024
+				}
+			}
+			break
+		}
+	}
+	return 0
+}
+
 // setupMemoryLimits keeps the daemon's own footprint predictable on small
 // hosts. Go's default GC lets the heap grow to ~2x its live size before
 // collecting, which on a 2 GB instance shows up as relayd idling at several

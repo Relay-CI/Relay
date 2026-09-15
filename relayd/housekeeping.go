@@ -127,20 +127,29 @@ func housekeepingInterval() time.Duration {
 // diskAvailableMB returns the available disk space in MB for the partition
 // that contains path, or 0 if it cannot be determined.
 func diskAvailableMB(path string) int {
+	_, avail := diskInfo(path)
+	return avail
+}
+
+// diskInfo returns total and available disk space in MB for the partition
+// containing path. Returns (0, 0) if unavailable.
+func diskInfo(path string) (totalMB, availMB int) {
 	out, err := exec.Command("df", "-Pm", path).CombinedOutput()
 	if err != nil || len(out) == 0 {
-		return 0
+		return 0, 0
 	}
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 	for _, line := range lines[1:] { // skip header
 		fields := strings.Fields(line)
 		if len(fields) >= 4 {
-			if mb, err := strconv.Atoi(fields[3]); err == nil {
-				return mb
+			total, e1 := strconv.Atoi(fields[1])
+			avail, e2 := strconv.Atoi(fields[3])
+			if e1 == nil && e2 == nil {
+				return total, avail
 			}
 		}
 	}
-	return 0
+	return 0, 0
 }
 
 // superviseWorker runs a long-lived worker goroutine and restarts it if it
@@ -452,5 +461,58 @@ func (s *Server) pruneDeployImages() {
 		_ = exec.Command("docker", "image", "prune", "-a", "-f", "--filter", fmt.Sprintf("until=%dh", maxAgeDays*24)).Run()
 	} else {
 		_ = exec.Command("docker", "image", "prune", "-f").Run()
+	}
+}
+
+// runSlotReconciler periodically verifies that every active production slot
+// container is running. Docker's --restart=always handles automatic restarts,
+// but this catches edge cases: containers stopped externally, races after
+// daemon restarts, or OOM kills that Docker delayed acting on.
+func (s *Server) runSlotReconciler() {
+	time.Sleep(30 * time.Second) // let startup settle
+	for {
+		s.reconcileActiveSlots()
+		time.Sleep(30 * time.Second)
+	}
+}
+
+func (s *Server) reconcileActiveSlots() {
+	rows, err := s.db.Query(
+		`SELECT app, env, branch, COALESCE(active_slot,'')
+		 FROM app_state
+		 WHERE COALESCE(stopped,0)=0 AND COALESCE(active_slot,'') != ''`,
+	)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var app, envS, branch, activeSlot string
+		if err := rows.Scan(&app, &envS, &branch, &activeSlot); err != nil {
+			continue
+		}
+		env := DeployEnv(envS)
+		slotName := appSlotContainerName(app, env, branch, activeSlot)
+
+		if s.runtime.IsRunning(slotName) {
+			continue
+		}
+		if !s.runtime.ContainerExists(slotName) {
+			fmt.Printf("reconciler: active slot container missing: %s (app=%s env=%s branch=%s)\n",
+				slotName, app, env, branch)
+			continue
+		}
+		cst := dockerInspectState(slotName)
+		oomNote := ""
+		if cst != nil && cst.OOMKilled {
+			oomNote = " (OOMKilled)"
+		}
+		fmt.Printf("reconciler: active slot %s not running%s; restarting\n", slotName, oomNote)
+		if err := dockerRestartContainer(slotName); err != nil {
+			fmt.Printf("reconciler: restart failed for %s: %v\n", slotName, err)
+		} else {
+			fmt.Printf("reconciler: restarted %s\n", slotName)
+		}
 	}
 }

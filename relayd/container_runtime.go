@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -307,3 +309,49 @@ func (r *DockerRuntime) LogStream(ctx context.Context, name string, tail int, si
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+
+// DockerContainerState is the runtime state of a Docker container.
+type DockerContainerState struct {
+	Running   bool
+	Status    string // "running", "exited", "created", "paused", "restarting", "dead"
+	OOMKilled bool
+	ExitCode  int
+	Paused    bool
+}
+
+// dockerInspectState returns the runtime state of a named container,
+// or nil if the container does not exist or inspect fails.
+func dockerInspectState(name string) *DockerContainerState {
+	out, err := exec.Command("docker", "inspect",
+		"--format", `{"running":{{.State.Running}},"status":"{{.State.Status}}","oom_killed":{{.State.OOMKilled}},"exit_code":{{.State.ExitCode}},"paused":{{.State.Paused}}}`,
+		name).CombinedOutput()
+	if err != nil {
+		return nil
+	}
+	var st struct {
+		Running   bool   `json:"running"`
+		Status    string `json:"status"`
+		OOMKilled bool   `json:"oom_killed"`
+		ExitCode  int    `json:"exit_code"`
+		Paused    bool   `json:"paused"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(out), &st); err != nil {
+		return nil
+	}
+	return &DockerContainerState{
+		Running:   st.Running,
+		Status:    st.Status,
+		OOMKilled: st.OOMKilled,
+		ExitCode:  st.ExitCode,
+		Paused:    st.Paused,
+	}
+}
+
+// dockerRestartContainer starts a stopped/exited container by name.
+func dockerRestartContainer(name string) error {
+	out, err := exec.Command("docker", "start", name).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("docker start %s: %v — %s", name, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}

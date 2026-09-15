@@ -661,6 +661,20 @@ type doctorCheck struct {
 	Hint    string `json:"hint,omitempty"`
 }
 
+type appDoctorLane struct {
+	App        string   `json:"app"`
+	Env        string   `json:"env"`
+	Branch     string   `json:"branch"`
+	Health     string   `json:"health"` // "ok", "warn", "error", "stopped"
+	ActiveSlot string   `json:"active_slot,omitempty"`
+	EdgeStatus string   `json:"edge_status"` // "running", "stopped", "missing"
+	SlotStatus string   `json:"slot_status,omitempty"`
+	OOMKilled  bool     `json:"oom_killed,omitempty"`
+	ExitCode   int      `json:"exit_code,omitempty"`
+	Issues     []string `json:"issues,omitempty"`
+	Hints      []string `json:"hints,omitempty"`
+}
+
 type doctorReport struct {
 	GeneratedAt       int64                  `json:"generated_at"`
 	HTTPAddr          string                 `json:"http_addr"`
@@ -670,6 +684,7 @@ type doctorReport struct {
 	ManagedExampleURL string                 `json:"managed_example_url,omitempty"`
 	WebhookURL        string                 `json:"webhook_url,omitempty"`
 	Checks            map[string]doctorCheck `json:"checks"`
+	Apps              []appDoctorLane        `json:"apps,omitempty"`
 }
 
 func doctorOK(summary string, detail ...string) doctorCheck {
@@ -856,6 +871,121 @@ func (s *Server) buildDoctorReport() doctorReport {
 	}
 
 	report.Checks["webhook"] = doctorInfo("GitHub webhook endpoint", report.WebhookURL)
+
+	// Memory and swap
+	totalMB := hostTotalMemMB()
+	swapMB := hostSwapTotalMB()
+	availMB := hostAvailableMemMB()
+	if totalMB > 0 {
+		if swapMB == 0 && totalMB <= 4096 {
+			report.Checks["memory"] = doctorWarn(
+				fmt.Sprintf("No swap configured (%d MB RAM)", totalMB),
+				"Build memory spikes can OOM-kill production containers.",
+				"sudo fallocate -l 2G /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile",
+			)
+		} else if availMB > 0 && availMB < 256 {
+			report.Checks["memory"] = doctorWarn(
+				fmt.Sprintf("Low available memory: %d MB free", availMB),
+				fmt.Sprintf("Total %d MB, swap %d MB. Builds may OOM-kill production containers.", totalMB, swapMB),
+				"Upgrade server RAM or reduce concurrent build workers.",
+			)
+		} else {
+			detail := fmt.Sprintf("%d MB RAM", totalMB)
+			if swapMB > 0 {
+				detail += fmt.Sprintf(", %d MB swap", swapMB)
+			}
+			if availMB > 0 {
+				detail += fmt.Sprintf(", %d MB available", availMB)
+			}
+			report.Checks["memory"] = doctorOK("Memory", detail)
+		}
+	}
+
+	// Disk usage
+	if total, avail := diskInfo(s.dataDir); total > 0 {
+		usedPct := 100 - int(float64(avail)/float64(total)*100)
+		detail := fmt.Sprintf("%d%% used (%d MB free of %d MB)", usedPct, avail, total)
+		switch {
+		case usedPct >= 90:
+			report.Checks["disk"] = doctorError("Disk critically full", detail,
+				"Free space now: docker system prune -f")
+		case usedPct >= 80:
+			report.Checks["disk"] = doctorWarn("Disk usage high", detail,
+				"Run: docker system prune -f to reclaim build cache.")
+		default:
+			report.Checks["disk"] = doctorOK("Disk", detail)
+		}
+	}
+
+	// Per-app lane health
+	appRows, appErr := s.db.Query(
+		`SELECT app, env, branch, COALESCE(active_slot,''), COALESCE(stopped,0)
+		 FROM app_state ORDER BY app, env, branch`,
+	)
+	if appErr == nil {
+		defer appRows.Close()
+		for appRows.Next() {
+			var lane appDoctorLane
+			var stopped int
+			if err := appRows.Scan(&lane.App, &lane.Env, &lane.Branch, &lane.ActiveSlot, &stopped); err != nil {
+				continue
+			}
+			if stopped != 0 {
+				lane.Health = "stopped"
+				lane.EdgeStatus = "stopped"
+				report.Apps = append(report.Apps, lane)
+				continue
+			}
+
+			edgeName := appBaseContainerName(lane.App, DeployEnv(lane.Env), lane.Branch)
+			if s.runtime.IsRunning(edgeName) {
+				lane.EdgeStatus = "running"
+			} else if s.runtime.ContainerExists(edgeName) {
+				lane.EdgeStatus = "stopped"
+				lane.Issues = append(lane.Issues, "Edge router container is not running")
+			} else {
+				lane.EdgeStatus = "missing"
+				lane.Issues = append(lane.Issues, "Edge router container is missing")
+			}
+
+			if lane.ActiveSlot != "" {
+				slotName := appSlotContainerName(lane.App, DeployEnv(lane.Env), lane.Branch, lane.ActiveSlot)
+				if s.runtime.IsRunning(slotName) {
+					lane.SlotStatus = "running"
+				} else if s.runtime.ContainerExists(slotName) {
+					if cst := dockerInspectState(slotName); cst != nil {
+						lane.SlotStatus = cst.Status
+						lane.OOMKilled = cst.OOMKilled
+						lane.ExitCode = cst.ExitCode
+					} else {
+						lane.SlotStatus = "exited"
+					}
+					msg := fmt.Sprintf("Active slot %s not running (status: %s)", lane.ActiveSlot, lane.SlotStatus)
+					if lane.OOMKilled {
+						msg += " — OOMKilled"
+						lane.Hints = append(lane.Hints, "Enable swap or increase RAM to prevent OOM kills.")
+					}
+					lane.Issues = append(lane.Issues, msg)
+					lane.Hints = append(lane.Hints, fmt.Sprintf("relay restart %s --env %s", lane.App, lane.Env))
+				} else {
+					lane.SlotStatus = "missing"
+					lane.Issues = append(lane.Issues, fmt.Sprintf("Active slot container %s is missing", lane.ActiveSlot))
+				}
+			}
+
+			switch {
+			case len(lane.Issues) == 0:
+				lane.Health = "ok"
+			case lane.SlotStatus == "missing" || lane.EdgeStatus == "missing":
+				lane.Health = "error"
+			default:
+				lane.Health = "warn"
+			}
+
+			report.Apps = append(report.Apps, lane)
+		}
+	}
+
 	return report
 }
 
@@ -865,6 +995,104 @@ func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, s.buildDoctorReport())
+}
+
+// handleStatus returns a server-wide table of all app lanes with their current
+// runtime state: active slot, container status, OOM info, and overall health.
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, 405, "method not allowed")
+		return
+	}
+
+	type slotInfo struct {
+		Slot      string `json:"slot"`
+		Container string `json:"container"`
+		Running   bool   `json:"running"`
+		Status    string `json:"status,omitempty"`
+		OOMKilled bool   `json:"oom_killed,omitempty"`
+		ExitCode  int    `json:"exit_code,omitempty"`
+	}
+
+	type appEntry struct {
+		App         string    `json:"app"`
+		Env         string    `json:"env"`
+		Branch      string    `json:"branch"`
+		Stopped     bool      `json:"stopped,omitempty"`
+		ActiveSlot  string    `json:"active_slot,omitempty"`
+		EdgeRunning bool      `json:"edge_running"`
+		ActiveState *slotInfo `json:"active_state,omitempty"`
+		Health      string    `json:"health"` // "healthy", "degraded", "down", "stopped"
+	}
+
+	rows, err := s.db.Query(
+		`SELECT app, env, branch, COALESCE(active_slot,''), COALESCE(stopped,0)
+		 FROM app_state ORDER BY app, env, branch`,
+	)
+	if err != nil {
+		httpError(w, 500, err.Error())
+		return
+	}
+	defer rows.Close()
+
+	var entries []appEntry
+	for rows.Next() {
+		var e appEntry
+		var stopped int
+		if err := rows.Scan(&e.App, &e.Env, &e.Branch, &e.ActiveSlot, &stopped); err != nil {
+			continue
+		}
+		e.Stopped = stopped != 0
+
+		edgeName := appBaseContainerName(e.App, DeployEnv(e.Env), e.Branch)
+		e.EdgeRunning = s.runtime.IsRunning(edgeName)
+
+		if e.ActiveSlot != "" {
+			slotName := appSlotContainerName(e.App, DeployEnv(e.Env), e.Branch, e.ActiveSlot)
+			si := &slotInfo{
+				Slot:      e.ActiveSlot,
+				Container: slotName,
+				Running:   s.runtime.IsRunning(slotName),
+			}
+			if cst := dockerInspectState(slotName); cst != nil {
+				si.Status = cst.Status
+				si.OOMKilled = cst.OOMKilled
+				si.ExitCode = cst.ExitCode
+			}
+			e.ActiveState = si
+		}
+
+		switch {
+		case e.Stopped:
+			e.Health = "stopped"
+		case e.ActiveSlot == "":
+			e.Health = "down"
+		case e.ActiveState != nil && e.ActiveState.Running && e.EdgeRunning:
+			e.Health = "healthy"
+		case e.ActiveState != nil && (e.ActiveState.Running || e.EdgeRunning):
+			e.Health = "degraded"
+		default:
+			e.Health = "down"
+		}
+
+		entries = append(entries, e)
+	}
+
+	writeJSON(w, 200, map[string]any{
+		"generated_at": time.Now().UnixMilli(),
+		"apps":         entries,
+	})
+}
+
+// removeSlotContainerIfNotActive removes a slot container only when it is not
+// the currently active slot, preventing accidental cleanup from causing 502s.
+func (s *Server) removeSlotContainerIfNotActive(app string, env DeployEnv, branch string, slot string) {
+	if st, err := s.getAppState(app, env, branch); err == nil && st != nil {
+		if normalizeActiveSlot(st.ActiveSlot) == normalizeActiveSlot(slot) {
+			return
+		}
+	}
+	s.runtime.Remove(appSlotContainerName(app, env, branch, slot))
 }
 
 // handleServerConfig handles GET/POST /api/server/config.
@@ -2182,6 +2410,7 @@ func main() {
 	go func() { _ = s.ensureGlobalProxy() }()
 	go superviseWorker("lane-expiry", s.runLaneExpiryWorker)
 	go s.runHousekeepingWorker()
+	go superviseWorker("slot-reconciler", s.runSlotReconciler)
 	go runGuarded("warm-images", s.warmBuildpackBaseImages)
 
 	// Start worker pool: deploy jobs are I/O-bound (git, image pull/push,
@@ -6762,9 +6991,9 @@ func (s *Server) ensureEdgeProxyLocked(log func(string, ...any), app string, env
 			ReadOnlyRootFS: true,
 			PIDsLimit:      128,
 			Tmpfs: []string{
-				"/var/cache/nginx:rw,noexec,nosuid,size=16m",
-				"/var/run:rw,noexec,nosuid,size=4m",
-				"/tmp:rw,noexec,nosuid,size=8m",
+				"/var/cache/nginx:rw,noexec,nosuid,size=16m,uid=101,gid=101",
+				"/var/run:rw,noexec,nosuid,size=4m,uid=101,gid=101",
+				"/tmp:rw,noexec,nosuid,size=8m,uid=101,gid=101",
 			},
 		}
 		if log != nil {

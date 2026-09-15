@@ -70,6 +70,7 @@ func (s *Server) registerControlRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/webhooks/github", s.handleGithubWebhook)
 	mux.HandleFunc("/api/edge/authz", s.handleEdgeAuthz)
 	mux.HandleFunc("/api/doctor", authAny(s.handleDoctor))
+	mux.HandleFunc("/api/status", authAny(s.handleStatus))
 	mux.HandleFunc("/api/users", authOwner(s.handleUsers))
 	mux.HandleFunc("/api/users/", authOwner(s.handleUserByID))
 	mux.HandleFunc("/api/audit", authOwner(s.handleAuditLog))
