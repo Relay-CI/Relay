@@ -378,7 +378,8 @@ type Server struct {
 	httpAddr              string
 	corsOrigins           map[string]struct{}
 	allowAllCORS          bool
-	enablePluginMutations bool
+	enablePluginMutations   bool
+	pluginMutationsMu       sync.RWMutex
 
 	db          *sql.DB
 	analyticsDB *sql.DB
@@ -8165,7 +8166,34 @@ func (s *Server) isOriginAllowed(r *http.Request) bool {
 }
 
 func (s *Server) pluginMutationsEnabled() bool {
+	s.pluginMutationsMu.RLock()
+	defer s.pluginMutationsMu.RUnlock()
 	return s.enablePluginMutations
+}
+
+func (s *Server) setPluginMutationsEnabled(enabled bool) {
+	s.pluginMutationsMu.Lock()
+	defer s.pluginMutationsMu.Unlock()
+	s.enablePluginMutations = enabled
+}
+
+func (s *Server) handlePluginMutationToggle(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, 200, map[string]any{"enabled": s.pluginMutationsEnabled()})
+	case http.MethodPost:
+		var body struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpError(w, 400, "invalid json: expected {\"enabled\": true|false}")
+			return
+		}
+		s.setPluginMutationsEnabled(body.Enabled)
+		writeJSON(w, 200, map[string]any{"enabled": body.Enabled})
+	default:
+		httpError(w, 405, "method not allowed")
+	}
 }
 
 func (s *Server) handleDashboardSession(w http.ResponseWriter, r *http.Request) {

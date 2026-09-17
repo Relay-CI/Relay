@@ -1205,6 +1205,63 @@ function putFile(transport, apiPath, absPath) {
   });
 }
 
+/** Stream an arbitrary SSE endpoint and print `data:` lines to stdout. */
+function streamSSELines(transport, apiPath) {
+  function consume(stream) {
+    return new Promise((resolve, reject) => {
+      let buf = "";
+      stream.on("data", (chunk) => {
+        buf += chunk.toString("utf8");
+        let idx;
+        while ((idx = buf.indexOf("\n\n")) >= 0) {
+          const frame = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          for (const line of frame.split("\n")) {
+            if (line.startsWith("data:")) {
+              const text = line.slice(5).trimStart();
+              if (text && text !== "[DONE]") process.stdout.write(text + "\n");
+            }
+          }
+        }
+      });
+      stream.on("end", resolve);
+      stream.on("error", reject);
+    });
+  }
+  if (transport.kind === "socket") {
+    const http = require("http");
+    return new Promise((resolve, reject) => {
+      const req = http.request(
+        {
+          socketPath: transport.socketPath,
+          method: "GET",
+          path: apiPath,
+          headers: tokenHeader(transport.token),
+        },
+        (res) => {
+          if (res.statusCode >= 400) {
+            const chunks = [];
+            res.on("data", (d) => chunks.push(d));
+            res.on("end", () =>
+              reject(new Error(`HTTP ${res.statusCode}: ${Buffer.concat(chunks)}`)),
+            );
+            return;
+          }
+          consume(res).then(resolve, reject);
+        },
+      );
+      req.on("error", reject);
+      req.end();
+    });
+  }
+  const url = `${transport.baseUrl.replace(/\/$/, "")}${apiPath}`;
+  return fetch(url, { method: "GET", headers: tokenHeader(transport.token) }).then((res) => {
+    if (!res.ok) return res.text().then((t) => { throw new Error(`HTTP ${res.status}: ${t}`); });
+    const { Readable } = require("stream");
+    return consume(Readable.fromWeb(res.body));
+  });
+}
+
 /** Read an SSE stream via the transport. Returns final deploy status string. */
 function streamLogsTransport(transport, deployId) {
   const apiPath = `/api/logs/stream/${deployId}`;
@@ -1617,6 +1674,13 @@ ${c.bold}COMMANDS${c.reset}
   ${c.cyan}plugin install-url${c.reset} <https-url>      Install a remote buildpack plugin
     --sha256 <hex>               Verify the downloaded plugin JSON before install
   ${c.cyan}plugin remove${c.reset}  <name>               Remove a buildpack plugin
+
+  ${c.cyan}db status${c.reset}                    List database companions for a lane
+    --app  --env  --branch
+  ${c.cyan}db logs${c.reset}  [--name <svc>]       Stream logs from a database companion
+    --app  --env  --branch
+  ${c.cyan}db restart${c.reset}  [--name <svc>]    Restart a database companion container
+    --app  --env  --branch
 
   ${c.cyan}version${c.reset}                      Show relay, relayd, and station versions
   ${c.cyan}doctor${c.reset}                       Check client, agent, Docker, domains, and TLS
@@ -2574,6 +2638,111 @@ async function main() {
       "Unknown plugin sub-command. Supported: list, search [query], install <file>, install-url <https-url>, remove <name>",
     );
   }
+
+  // ── db ─────────────────────────────────────────────────────────────────────
+  if (cmd === "db") {
+    const sub = args._[1];
+    const { transport } = await resolveOrSetup(args);
+    const app = args.app || "";
+    const env = normalizeLaneEnv(args.env || "");
+    const branch = args.branch || "";
+    if (!app || !env || !branch) {
+      die("relay db requires --app, --env, and --branch");
+    }
+
+    // ── db status ─────────────────────────────────────────────────────────
+    if (!sub || sub === "status") {
+      try {
+        const items = await apiJSON(
+          transport,
+          "GET",
+          `/api/apps/companions?app=${encodeURIComponent(app)}&env=${encodeURIComponent(env)}&branch=${encodeURIComponent(branch)}`,
+        );
+        const dbItems = (items || []).filter((item) => {
+          const t = (item.config?.type || "").toLowerCase();
+          return t === "relaydb" || t === "postgres" || t === "mysql" || t === "mongo";
+        });
+        if (!dbItems.length) {
+          info("No database companions configured for this lane.");
+          process.exit(0);
+        }
+        for (const item of dbItems) {
+          const cfg = item.config || {};
+          const running = item.running;
+          const statusLabel = running
+            ? `${c.green}running${c.reset}`
+            : `${c.dim}stopped${c.reset}`;
+          console.log(
+            `  ${c.cyan}${cfg.name}${c.reset}  ${c.dim}(${cfg.type}${cfg.version ? " " + cfg.version : ""})${c.reset}  ${statusLabel}`,
+          );
+          if (running) {
+            console.log(`    container  ${c.dim}${running.container}${c.reset}`);
+            console.log(`    env key    ${c.dim}${running.env_key}${c.reset}`);
+          }
+        }
+      } catch (e) {
+        die(e.message);
+      }
+      process.exit(0);
+    }
+
+    // ── db logs ───────────────────────────────────────────────────────────
+    if (sub === "logs") {
+      const svcName = (args.name || args._[2] || "db").trim();
+      try {
+        const targets = await apiJSON(
+          transport,
+          "GET",
+          `/api/runtime/logs/targets?app=${encodeURIComponent(app)}&env=${encodeURIComponent(env)}&branch=${encodeURIComponent(branch)}`,
+        );
+        const list = targets?.targets || [];
+        const match = list.find(
+          (t) =>
+            t.kind === "service" &&
+            (t.service === svcName ||
+              t.label?.toLowerCase().includes(svcName.toLowerCase())),
+        );
+        if (!match) {
+          const available = list
+            .filter((t) => t.kind === "service")
+            .map((t) => t.service || t.label)
+            .join(", ");
+          die(
+            available
+              ? `No DB companion named "${svcName}". Available services: ${available}`
+              : `No service companions found for ${app}/${env}/${branch}`,
+          );
+        }
+        const tail = args.tail != null ? String(args.tail) : "200";
+        const streamPath = `/api/runtime/logs/stream?app=${encodeURIComponent(app)}&env=${encodeURIComponent(env)}&branch=${encodeURIComponent(branch)}&target=${encodeURIComponent(match.id)}&tail=${tail}`;
+        info(`Streaming logs for ${match.label || svcName}`);
+        await streamSSELines(transport, streamPath);
+      } catch (e) {
+        die(e.message);
+      }
+      process.exit(0);
+    }
+
+    // ── db restart ────────────────────────────────────────────────────────
+    if (sub === "restart") {
+      const svcName = (args.name || args._[2] || "db").trim();
+      try {
+        await apiJSON(transport, "POST", "/api/apps/companions/restart", {
+          app,
+          env,
+          branch,
+          name: svcName,
+        });
+        ok(`Restarted ${svcName}`);
+      } catch (e) {
+        die(e.message);
+      }
+      process.exit(0);
+    }
+
+    die("Unknown db sub-command. Supported: status, logs [--name <svc>], restart [--name <svc>]");
+  }
+
   // ── agent ──────────────────────────────────────────────────────────────────
   if (cmd === "agent") {
     const sub = args._[1];

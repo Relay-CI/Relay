@@ -43,6 +43,7 @@ func (s *Server) registerControlRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/plugins/buildpacks/install-url", authOwner(s.handleBuildpackPluginInstallURL))
 	mux.HandleFunc("/api/plugins/catalog", authOwner(s.handleBuildpackPluginCatalog))
 	mux.HandleFunc("/api/admin/ops", authOwner(s.handleAdminOps))
+	mux.HandleFunc("/api/admin/plugin-mutations", authOwner(s.handlePluginMutationToggle))
 	mux.HandleFunc("/api/logs/", authAny(s.handleLogsByID))
 	mux.HandleFunc("/api/logs/stream/", authAny(s.handleLogsStream))
 	mux.HandleFunc("/api/runtime/logs/targets", authAny(s.handleRuntimeLogTargets))
