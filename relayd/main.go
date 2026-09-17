@@ -7028,7 +7028,25 @@ func (s *Server) ensureEdgeProxyLocked(log func(string, ...any), app string, env
 	}
 	out, reloadErr := s.runtime.Exec(containerName, []string{"nginx", "-s", "reload"})
 	if reloadErr != nil {
-		return fmt.Errorf("edge proxy reload failed: %v (%s)", reloadErr, strings.TrimSpace(string(out)))
+		// PID file may be stale/empty while the master process is still bound to
+		// the port (common after an OOM kill that zeroed the file). Recover by
+		// finding the master PID, writing it back, and retrying the reload.
+		if log != nil {
+			log("edge proxy reload failed (%v); attempting PID recovery", reloadErr)
+		}
+		pidOut, pidErr := s.runtime.Exec(containerName, []string{
+			"sh", "-c", `pid=$(ps -eo pid,comm | awk '$2=="nginx"{print $1;exit}'); [ -n "$pid" ] && printf '%s' "$pid" > /tmp/nginx.pid && echo "$pid"`,
+		})
+		if pidErr == nil && len(strings.TrimSpace(string(pidOut))) > 0 {
+			if _, retryErr := s.runtime.Exec(containerName, []string{"nginx", "-s", "reload"}); retryErr == nil {
+				return nil
+			}
+		}
+		// nginx is not running at all; start it fresh.
+		if _, startErr := s.runtime.Exec(containerName, []string{"nginx"}); startErr != nil {
+			return fmt.Errorf("edge proxy reload failed: %v (%s)", reloadErr, strings.TrimSpace(string(out)))
+		}
+		return s.waitForContainerReady(log, containerName, 3000, 15*time.Second)
 	}
 	return nil
 }
