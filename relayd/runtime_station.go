@@ -1648,7 +1648,7 @@ func (s *Server) runStationApp(log func(string, ...any), req DeployRequest, snap
 	}
 
 	state, _ := s.getAppState(req.App, req.Env, req.Branch)
-	if trafficMode == "edge" && state != nil {
+	if trafficMode != "session" && state != nil {
 		split := normalizeTrafficSplitPercent(state.TrafficSplitPercent)
 		if split < 100 {
 			return fmt.Errorf("Station does not support %d%% canary traffic; use Docker or set traffic split to 100%%", split)

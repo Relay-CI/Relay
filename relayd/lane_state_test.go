@@ -5,6 +5,15 @@ import (
 	"testing"
 )
 
+func TestNormalizeTrafficModeSupportsCanary(t *testing.T) {
+	if got := normalizeTrafficMode("canary"); got != "canary" {
+		t.Fatalf("normalizeTrafficMode(canary) = %q, want canary", got)
+	}
+	if got := normalizeTrafficMode("unknown"); got != "" {
+		t.Fatalf("unknown traffic mode = %q, want empty", got)
+	}
+}
+
 func fullyConfiguredLaneState() *AppState {
 	return &AppState{
 		App:                  "demo",

@@ -107,6 +107,12 @@ const POLICY_OPTIONS = [
     summary:
       "Keep existing visitors on their version while new visitors get the latest one. Relay retires the old slot after sessions and requests finish.",
   },
+  {
+    value: "canary",
+    title: "Canary",
+    summary:
+      "Send a small share of traffic to the new version first, assess errors, then promote or abort.",
+  },
 ];
 
 const ACCESS_OPTIONS = [
@@ -816,8 +822,10 @@ export function SettingsPage({
                   onClick={() => canWrite && upd({
                     traffic_mode: o.value,
                     ...(o.value === "rolling" && config.traffic_mode !== "rolling"
-                      ? { traffic_split_percent: 100 }
-                      : {}),
+						? { traffic_split_percent: 100 }
+						: o.value === "canary" && config.traffic_mode !== "canary"
+							? { traffic_split_percent: 10 }
+							: {}),
                   })}
                 >
                   {o.title}

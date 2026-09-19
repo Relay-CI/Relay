@@ -4993,7 +4993,7 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 		if body.TrafficMode != nil {
 			trafficMode := normalizeTrafficMode(*body.TrafficMode)
 			if trafficMode == "" {
-				httpError(w, 400, "traffic_mode must be edge or session")
+				httpError(w, 400, "traffic_mode must be edge, canary, or session")
 				return
 			}
 			st.TrafficMode = trafficMode
@@ -6551,6 +6551,8 @@ func normalizeTrafficMode(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "session":
 		return "session"
+	case "canary":
+		return "canary"
 	case "edge":
 		return "edge"
 	default:

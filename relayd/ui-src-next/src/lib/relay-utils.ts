@@ -353,11 +353,13 @@ export function uiModeToApi(uiMode: string | undefined): string {
 
 export function apiTrafficModeToUi(apiMode: string | undefined): string {
   if (apiMode === "session") return "rolling";
+  if (apiMode === "canary") return "canary";
   return "bluegreen"; // "edge" or default
 }
 
 export function uiTrafficModeToApi(uiMode: string | undefined): string {
   if (uiMode === "rolling") return "session";
+  if (uiMode === "canary") return "canary";
   return "edge"; // "bluegreen" or default
 }
 
