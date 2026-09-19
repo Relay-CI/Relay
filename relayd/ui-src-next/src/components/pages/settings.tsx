@@ -85,7 +85,7 @@ const MODE_OPTIONS = [
   {
     value: "static",
     title: "Static",
-    summary: "Serve a prebuilt static folder with no running container.",
+    summary: "Publish through a Relay-managed domain. Static-site detection happens automatically during deploy.",
   },
   {
     value: "off",
@@ -105,7 +105,7 @@ const POLICY_OPTIONS = [
     value: "rolling",
     title: "Rolling",
     summary:
-      "Drain the current container gradually as the new one becomes healthy.",
+      "Keep existing visitors on their version while new visitors get the latest one. Relay retires the old slot after sessions and requests finish.",
   },
 ];
 
@@ -813,7 +813,12 @@ export function SettingsPage({
                 <SegButton
                   key={o.value}
                   active={config.traffic_mode === o.value}
-                  onClick={() => canWrite && upd({ traffic_mode: o.value })}
+                  onClick={() => canWrite && upd({
+                    traffic_mode: o.value,
+                    ...(o.value === "rolling" && config.traffic_mode !== "rolling"
+                      ? { traffic_split_percent: 100 }
+                      : {}),
+                  })}
                 >
                   {o.title}
                 </SegButton>
@@ -882,6 +887,11 @@ export function SettingsPage({
               disabled={!canWrite}
             />
           </Field>
+          {config.traffic_mode === "rolling" ? (
+            <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-4 text-xs text-white/50">
+              New visitors get the new version immediately. Existing visitors stay on their version while browser heartbeats or requests are active. Relay expires inactive sessions after 3 minutes by default and allows at most 1 hour of session drain before switching remaining visitors. Active requests finish before the old container is removed. Operators can configure these periods with RELAY_SESSION_IDLE_SECONDS and RELAY_SESSION_MAX_DRAIN_SECONDS.
+            </div>
+          ) : <>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <Field label="New Traffic Share (%)">
               <input
@@ -926,8 +936,9 @@ export function SettingsPage({
               disabled={!canWrite}
             />
           </Field>
+          </>}
           <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-4 space-y-3">
-            <div>
+            {config.traffic_mode !== "rolling" && <div>
               <div className="eyebrow mb-0.5">Live rollout policy</div>
               <div className="text-sm font-medium text-white">
                 {config.traffic_split_percent ?? 100}% new traffic, {config.rollout_min_requests ?? 25} request minimum, rollback above {config.rollout_error_percent ?? 5}% errors
@@ -935,8 +946,9 @@ export function SettingsPage({
               <div className="text-xs text-white/35 mt-1">
                 Relay monitors canary exposure for {config.rollout_assess_seconds ?? 300} seconds before deciding whether to continue or revert.
               </div>
-            </div>
+            </div>}
             <div className="flex gap-2 flex-wrap">
+              {config.traffic_mode !== "rolling" && <>
               <button
                 type="button"
                 onClick={handlePromoteAllTraffic}
@@ -956,6 +968,7 @@ export function SettingsPage({
                   {rolloutBusy === "abort-rollout" ? "Aborting..." : "Abort Rollout Now"}
                 </button>
               )}
+              </>}
               <button
                 type="button"
                 onClick={handleRollbackLane}

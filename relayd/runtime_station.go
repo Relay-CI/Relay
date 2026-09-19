@@ -1421,18 +1421,20 @@ func (s *Server) stopStationLane(app string, env DeployEnv, branch string) error
 // stationProxyParams bundles the arguments shared by all proxy-related helpers,
 // keeping individual function signatures under the 7-parameter limit.
 type stationProxyParams struct {
-	app         string
-	env         DeployEnv
-	branch      string
-	activeSlot  string
-	standbySlot string
-	servicePort int
-	hostPort    int
-	mode        string
-	trafficMode string
-	publicHost  string
-	authURL     string
-	recreate    bool
+	app          string
+	env          DeployEnv
+	branch       string
+	activeSlot   string
+	standbySlot  string
+	servicePort  int
+	hostPort     int
+	mode         string
+	trafficMode  string
+	publicHost   string
+	authURL      string
+	sessionURL   string
+	sessionToken string
+	recreate     bool
 }
 
 // ensurestationEdgeProxyViaAgent attempts to start or swap the edge proxy
@@ -1473,6 +1475,8 @@ func agentProxyStart(agent *stationAgent, vrt ContainerRuntime, proxyName, activ
 		TrafficMode:    firstNonEmpty(normalizeTrafficMode(p.trafficMode), "edge"),
 		CookieName:     edgeCookieName(p.app, p.env, p.branch),
 		AuthURL:        strings.TrimSpace(p.authURL),
+		SessionURL:     p.sessionURL,
+		SessionToken:   p.sessionToken,
 	}
 	if p.standbySlot != "" {
 		req.StandbyUpstream = stationSlotUpstream(vrt, appSlotContainerName(p.app, p.env, p.branch, p.standbySlot), p.servicePort)
@@ -1493,6 +1497,8 @@ func agentProxySwap(agent *stationAgent, vrt ContainerRuntime, proxyName, active
 		TrafficMode:    firstNonEmpty(normalizeTrafficMode(p.trafficMode), "edge"),
 		CookieName:     edgeCookieName(p.app, p.env, p.branch),
 		AuthURL:        strings.TrimSpace(p.authURL),
+		SessionURL:     p.sessionURL,
+		SessionToken:   p.sessionToken,
 	}
 	if p.standbySlot != "" {
 		req.StandbyUpstream = stationSlotUpstream(vrt, appSlotContainerName(p.app, p.env, p.branch, p.standbySlot), p.servicePort)
@@ -1510,6 +1516,15 @@ func agentProxySwap(agent *stationAgent, vrt ContainerRuntime, proxyName, active
 
 func (s *Server) ensurestationEdgeProxy(log func(string, ...any), app string, env DeployEnv, branch string, activeSlot string, standbySlot string, servicePort int, hostPort int, mode string, trafficMode string, publicHost string, recreate bool) error {
 	runtime := s.runtimeForEngine(EngineStation)
+	sessionURL, sessionToken := "", ""
+	if normalizeTrafficMode(trafficMode) == "session" {
+		var err error
+		sessionToken, err = s.edgeSessionToken(app, env, branch)
+		if err != nil {
+			return err
+		}
+		sessionURL = edgeSessionProxyURL(listenAddrPort(s.httpAddr), "127.0.0.1", app, env, branch)
+	}
 	activeSlot = normalizeActiveSlot(activeSlot)
 	standbySlot = normalizeActiveSlot(standbySlot)
 	if standbySlot != "" && !runtime.IsRunning(appSlotContainerName(app, env, branch, standbySlot)) {
@@ -1528,7 +1543,8 @@ func (s *Server) ensurestationEdgeProxy(log func(string, ...any), app string, en
 		activeSlot: activeSlot, standbySlot: standbySlot,
 		servicePort: servicePort, hostPort: hostPort,
 		mode: mode, trafficMode: trafficMode, publicHost: publicHost,
-		authURL:  edgeAuthProxyURL(listenAddrPort(s.httpAddr), app, env, branch, "127.0.0.1"),
+		authURL:    edgeAuthProxyURL(listenAddrPort(s.httpAddr), app, env, branch, "127.0.0.1"),
+		sessionURL: sessionURL, sessionToken: sessionToken,
 		recreate: recreate,
 	}); done {
 		return err
@@ -1555,6 +1571,9 @@ func (s *Server) ensurestationEdgeProxy(log func(string, ...any), app string, en
 		"--cookie-name", edgeCookieName(app, env, branch),
 		"--auth-url", edgeAuthProxyURL(listenAddrPort(s.httpAddr), app, env, branch, "127.0.0.1"),
 	)
+	if sessionURL != "" {
+		args = append(args, "--session-url", sessionURL, "--session-token", sessionToken)
+	}
 	if standbySlot != "" {
 		args = append(args,
 			"--standby-upstream", stationSlotUpstream(runtime, appSlotContainerName(app, env, branch, standbySlot), servicePort),
@@ -1586,15 +1605,25 @@ func (s *Server) cleanupstationStandbySlotAfter(app string, env DeployEnv, branc
 	runtime := s.runtimeForEngine(EngineStation)
 	name := appSlotContainerName(app, env, branch, oldSlot)
 	cleanup := func() {
+		lock := s.edgeProxyLock(app, env, branch)
+		lock.Lock()
+		defer lock.Unlock()
+		st, err := s.getAppState(app, env, branch)
+		if err != nil || st == nil || normalizeActiveSlot(st.ActiveSlot) != normalizeActiveSlot(activeSlot) || normalizeActiveSlot(st.StandbySlot) != normalizeActiveSlot(oldSlot) {
+			return // A later deployment owns this slot; this timer is stale.
+		}
+		if err := s.ensurestationEdgeProxy(nil, app, env, branch, activeSlot, "", servicePort, hostPort, mode, trafficMode, publicHost, false); err != nil {
+			s.auditLog("relay-rollout", "rollout.retire_retry", app, fmt.Sprintf("env=%s branch=%s err=%v", env, branch, err))
+			s.cleanupstationStandbySlotAfter(app, env, branch, activeSlot, oldSlot, servicePort, hostPort, mode, trafficMode, publicHost, 10*time.Second)
+			return
+		}
+		// The Station proxy reloads its slot record asynchronously.
+		time.Sleep(time.Second)
 		runtime.Remove(name)
-		_ = s.ensurestationEdgeProxy(nil, app, env, branch, activeSlot, "", servicePort, hostPort, mode, trafficMode, publicHost, false)
-		if st, err := s.getAppState(app, env, branch); err == nil && st != nil {
-			if normalizeActiveSlot(st.ActiveSlot) == normalizeActiveSlot(activeSlot) && normalizeActiveSlot(st.StandbySlot) == normalizeActiveSlot(oldSlot) {
-				st.StandbySlot = ""
-				st.DrainUntil = 0
-				_ = s.saveAppState(st)
-				s.broadcastSnapshot()
-			}
+		st.StandbySlot = ""
+		st.DrainUntil = 0
+		if err := s.saveAppState(st); err == nil {
+			s.broadcastSnapshot()
 		}
 	}
 	if wait <= 0 {
@@ -1619,9 +1648,18 @@ func (s *Server) runStationApp(log func(string, ...any), req DeployRequest, snap
 	}
 
 	state, _ := s.getAppState(req.App, req.Env, req.Branch)
+	if trafficMode == "edge" && state != nil {
+		split := normalizeTrafficSplitPercent(state.TrafficSplitPercent)
+		if split < 100 {
+			return fmt.Errorf("Station does not support %d%% canary traffic; use Docker or set traffic split to 100%%", split)
+		}
+	}
 	activeSlot := s.currentActiveSlotWithRuntime(runtime, req.App, req.Env, req.Branch, state)
 	nextSlot := nextActiveSlot(activeSlot)
 	candidateName := appSlotContainerName(req.App, req.Env, req.Branch, nextSlot)
+	if runtime.IsRunning(candidateName) && state != nil && state.TrafficMode == "session" && normalizeActiveSlot(state.StandbySlot) == nextSlot {
+		return fmt.Errorf("previous version still serves live sessions; wait for its drain to finish before deploying again")
+	}
 
 	if err := s.runSlotContainerWithRuntime(runtime, log, req.App, req.Env, req.Branch, nextSlot, snapshotName, servicePort, networkName, extraEnv); err != nil {
 		return err
@@ -1643,28 +1681,48 @@ func (s *Server) runStationApp(log func(string, ...any), req DeployRequest, snap
 	if !recreateProxy && edgeProxyPublishedPortChanged(runtime, req.App, req.Env, req.Branch, hostPort, mode, req.PublicHost) {
 		recreateProxy = true
 	}
-	if err := s.ensurestationEdgeProxy(log, req.App, req.Env, req.Branch, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, recreateProxy); err != nil {
-		runtime.Remove(candidateName)
-		return err
+	drainUntil := time.Now().Add(rolloutDrainDuration()).UnixMilli()
+	if trafficMode == "session" {
+		drainUntil = time.Now().Add(edgeMaxDrain()).UnixMilli()
 	}
-
-	if activeSlot != "" && activeSlot != nextSlot {
-		drainUntil := time.Now().Add(rolloutDrainDuration()).UnixMilli()
-		if state != nil {
-			state.ActiveSlot = nextSlot
-			state.StandbySlot = activeSlot
-			state.DrainUntil = drainUntil
-			state.TrafficMode = trafficMode
-			_ = s.saveAppState(state)
-			s.broadcastSnapshot()
+	var planned *AppState
+	if state != nil {
+		copyState := *state
+		planned = &copyState
+		planned.ActiveSlot, planned.TrafficMode = nextSlot, trafficMode
+		if activeSlot != "" && activeSlot != nextSlot {
+			planned.StandbySlot, planned.DrainUntil = activeSlot, drainUntil
+			if trafficMode == "session" {
+				planned.RolloutStatus = "draining"
+			}
+		} else {
+			planned.StandbySlot, planned.DrainUntil, planned.RolloutStatus = "", 0, ""
 		}
-		s.cleanupstationStandbySlotAfter(req.App, req.Env, req.Branch, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, rolloutDrainDuration())
+	}
+	switchRoute := func() error {
+		return s.ensurestationEdgeProxy(log, req.App, req.Env, req.Branch, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, recreateProxy)
+	}
+	var routeErr error
+	if planned != nil {
+		routeErr = s.applyLaneRollout(planned, switchRoute)
+	} else {
+		routeErr = switchRoute()
+	}
+	if routeErr != nil {
+		if !strings.Contains(routeErr.Error(), "pending reconciliation") {
+			runtime.Remove(candidateName)
+		}
+		return routeErr
+	}
+	state = planned
+	if activeSlot != "" && activeSlot != nextSlot {
+		s.broadcastSnapshot()
+		if trafficMode == "session" {
+			s.startSessionDrain(req.App, req.Env, req.Branch, nextSlot, activeSlot)
+		} else {
+			s.cleanupstationStandbySlotAfter(req.App, req.Env, req.Branch, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, rolloutDrainDuration())
+		}
 	} else if state != nil {
-		state.ActiveSlot = nextSlot
-		state.StandbySlot = ""
-		state.DrainUntil = 0
-		state.TrafficMode = trafficMode
-		_ = s.saveAppState(state)
 		s.broadcastSnapshot()
 	}
 	return nil

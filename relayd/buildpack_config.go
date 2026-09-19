@@ -13,17 +13,18 @@ import (
 // ---------------------- Config ----------------------
 
 type RelayConfig struct {
-	Kind         string   `json:"kind"`         // optional hint; else auto-detect
-	BuildImage   string   `json:"build_image"`  // docker image to run install/build
-	RunImage     string   `json:"run_image"`    // runtime image; if empty, defaults per pack
-	ServicePort  int      `json:"service_port"` // container port
-	InstallCmd   string   `json:"install_cmd"`
-	BuildCmd     string   `json:"build_cmd"`
-	StartCmd     string   `json:"start_cmd"`
-	ProjectRoot  string   `json:"project_root"`      // repo-relative app root for monorepos
-	BuildContext string   `json:"build_context"`     // repo-relative docker build context
-	Dockerfile   string   `json:"dockerfile"`        // repo-relative dockerfile path
-	Volumes      []string `json:"volumes,omitempty"` // persistent volume mounts e.g. ["/data"]
+	Kind          string   `json:"kind"`                     // optional hint; else auto-detect
+	BuildImage    string   `json:"build_image"`              // docker image to run install/build
+	RunImage      string   `json:"run_image"`                // runtime image; if empty, defaults per pack
+	ServicePort   int      `json:"service_port"`             // container port
+	ReadinessPath string   `json:"readiness_path,omitempty"` // optional HTTP 2xx application check before traffic switch
+	InstallCmd    string   `json:"install_cmd"`
+	BuildCmd      string   `json:"build_cmd"`
+	StartCmd      string   `json:"start_cmd"`
+	ProjectRoot   string   `json:"project_root"`      // repo-relative app root for monorepos
+	BuildContext  string   `json:"build_context"`     // repo-relative docker build context
+	Dockerfile    string   `json:"dockerfile"`        // repo-relative dockerfile path
+	Volumes       []string `json:"volumes,omitempty"` // persistent volume mounts e.g. ["/data"]
 }
 
 func cleanRepoRelativePath(value string) (string, error) {

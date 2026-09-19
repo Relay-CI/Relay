@@ -95,6 +95,8 @@ type daemonProxyReq struct {
 	CookieName      string `json:"cookie_name,omitempty"`
 	PublicHost      string `json:"public_host,omitempty"`
 	AuthURL         string `json:"auth_url,omitempty"`
+	SessionURL      string `json:"session_url,omitempty"`
+	SessionToken    string `json:"session_token,omitempty"`
 	ClearStandby    bool   `json:"clear_standby,omitempty"`
 	ClearPublicHost bool   `json:"clear_public_host,omitempty"`
 }
@@ -666,6 +668,8 @@ func daemonProxyStart(w http.ResponseWriter, r *http.Request) {
 		CookieName:      firstProxyValue(strings.TrimSpace(req.CookieName), "station_slot"),
 		PublicHost:      strings.TrimSpace(req.PublicHost),
 		AuthURL:         strings.TrimSpace(req.AuthURL),
+		SessionURL:      strings.TrimSpace(req.SessionURL),
+		SessionToken:    strings.TrimSpace(req.SessionToken),
 	})
 	if err := saveSlotRecord(rec); err != nil {
 		http.Error(w, "save proxy config: "+err.Error(), http.StatusInternalServerError)
@@ -736,6 +740,12 @@ func applyProxySwap(rec *SlotRecord, req daemonProxyReq) {
 	}
 	if authURL := strings.TrimSpace(req.AuthURL); authURL != "" {
 		rec.AuthURL = authURL
+	}
+	if sessionURL := strings.TrimSpace(req.SessionURL); sessionURL != "" {
+		rec.SessionURL = sessionURL
+	}
+	if sessionToken := strings.TrimSpace(req.SessionToken); sessionToken != "" {
+		rec.SessionToken = sessionToken
 	}
 	applyProxyPublicHost(rec, req)
 }

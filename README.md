@@ -198,6 +198,55 @@ These same fields are editable in the dashboard under **Settings -> Build layout
 > **⚠️ Use Docker.** Docker is Relay's default engine and the supported path for production, staging, dev, and preview lanes. Station is still experimental; keep it for local or WSL2 testing until a stable release is announced.
 
 Switch per app in the dashboard under **Settings → Runtime / Routing**.
+Docker supports canary traffic assessment. Station is intentionally explicit:
+it rejects a canary split below 100% rather than silently applying different
+semantics.
+
+### Application readiness
+
+Relay's default check confirms that the process accepts HTTP, preserving
+compatibility with existing apps. Docker lanes can opt into an application
+readiness gate in `relay.config.json`; Relay requires HTTP 2xx from this path
+before moving traffic:
+
+```json
+{ "readiness_path": "/healthz" }
+```
+
+The value must be an absolute path without a query string. Station does not
+support this opt-in gate yet and clearly rejects it during deployment.
+
+### Session-based deployment handoff
+
+Select **Rolling** in **Settings → Runtime / Routing** before deploying. Relay
+assigns each visitor an opaque, HttpOnly session cookie and injects a small
+heartbeat script into ordinary HTML responses. When a new version is ready,
+visitors with an active session remain on their old slot across refreshes and
+API calls; new visitors go to the new slot immediately. Every tab can renew
+the same visitor session. An open upload or streaming request also renews
+presence and keeps the old container in use until the request finishes.
+
+Configure `RELAY_SESSION_IDLE_SECONDS` (default 180, minimum 15) for missed
+heartbeats and `RELAY_SESSION_MAX_DRAIN_SECONDS` (default 3600, minimum 30)
+for the maximum time new requests may continue reaching the old slot. At the
+maximum, Relay expires remaining old sessions and routes their next request
+to the new version. It still waits for active requests to finish before
+removing the old container. Relay resumes pending drains after a restart.
+Since each lane has two slots, a further deploy waits until the prior version
+has drained. The existing Blue/Green edge policy and canary controls are
+unchanged.
+
+Relay coalesces short bursts of heartbeat writes while retaining a durable
+presence lease, reducing SQLite pressure without expiring an active visitor
+early. Each route change also records a recoverable Lane rollout intent before
+traffic moves; if Relay stops during that transition, it reconciles the route
+and durable Lane State on startup.
+
+HTML responses with restrictive Content Security Policies should allow the
+same-origin `/__relay/presence.js` script, or include it in the site layout.
+Relay preserves the site's Content Security Policy. Responses larger than
+4 MiB are not rewritten; sites serving such HTML should include the script
+themselves. The presence endpoint is `/__relay/presence`.
 
 ---
 
