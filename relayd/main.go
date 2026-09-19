@@ -6899,6 +6899,9 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 			return "", err
 		}
 		conf.WriteString(fmt.Sprintf("      proxy_set_header X-Relay-Edge-Token \"%s\";\n", token))
+		conf.WriteString(fmt.Sprintf("      proxy_set_header X-Relay-Lane-App \"%s\";\n", app))
+		conf.WriteString(fmt.Sprintf("      proxy_set_header X-Relay-Lane-Env \"%s\";\n", env))
+		conf.WriteString(fmt.Sprintf("      proxy_set_header X-Relay-Lane-Branch \"%s\";\n", branch))
 		conf.WriteString("      proxy_set_header X-Relay-Original-Uri $request_uri;\n")
 		conf.WriteString("      proxy_set_header X-Forwarded-Host $host;\n")
 		conf.WriteString("      proxy_pass " + edgeSessionProxyURL(relayPort, "host.docker.internal", app, env, branch) + ";\n")
@@ -6953,7 +6956,7 @@ func (s *Server) runSlotContainerWithRuntime(runtime ContainerRuntime, log func(
 		ReadOnlyRootFS:   getenvBool("RELAY_APP_READ_ONLY_ROOTFS", true),
 		PIDsLimit:        256,
 		User:             strings.TrimSpace(os.Getenv("RELAY_APP_RUN_AS")),
-		Tmpfs:            []string{"/tmp:rw,noexec,nosuid,size=64m", "/run:rw,noexec,nosuid,size=8m"},
+		Tmpfs:            []string{"/tmp:rw,noexec,nosuid,size=64m", "/run:rw,noexec,nosuid,size=8m", "/app/node_modules/.vite-temp:rw,noexec,nosuid,size=32m"},
 	}
 	if st, err := s.getAppState(app, env, branch); err == nil && st != nil {
 		if st.ResourceMode != "auto" {

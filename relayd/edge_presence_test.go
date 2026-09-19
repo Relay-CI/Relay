@@ -20,6 +20,9 @@ func testEdgeProxyRequest(t *testing.T, s *Server, cookie *http.Cookie, path, me
 	}
 	req := httptest.NewRequest(method, edgeSessionProxyURL(8080, "127.0.0.1", "demo", EnvProd, "main"), body)
 	req.Header.Set("X-Relay-Edge-Token", token)
+	req.Header.Set("X-Relay-Lane-App", "demo")
+	req.Header.Set("X-Relay-Lane-Env", string(EnvProd))
+	req.Header.Set("X-Relay-Lane-Branch", "main")
 	req.Header.Set("X-Relay-Original-Uri", path)
 	req.Header.Set("X-Forwarded-Host", "demo.example.com")
 	req.Header.Set("X-Forwarded-Proto", "https")
@@ -100,6 +103,9 @@ func TestEdgeSessionDeploymentPreservesVisitorAcrossRefreshAndAPIRequests(t *tes
 func TestEdgeSessionProxyRequiresLaneToken(t *testing.T) {
 	s := newPreviewPortTestServer(t)
 	req := httptest.NewRequest(http.MethodGet, edgeSessionProxyURL(8080, "127.0.0.1", "demo", EnvProd, "main"), nil)
+	req.Header.Set("X-Relay-Lane-App", "demo")
+	req.Header.Set("X-Relay-Lane-Env", string(EnvProd))
+	req.Header.Set("X-Relay-Lane-Branch", "main")
 	req.Header.Set("X-Relay-Original-Uri", "/")
 	w := httptest.NewRecorder()
 	s.handleEdgeSessionProxy(w, req)

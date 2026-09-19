@@ -63,8 +63,11 @@ func (s *Server) edgeSessionToken(app string, env DeployEnv, branch string) (str
 }
 
 func edgeSessionProxyURL(port int, host string, app string, env DeployEnv, branch string) string {
-	query := url.Values{"app": {app}, "env": {string(env)}, "branch": {branch}}
-	return fmt.Sprintf("http://%s:%d/api/edge/session-proxy?%s", host, port, query.Encode())
+	// Lane identity travels in internal proxy headers rather than proxy_pass
+	// query arguments. Some reverse-proxy configurations rewrite/drop the
+	// latter, which turns every asset request into "invalid lane" before it
+	// reaches the app.
+	return fmt.Sprintf("http://%s:%d/api/edge/session-proxy", host, port)
 }
 
 func edgePresenceTTL() time.Duration {
@@ -180,7 +183,9 @@ func injectEdgePresenceScript(body []byte) []byte {
 }
 
 func (s *Server) handleEdgeSessionProxy(w http.ResponseWriter, r *http.Request) {
-	app, env, branch := r.URL.Query().Get("app"), normalizeDeployEnv(r.URL.Query().Get("env")), r.URL.Query().Get("branch")
+	app := firstNonEmpty(r.Header.Get("X-Relay-Lane-App"), r.URL.Query().Get("app"))
+	env := normalizeDeployEnv(firstNonEmpty(r.Header.Get("X-Relay-Lane-Env"), r.URL.Query().Get("env")))
+	branch := firstNonEmpty(r.Header.Get("X-Relay-Lane-Branch"), r.URL.Query().Get("branch"))
 	if !validDeployTarget(app, env, branch) {
 		http.Error(w, "invalid lane", http.StatusBadRequest)
 		return
