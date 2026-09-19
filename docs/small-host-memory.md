@@ -21,6 +21,11 @@ e2-small) the defaults below apply with no configuration.
   to 2.2 GB so a deploy does not starve live apps. Hosts with more memory run
   builds at normal CPU priority; this avoids turning a busy 4 GB host into a
   multi-minute build queue.
+- **Serving-first build isolation** — on hosts with up to 4 GB RAM, Relay
+  runs one deployment worker at a time. Each Docker build is CPU-capped so it
+  leaves a core for Caddy and the containers already serving requests. A
+  queued deployment is safer than a build that makes an active website return
+  a 502.
 - **Build caching** — npm/pnpm/yarn stores and `.next/cache` persist across
   builds via BuildKit cache mounts, and unchanged inputs reuse the previous
   image entirely, so repeat deploys skip the expensive work.
@@ -62,6 +67,8 @@ owner-authenticated Go profiling endpoints under `/debug/pprof/`.
 | `RELAY_NODE_BUILD_HEAP_MB` | Explicit V8 heap cap for Node builds (MB). |
 | `RELAY_NODE_BUILD_MEMORY_GUARD=0` | Disable the Node build heap cap entirely. |
 | `RELAY_BUILD_NICE` | `0` forces normal CPU priority; `1` forces `nice -n 10`. Default: nice only on hosts up to 2.2 GB. |
+| `RELAY_BUILD_CPU_LIMIT` | CPU cores available to one local Docker build (for example `0.5` or `2`). Default leaves one core for serving traffic, capped at four build cores. Set `0` only to deliberately remove this guard. |
+| `RELAY_MAX_CONCURRENT_BUILDS` | Deployment worker count. Default is 1 on hosts with ≤ 4 GB RAM; raise only when builds run on dedicated capacity. |
 | `RELAY_APP_MEM_LIMIT_MB` | Default app container memory cap (MB); `0` disables. |
 | `RELAY_GOMEMLIMIT_MB` | Explicit soft memory limit for the relayd daemon (MB). |
 | `GOMEMLIMIT` / `GOGC` | Standard Go runtime knobs; when set, relayd does not override them. |
