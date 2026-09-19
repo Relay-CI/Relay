@@ -2421,19 +2421,11 @@ func main() {
 	go superviseWorker("rollout-intent-reconciler", s.runRolloutIntentReconciler)
 	go runGuarded("warm-images", s.warmBuildpackBaseImages)
 
-	// Start worker pool: deploy jobs are I/O-bound (git, image pull/push,
-	// container ops), so we can run more workers than CPU cores. On very small
-	// hosts, cap the pool so two simultaneous Docker builds don't race for the
-	// same RAM budget and OOM-kill each other.
-	n := runtime.NumCPU()
-	if n < 2 {
-		n = 2
-	}
-	if total := hostTotalMemMB(); total > 0 && total <= 1024 {
-		n = 1 // single build at a time on hosts ≤ 1 GB
-	} else if total > 0 && total <= 2200 && n > 2 {
-		n = 2 // cap at 2 on small hosts so builds don't race for RAM
-	}
+	// Shared hosting must favor traffic over deployment throughput. A worker
+	// can run a Docker build, so use one worker by default through 4 GB of RAM;
+	// this avoids two builds independently starving the reverse proxy or a live
+	// app. Dedicated build capacity can opt in to more concurrency.
+	n := deployWorkerCount(runtime.NumCPU(), hostTotalMemMB(), os.Getenv("RELAY_MAX_CONCURRENT_BUILDS"))
 	s.worker(n)
 
 	mux := http.NewServeMux()

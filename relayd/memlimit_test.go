@@ -119,6 +119,32 @@ func TestBuildMemLimitMBNodeGetsMoreThanGo(t *testing.T) {
 	}
 }
 
+func TestBuildCPUQuotaLeavesServingCapacity(t *testing.T) {
+	cases := []struct{ cpus, want int }{
+		{1, 500},
+		{2, 1000},
+		{4, 3000},
+		{16, 4000},
+	}
+	for _, tc := range cases {
+		if got := buildCPUQuotaMilliForHost(tc.cpus); got != tc.want {
+			t.Errorf("buildCPUQuotaMilliForHost(%d) = %d, want %d", tc.cpus, got, tc.want)
+		}
+	}
+}
+
+func TestDeployWorkerCountProtectsSharedHosts(t *testing.T) {
+	if got := deployWorkerCount(8, 2048, ""); got != 1 {
+		t.Fatalf("2 GB host workers = %d, want 1", got)
+	}
+	if got := deployWorkerCount(8, 8192, ""); got != 4 {
+		t.Fatalf("large host workers = %d, want 4", got)
+	}
+	if got := deployWorkerCount(2, 2048, "3"); got != 3 {
+		t.Fatalf("explicit worker override = %d, want 3", got)
+	}
+}
+
 // buildMemLimitMB_forTest wraps buildMemLimitMB with an explicit totalMB so
 // tests don't depend on /proc/meminfo values on the test machine.
 func buildMemLimitMB_forTest(kind string, totalMB int) int {

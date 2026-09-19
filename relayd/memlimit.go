@@ -191,6 +191,64 @@ func buildMemLimitMB(kind string) int {
 	return limitMB
 }
 
+// buildCPUQuotaMilli returns the CPU budget for one local image build in
+// millicpus. It deliberately leaves at least one full core for the proxy and
+// serving containers where possible. A dedicated remote builder is still the
+// best option for consistently fast builds; this is the local-host safety
+// boundary that prevents a build from starving production traffic.
+//
+// RELAY_BUILD_CPU_LIMIT accepts Docker-style CPU values such as "0.5" or "2".
+// Set it to 0 to remove the cap deliberately.
+func buildCPUQuotaMilli() int {
+	if raw := strings.TrimSpace(os.Getenv("RELAY_BUILD_CPU_LIMIT")); raw != "" {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil || v <= 0 {
+			return 0
+		}
+		return int(v * 1000)
+	}
+	return buildCPUQuotaMilliForHost(runtime.NumCPU())
+}
+
+func buildCPUQuotaMilliForHost(cpus int) int {
+	if cpus <= 1 {
+		return 500
+	}
+	// Keep one core free. On large machines don't let a single build consume
+	// more than four cores by default; parallelism beyond that belongs on a
+	// dedicated builder rather than competing with hosted apps.
+	usable := cpus - 1
+	if usable > 4 {
+		usable = 4
+	}
+	return usable * 1000
+}
+
+// deployWorkerCount is intentionally conservative on shared hosts. Worker
+// jobs include Docker builds, and a second build has historically been enough
+// to exhaust CPU/RAM and make otherwise healthy routes return 502. Operators
+// with a dedicated build machine can explicitly raise RELAY_MAX_CONCURRENT_BUILDS.
+func deployWorkerCount(cpus, totalMB int, configured string) int {
+	if raw := strings.TrimSpace(configured); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			if n > 32 {
+				return 32
+			}
+			return n
+		}
+	}
+	if totalMB > 0 && totalMB <= 4096 {
+		return 1
+	}
+	if cpus < 2 {
+		return 1
+	}
+	if cpus > 4 {
+		return 4
+	}
+	return cpus
+}
+
 // buildKindMemPct maps known buildpack kinds to a RAM percentage for the
 // Docker build container. Families not listed fall back to the default below.
 // npm install forks heavily and Turbopack allocates in a native Rust binary
