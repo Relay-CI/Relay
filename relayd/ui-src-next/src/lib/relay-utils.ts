@@ -249,7 +249,11 @@ export function hasSlotRollout(envInfo: EnvInfo | null | undefined): boolean {
 }
 
 export function rolloutStrategy(envInfo: EnvInfo | null | undefined): string {
-  return hasSlotRollout(envInfo) ? "new / old handoff" : "single target";
+  if (!hasSlotRollout(envInfo)) return "single target";
+  if (envInfo?.traffic_mode === "session") {
+    return envInfo.standby_slot ? "session drain" : "session routing";
+  }
+  return "blue / green handoff";
 }
 
 export function liveTargetLabel(envInfo: EnvInfo | null | undefined): string {
@@ -273,7 +277,7 @@ export function internalSlotLabel(slot: string | undefined): string {
 }
 
 export function trafficModeLabel(value: string | undefined): string {
-  return value === "session" ? "session sticky" : "edge cutover";
+  return value === "session" ? "session presence" : "edge cutover";
 }
 
 export function engineLabel(value: string | undefined): string {

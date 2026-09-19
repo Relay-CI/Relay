@@ -29,6 +29,25 @@ func TestWriteEdgeProxyConfigUsesStdStreamsForLogs(t *testing.T) {
 	}
 }
 
+func TestWriteEdgeProxyConfigDelegatesSessionRoutingToPresenceProxy(t *testing.T) {
+	s := &Server{dataDir: t.TempDir(), httpAddr: ":8080"}
+	configPath, err := s.writeEdgeProxyConfig("demo", EnvPreview, "main", "green", "blue", 3000, "session", 100)
+	if err != nil {
+		t.Fatalf("write edge proxy config: %v", err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read edge proxy config: %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "/api/edge/session-proxy?") || !strings.Contains(text, "X-Relay-Edge-Token") || !strings.Contains(text, "X-Relay-Original-Uri") {
+		t.Fatalf("expected authenticated session proxy routing, got:\n%s", text)
+	}
+	if strings.Contains(text, "Set-Cookie") {
+		t.Fatalf("nginx must not issue slot-only cookies in session mode: %s", text)
+	}
+}
+
 // This hop (Caddy -> this nginx -> app container) is always plain HTTP, so
 // unconditionally setting X-Forwarded-Proto to $scheme would always send
 // "http" downstream, even when the public client used https (or an

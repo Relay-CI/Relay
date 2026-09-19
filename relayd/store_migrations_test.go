@@ -93,7 +93,7 @@ func TestMigrateDBCreatesFreshSchemaAndIsIdempotent(t *testing.T) {
 	if err := migrateDB(db); err != nil {
 		t.Fatalf("second migration: %v", err)
 	}
-	wantVersions := []int{1, 2, 3, 4, 5, 6, 7, 8, 9}
+	wantVersions := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
 	if got := fixtureMigrationVersions(t, db); !reflect.DeepEqual(got, wantVersions) {
 		t.Fatalf("migration ledger = %v, want %v", got, wantVersions)
 	}
@@ -119,6 +119,8 @@ func TestMigrateDBCreatesFreshSchemaAndIsIdempotent(t *testing.T) {
 		"github_installation_repositories",
 		"github_check_runs",
 		"github_app_states",
+		"edge_presence",
+		"lane_rollout_intents",
 	} {
 		if !fixtureHasTable(t, db, table) {
 			t.Errorf("fresh schema is missing table %s", table)
@@ -190,7 +192,7 @@ func TestMigrateGitHubAppPreservesVersionSevenTokenProjects(t *testing.T) {
 	if repo != "acme/widget" || authMode != "token" || installationID != 0 || repositoryID != 0 || secret != "enc:legacy-webhook-secret" {
 		t.Fatalf("version seven project changed during App expansion: repo=%q mode=%q installation=%d repository=%d secret=%q", repo, authMode, installationID, repositoryID, secret)
 	}
-	if got := fixtureMigrationVersions(t, db); !reflect.DeepEqual(got, []int{1, 2, 3, 4, 5, 6, 7, 8, 9}) {
+	if got := fixtureMigrationVersions(t, db); !reflect.DeepEqual(got, []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}) {
 		t.Fatalf("migration ledger = %v", got)
 	}
 }

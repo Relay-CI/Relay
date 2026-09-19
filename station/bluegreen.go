@@ -32,6 +32,8 @@ type SlotRecord struct {
 	CookieName      string `json:"cookie_name,omitempty"`
 	PublicHost      string `json:"public_host,omitempty"`
 	AuthURL         string `json:"auth_url,omitempty"`
+	SessionURL      string `json:"session_url,omitempty"`
+	SessionToken    string `json:"session_token,omitempty"`
 
 	Upstream string `json:"upstream,omitempty"`
 	Blue     string `json:"blue,omitempty"`
@@ -50,6 +52,8 @@ type proxyArgs struct {
 	CookieName      string
 	PublicHost      string
 	AuthURL         string
+	SessionURL      string
+	SessionToken    string
 	ClearStandby    bool
 	ClearPublicHost bool
 }
@@ -226,6 +230,10 @@ func parseProxyArgs(args []string) proxyArgs {
 			cfg.AuthURL = next()
 		case strings.HasPrefix(arg, "--auth-url="):
 			cfg.AuthURL = strings.TrimPrefix(arg, "--auth-url=")
+		case arg == "--session-url":
+			cfg.SessionURL = next()
+		case arg == "--session-token":
+			cfg.SessionToken = next()
 		case arg == "--clear-standby":
 			cfg.ClearStandby = true
 		case arg == "--clear-public-host":
@@ -369,10 +377,21 @@ func runProxyDaemon() {
 		Director: func(req *http.Request) {
 			cfg := current.Load().(*SlotRecord)
 			meta := proxyTargetForRequest(cfg, req)
+			original := req.URL.RequestURI()
 			ctx := context.WithValue(req.Context(), proxyTargetKey{}, meta)
 			*req = *req.WithContext(ctx)
-			req.URL.Scheme = "http"
-			req.URL.Host = meta.Upstream
+			if cfg.TrafficMode == "session" && cfg.SessionURL != "" {
+				target, err := url.Parse(cfg.SessionURL)
+				if err == nil {
+					req.URL.Scheme, req.URL.Host, req.URL.Path, req.URL.RawQuery = target.Scheme, target.Host, target.Path, target.RawQuery
+					req.URL.RawPath = ""
+					req.Header.Set("X-Relay-Original-Uri", original)
+					req.Header.Set("X-Relay-Edge-Token", cfg.SessionToken)
+				}
+			} else {
+				req.URL.Scheme = "http"
+				req.URL.Host = meta.Upstream
+			}
 			if req.Header.Get("X-Forwarded-Host") == "" {
 				req.Header.Set("X-Forwarded-Host", req.Host)
 			}
@@ -387,10 +406,13 @@ func runProxyDaemon() {
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			meta, _ := resp.Request.Context().Value(proxyTargetKey{}).(proxyTargetMeta)
+			cfg := current.Load().(*SlotRecord)
 			resp.Header.Del("X-Powered-By")
-			resp.Header.Set("X-Relay-Target", meta.Slot)
-			resp.Header.Set("X-Relay-Traffic-Mode", meta.TrafficMode)
-			if meta.TrafficMode == "session" && meta.CookieName != "" && meta.Slot != "" {
+			if cfg.TrafficMode != "session" || cfg.SessionURL == "" {
+				resp.Header.Set("X-Relay-Target", meta.Slot)
+				resp.Header.Set("X-Relay-Traffic-Mode", meta.TrafficMode)
+			}
+			if meta.TrafficMode == "session" && cfg.SessionURL == "" && meta.CookieName != "" && meta.Slot != "" {
 				resp.Header.Add("Set-Cookie", fmt.Sprintf("%s=%s; Path=/; Max-Age=86400; SameSite=Lax", meta.CookieName, meta.Slot))
 			}
 			return nil
@@ -456,6 +478,8 @@ func cmdProxyStart(cfg proxyArgs) {
 		CookieName:      firstProxyValue(strings.TrimSpace(cfg.CookieName), "station_slot"),
 		PublicHost:      strings.TrimSpace(cfg.PublicHost),
 		AuthURL:         strings.TrimSpace(cfg.AuthURL),
+		SessionURL:      strings.TrimSpace(cfg.SessionURL),
+		SessionToken:    strings.TrimSpace(cfg.SessionToken),
 	})
 	if err := saveSlotRecord(rec); err != nil {
 		die("save proxy config: %v", err)
@@ -510,6 +534,12 @@ func cmdProxySwap(cfg proxyArgs) {
 	}
 	if cfg.AuthURL != "" {
 		rec.AuthURL = strings.TrimSpace(cfg.AuthURL)
+	}
+	if cfg.SessionURL != "" {
+		rec.SessionURL = strings.TrimSpace(cfg.SessionURL)
+	}
+	if cfg.SessionToken != "" {
+		rec.SessionToken = strings.TrimSpace(cfg.SessionToken)
 	}
 	if err := saveSlotRecord(rec); err != nil {
 		die("save proxy config: %v", err)

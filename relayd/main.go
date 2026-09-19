@@ -223,8 +223,9 @@ type DeployRequest struct {
 	BuildCmd   string `json:"build_cmd"`
 	StartCmd   string `json:"start_cmd"`
 
-	ServicePort int `json:"service_port"`
-	HostPort    int `json:"host_port"`
+	ServicePort   int    `json:"service_port"`
+	ReadinessPath string `json:"-"`
+	HostPort      int    `json:"host_port"`
 	// Internal marker so persisted explicit preview ports are not silently re-assigned.
 	HostPortExplicit bool     `json:"-"`
 	PublicHost       string   `json:"public_host"`
@@ -376,10 +377,14 @@ type Server struct {
 	acmeWebroot           string
 	caddyLogsDir          string
 	httpAddr              string
+	edgeTokenMu           sync.Mutex
+	edgeTokenKey          []byte
+	edgePresenceMu        sync.Mutex
+	edgePresenceReady     bool
 	corsOrigins           map[string]struct{}
 	allowAllCORS          bool
-	enablePluginMutations   bool
-	pluginMutationsMu       sync.RWMutex
+	enablePluginMutations bool
+	pluginMutationsMu     sync.RWMutex
 
 	db          *sql.DB
 	analyticsDB *sql.DB
@@ -2405,6 +2410,7 @@ func main() {
 	_ = s.loadDeploysFromDB()
 	_ = s.reconcileStaleDeploysOnStartup()
 	_ = s.resumeRolloutWatches()
+	_ = s.resumeSessionDrains()
 	_, _ = s.repairLegacyAppHostPortsFromRuntime()
 
 	// Restore global domain proxy state from DB
@@ -2412,6 +2418,7 @@ func main() {
 	go superviseWorker("lane-expiry", s.runLaneExpiryWorker)
 	go s.runHousekeepingWorker()
 	go superviseWorker("slot-reconciler", s.runSlotReconciler)
+	go superviseWorker("rollout-intent-reconciler", s.runRolloutIntentReconciler)
 	go runGuarded("warm-images", s.warmBuildpackBaseImages)
 
 	// Start worker pool: deploy jobs are I/O-bound (git, image pull/push,
@@ -2513,10 +2520,9 @@ func main() {
 		Handler: s.withCORS(mux),
 		// ReadHeaderTimeout guards against Slowloris-style attacks.
 		ReadHeaderTimeout: 10 * time.Second,
-		// ReadTimeout applies to reading the entire request body.
-		// Large file uploads via /api/sync/upload set no per-request deadline
-		// override, so keep this generous.
-		ReadTimeout: 120 * time.Second,
+		// Session-proxied uploads can outlast a fixed server-wide read limit.
+		// The header limit above still protects connection setup.
+		ReadTimeout: 0,
 		// Do NOT set WriteTimeout – it would kill long-lived SSE log streams.
 		// Individual handlers use http.ResponseController to extend deadlines.
 		IdleTimeout: 120 * time.Second,
@@ -4999,6 +5005,12 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			st.TrafficMode = trafficMode
+			// Session handoff sends all new visitors to the new slot. A
+			// percentage split belongs to the separate edge canary policy.
+			if trafficMode == "session" && body.TrafficSplitPercent == nil &&
+				(previousState == nil || previousState.TrafficMode != "session") {
+				st.TrafficSplitPercent = 100
+			}
 		}
 		if body.AccessPolicy != nil {
 			accessPolicy := normalizeAccessPolicy(*body.AccessPolicy)
@@ -5061,6 +5073,9 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 			}
 			st.TrafficSplitPercent = *body.TrafficSplitPercent
 		}
+		if st.TrafficMode == "session" {
+			st.TrafficSplitPercent = 100
+		}
 		if body.RolloutMinRequests != nil {
 			if *body.RolloutMinRequests < 1 {
 				httpError(w, 400, "rollout_min_requests must be at least 1")
@@ -5116,6 +5131,11 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 		if normalizeAccessPolicy(st.AccessPolicy) == "" {
 			st.AccessPolicy = policy.DefaultAccessPolicy
 		}
+		if previousState != nil && previousState.TrafficMode != st.TrafficMode &&
+			normalizeActiveSlot(previousState.StandbySlot) != "" {
+			httpError(w, 409, "wait for the previous version to drain before changing traffic mode")
+			return
+		}
 		s.constrainAppState(st)
 		if err := s.saveAppState(st); err != nil {
 			httpError(w, 500, "failed to save app state: "+err.Error())
@@ -5135,6 +5155,16 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 					_, _ = s.db.Exec(`DELETE FROM app_state WHERE app=? AND env=? AND branch=?`, st.App, string(st.Env), st.Branch)
 				}
 				httpError(w, 500, "failed to refresh global proxy: "+err.Error())
+				return
+			}
+		}
+		// Apply a traffic-policy change to a live lane immediately. In
+		// particular, this gives active visitors a slot cookie before the next
+		// deployment makes that slot the standby target.
+		if previousState != nil && previousState.TrafficMode != st.TrafficMode {
+			if err := s.refreshLiveLaneTrafficPolicy(st); err != nil {
+				_ = s.saveAppState(previousState)
+				httpError(w, 500, "failed to apply traffic policy: "+err.Error())
 				return
 			}
 		}
@@ -5961,6 +5991,18 @@ func (s *Server) runDeploy(job DeployJob) {
 	if c, err := readRelayConfig(repoDir); err == nil {
 		cfg = c
 	}
+	if cfg != nil && strings.TrimSpace(cfg.ReadinessPath) != "" {
+		path := strings.TrimSpace(cfg.ReadinessPath)
+		if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || strings.ContainsAny(path, "?#") {
+			failDeploy(s, d, fmt.Errorf("invalid readiness_path"), "readiness_path must be an absolute path without query or fragment")
+			return
+		}
+		req.ReadinessPath = path
+		if engine == EngineStation {
+			failDeploy(s, d, fmt.Errorf("Station readiness_path unsupported"), "readiness_path currently requires Docker; Station has no application-level HTTP probe")
+			return
+		}
+	}
 
 	effectiveProjectRoot := ""
 	effectiveBuildContext := ""
@@ -6600,28 +6642,32 @@ func logRuntimeContainerDiagnostics(runtime ContainerRuntime, log func(string, .
 }
 
 func (s *Server) waitForRuntimeContainerReady(runtime ContainerRuntime, log func(string, ...any), name string, port int, timeout time.Duration) error {
+	return s.waitForRuntimeContainerReadyOnPath(runtime, log, name, port, timeout, "")
+}
+
+func (s *Server) waitForRuntimeContainerReadyOnPath(runtime ContainerRuntime, log func(string, ...any), name string, port int, timeout time.Duration, readinessPath string) error {
 	port = firstNonZero(port, 3000)
 	deadline := time.Now().Add(timeout)
 	if log != nil {
 		log("checking readiness for %s on port %d (timeout %s)", name, port, timeout)
 	}
 	for attempts := 0; time.Now().Before(deadline); attempts++ {
-		if vr, ok := runtime.(*StationRuntime); ok {
+		if vr, ok := runtime.(*StationRuntime); ok && readinessPath == "" {
 			if vr.readyByLog(name) || vr.bridgeReadyStable(name, 8*time.Second) {
 				return nil
 			}
 		}
 		if runtime.IsRunning(name) {
 			if hostPort := runtime.PublishedPort(name, port); hostPort > 0 {
-				if runtimeHTTPReady(net.JoinHostPort("127.0.0.1", strconv.Itoa(hostPort))) {
+				if runtimeHTTPReadyOnPath(net.JoinHostPort("127.0.0.1", strconv.Itoa(hostPort)), readinessPath) {
 					return nil
 				}
 			}
 			if ip := runtime.ContainerIP(name); ip != "" {
-				if runtimeHTTPReady(net.JoinHostPort(ip, strconv.Itoa(port))) {
+				if runtimeHTTPReadyOnPath(net.JoinHostPort(ip, strconv.Itoa(port)), readinessPath) {
 					return nil
 				}
-				if vr, ok := runtime.(*StationRuntime); ok {
+				if vr, ok := runtime.(*StationRuntime); ok && readinessPath == "" {
 					if vr.probeBridgeAddress(ip, port) {
 						return nil
 					}
@@ -6676,13 +6722,22 @@ func (s *Server) waitForContainerReady(log func(string, ...any), name string, po
 }
 
 func runtimeHTTPReady(address string) bool {
+	return runtimeHTTPReadyOnPath(address, "")
+}
+
+func runtimeHTTPReadyOnPath(address, readinessPath string) bool {
 	client := &http.Client{
-		Timeout: 2 * time.Second,
+		Timeout:       2 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
 		Transport: &http.Transport{
 			DisableKeepAlives: true,
 		},
 	}
-	req, err := http.NewRequest(http.MethodGet, "http://"+address+"/", nil)
+	path := "/"
+	if readinessPath != "" {
+		path = readinessPath
+	}
+	req, err := http.NewRequest(http.MethodGet, "http://"+address+path, nil)
 	if err != nil {
 		return false
 	}
@@ -6692,9 +6747,9 @@ func runtimeHTTPReady(address string) bool {
 		return false
 	}
 	_ = resp.Body.Close()
-	// Any valid HTTP response proves the process is accepting and parsing HTTP.
-	// Application-level response policy remains the app's responsibility.
-	return true
+	// Preserve legacy process-level readiness unless the Lane explicitly
+	// configures an application path. An opt-in path must return HTTP 2xx.
+	return readinessPath == "" || resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
 func (s *Server) edgeProxyConfigPath(app string, env DeployEnv, branch string) string {
@@ -6848,12 +6903,20 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 	conf.WriteString("      proxy_read_timeout 300s;\n")
 	conf.WriteString("      proxy_send_timeout 300s;\n")
 	conf.WriteString("      proxy_connect_timeout 5s;\n")
-	conf.WriteString("      add_header X-Relay-Target $relay_target_slot always;\n")
-	conf.WriteString(fmt.Sprintf("      add_header X-Relay-Traffic-Mode \"%s\" always;\n", trafficMode))
 	if trafficMode == "session" {
-		conf.WriteString(fmt.Sprintf("      add_header Set-Cookie \"%s=$relay_target_slot; Path=/; Max-Age=86400; SameSite=Lax\" always;\n", edgeCookieName(app, env, branch)))
+		token, err := s.edgeSessionToken(app, env, branch)
+		if err != nil {
+			return "", err
+		}
+		conf.WriteString(fmt.Sprintf("      proxy_set_header X-Relay-Edge-Token \"%s\";\n", token))
+		conf.WriteString("      proxy_set_header X-Relay-Original-Uri $request_uri;\n")
+		conf.WriteString("      proxy_set_header X-Forwarded-Host $host;\n")
+		conf.WriteString("      proxy_pass " + edgeSessionProxyURL(relayPort, "host.docker.internal", app, env, branch) + ";\n")
+	} else {
+		conf.WriteString("      add_header X-Relay-Target $relay_target_slot always;\n")
+		conf.WriteString(fmt.Sprintf("      add_header X-Relay-Traffic-Mode \"%s\" always;\n", trafficMode))
+		conf.WriteString("      proxy_pass http://$relay_upstream;\n")
 	}
-	conf.WriteString("      proxy_pass http://$relay_upstream;\n")
 	conf.WriteString("    }\n")
 	conf.WriteString("  }\n")
 	conf.WriteString("}\n")
@@ -6888,19 +6951,19 @@ func (s *Server) runSlotContainerWithRuntime(runtime ContainerRuntime, log func(
 	}
 
 	spec := ContainerSpec{
-		Name:          containerName,
-		Image:         image,
-		Network:       networkName,
-		RestartPolicy: "always",
-		Env:           envPairs,
-		ExtraHosts:    s.serviceHostAliasesForRuntime(runtime, app, env, branch),
-		PortBindings:  []string{fmt.Sprintf("127.0.0.1::%d", firstNonZero(servicePort, 3000))},
-		NoNewPrivileges: true,
+		Name:             containerName,
+		Image:            image,
+		Network:          networkName,
+		RestartPolicy:    "always",
+		Env:              envPairs,
+		ExtraHosts:       s.serviceHostAliasesForRuntime(runtime, app, env, branch),
+		PortBindings:     []string{fmt.Sprintf("127.0.0.1::%d", firstNonZero(servicePort, 3000))},
+		NoNewPrivileges:  true,
 		DropCapabilities: []string{"ALL"},
-		ReadOnlyRootFS: getenvBool("RELAY_APP_READ_ONLY_ROOTFS", true),
-		PIDsLimit:      256,
-		User:           strings.TrimSpace(os.Getenv("RELAY_APP_RUN_AS")),
-		Tmpfs:          []string{"/tmp:rw,noexec,nosuid,size=64m", "/run:rw,noexec,nosuid,size=8m"},
+		ReadOnlyRootFS:   getenvBool("RELAY_APP_READ_ONLY_ROOTFS", true),
+		PIDsLimit:        256,
+		User:             strings.TrimSpace(os.Getenv("RELAY_APP_RUN_AS")),
+		Tmpfs:            []string{"/tmp:rw,noexec,nosuid,size=64m", "/run:rw,noexec,nosuid,size=8m"},
 	}
 	if st, err := s.getAppState(app, env, branch); err == nil && st != nil {
 		if st.ResourceMode != "auto" {
@@ -6948,6 +7011,32 @@ func (s *Server) ensureEdgeProxy(log func(string, ...any), app string, env Deplo
 	lock.Lock()
 	defer lock.Unlock()
 	return s.ensureEdgeProxyLocked(log, app, env, branch, networkName, activeSlot, standbySlot, servicePort, hostPort, mode, trafficMode, publicHost, splitPercent, recreate)
+}
+
+// refreshLiveLaneTrafficPolicy updates a running edge proxy without replacing
+// either app slot. That distinction matters for rolling releases: clients must
+// receive their affinity cookie while the old slot is still the live target.
+func (s *Server) refreshLiveLaneTrafficPolicy(st *AppState) error {
+	if st == nil || st.Stopped {
+		return nil
+	}
+	runtime := s.runtimeForEngine(st.Engine)
+	activeSlot := s.currentActiveSlotWithRuntime(runtime, st.App, st.Env, st.Branch, st)
+	if activeSlot == "" {
+		return nil
+	}
+	standbySlot := normalizeActiveSlot(st.StandbySlot)
+	if standbySlot != "" && !runtime.IsRunning(appSlotContainerName(st.App, st.Env, st.Branch, standbySlot)) {
+		standbySlot = ""
+	}
+	servicePort := firstNonZero(st.ServicePort, 3000)
+	hostPort := firstNonZero(st.HostPort, defaultHostPort(st.Env))
+	mode := firstNonEmpty(strings.ToLower(strings.TrimSpace(st.Mode)), "port")
+	trafficMode := firstNonEmpty(normalizeTrafficMode(st.TrafficMode), "edge")
+	if firstNonEmptyEngine(st.Engine) == EngineStation {
+		return s.ensurestationEdgeProxy(nil, st.App, st.Env, st.Branch, activeSlot, standbySlot, servicePort, hostPort, mode, trafficMode, st.PublicHost, false)
+	}
+	return s.ensureEdgeProxy(nil, st.App, st.Env, st.Branch, appNetworkName(st.App, st.Env, st.Branch), activeSlot, standbySlot, servicePort, hostPort, mode, trafficMode, st.PublicHost, st.TrafficSplitPercent, false)
 }
 
 func (s *Server) ensureEdgeProxyLocked(log func(string, ...any), app string, env DeployEnv, branch string, networkName string, activeSlot string, standbySlot string, servicePort int, hostPort int, mode string, trafficMode string, publicHost string, splitPercent int, recreate bool) error {
@@ -7000,11 +7089,11 @@ func (s *Server) ensureEdgeProxyLocked(log func(string, ...any), app string, env
 			// CAP_CHOWN or CAP_SETUID. nginx skips chowning temp dirs when it
 			// detects it is already running as a non-root user, and workers fork
 			// as the same uid without any setresuid() call.
-			User:            "101:101",
-			NoNewPrivileges: true,
+			User:             "101:101",
+			NoNewPrivileges:  true,
 			DropCapabilities: []string{"ALL"},
-			ReadOnlyRootFS: true,
-			PIDsLimit:      128,
+			ReadOnlyRootFS:   true,
+			PIDsLimit:        128,
 			// /tmp is the only writable mount: pid file, all temp/cache paths,
 			// and client body buffers go there via the generated nginx.conf.
 			Tmpfs: []string{
@@ -7168,6 +7257,9 @@ func (s *Server) retireStandbySlot(app string, env DeployEnv, branch string, act
 		if normalizeActiveSlot(st.ActiveSlot) == normalizeActiveSlot(activeSlot) && normalizeActiveSlot(st.StandbySlot) == normalizeActiveSlot(oldSlot) {
 			st.StandbySlot = ""
 			st.DrainUntil = 0
+			if st.TrafficMode == "session" {
+				st.RolloutStatus = "drained"
+			}
 			_ = s.saveAppState(st)
 			s.broadcastSnapshot()
 		}
@@ -7283,6 +7375,16 @@ func rolloutWatchKey(app string, env DeployEnv, branch string) string {
 	return fmt.Sprintf("%s__%s__%s", app, env, branch)
 }
 
+func canaryAssessment(total, errors, minimum int, errorThreshold float64, logErr error) string {
+	if logErr != nil || total < minimum {
+		return "hold"
+	}
+	if total > 0 && float64(errors)*100/float64(total) > errorThreshold {
+		return "rollback"
+	}
+	return "promote"
+}
+
 func (s *Server) startRolloutWatch(app string, env DeployEnv, branch string) {
 	key := rolloutWatchKey(app, env, branch)
 	s.rolloutWatchMu.Lock()
@@ -7307,46 +7409,43 @@ func (s *Server) startRolloutWatch(app string, env DeployEnv, branch string) {
 		wait := time.Duration(normalizeRolloutAssessSeconds(st.RolloutAssessSeconds)) * time.Second
 		time.Sleep(wait)
 
-		st, err = s.getAppState(app, env, branch)
-		if err != nil || st == nil {
-			return
-		}
-		if normalizeActiveSlot(st.StandbySlot) == "" || strings.TrimSpace(st.RolloutStatus) != "monitoring" {
-			return
-		}
+		for {
+			st, err = s.getAppState(app, env, branch)
+			if err != nil || st == nil {
+				return
+			}
+			if normalizeActiveSlot(st.StandbySlot) == "" || strings.TrimSpace(st.RolloutStatus) != "monitoring" {
+				return
+			}
 
-		total, errors, logErr := s.assessRolloutLog(app, env, branch, st.ActiveSlot, st.RolloutStartedAt)
-		// A failed/inconclusive assessment (log stream unreachable, scan
-		// timed out, container not running) must never be treated the same
-		// as "no errors seen" — that would auto-promote a canary relay
-		// never actually verified. Retry once after a short backoff before
-		// giving up, since most causes here (a slow log read, a momentarily
-		// busy proxy) are transient.
-		if logErr != nil {
-			time.Sleep(10 * time.Second)
-			total, errors, logErr = s.assessRolloutLog(app, env, branch, st.ActiveSlot, st.RolloutStartedAt)
+			total, errors, logErr := s.assessRolloutLog(app, env, branch, st.ActiveSlot, st.RolloutStartedAt)
+			// A failed/inconclusive assessment (log stream unreachable, scan
+			// timed out, container not running) must never be treated the same
+			// as "no errors seen" — that would auto-promote a canary relay
+			// never actually verified. Retry once after a short backoff before
+			// giving up, since most causes here (a slow log read, a momentarily
+			// busy proxy) are transient.
+			if logErr != nil {
+				time.Sleep(10 * time.Second)
+				total, errors, logErr = s.assessRolloutLog(app, env, branch, st.ActiveSlot, st.RolloutStartedAt)
+			}
+			errorPercent := 0.0
+			if total > 0 {
+				errorPercent = (float64(errors) / float64(total)) * 100
+			}
+			minRequests := normalizeRolloutMinRequests(st.RolloutMinRequests)
+			switch canaryAssessment(total, errors, minRequests, normalizeRolloutErrorPercent(st.RolloutErrorPercent), logErr) {
+			case "rollback":
+				_ = s.rollbackCanary(app, env, branch, fmt.Sprintf("%.2f%% 5xx over %d requests", errorPercent, total))
+				return
+			case "promote":
+				_ = s.graduateCanary(app, env, branch, total, errorPercent, logErr)
+				return
+			default:
+				s.auditLog("relay-rollout", "rollout.assess_pending", app, fmt.Sprintf("env=%s branch=%s requests=%d minimum=%d err=%v; holding current split", env, branch, total, minRequests, logErr))
+				time.Sleep(wait)
+			}
 		}
-		errorPercent := 0.0
-		if total > 0 {
-			errorPercent = (float64(errors) / float64(total)) * 100
-		}
-		minRequests := normalizeRolloutMinRequests(st.RolloutMinRequests)
-		threshold := normalizeRolloutErrorPercent(st.RolloutErrorPercent)
-
-		if logErr == nil && total >= minRequests && errorPercent > threshold {
-			_ = s.rollbackCanary(app, env, branch, fmt.Sprintf("%.2f%% 5xx over %d requests", errorPercent, total))
-			return
-		}
-		if logErr != nil {
-			// Still couldn't get a trustworthy read after the retry. Hold —
-			// leave RolloutStatus as "monitoring" rather than blindly
-			// graduating an unverified canary. relayd re-arms this watch on
-			// its next restart (resumeRolloutWatches); the split otherwise
-			// stays as-is until then.
-			s.auditLog("relay-rollout", "rollout.assess_failed", app, fmt.Sprintf("env=%s branch=%s requests=%d err=%v — holding at current split, not graduating", env, branch, total, logErr))
-			return
-		}
-		_ = s.graduateCanary(app, env, branch, total, errorPercent, logErr)
 	}()
 }
 
@@ -7709,10 +7808,10 @@ func (s *Server) ensureGlobalProxy() error {
 				fmt.Sprintf("%s:/data", dockerPath(dataPath)),
 				fmt.Sprintf("%s:/logs", dockerPath(s.caddyLogsDir)),
 			},
-			PortBindings: []string{"80:80", "443:443", "443:443/udp"},
-			ExtraHosts:   []string{"host.docker.internal:host-gateway"},
+			PortBindings:    []string{"80:80", "443:443", "443:443/udp"},
+			ExtraHosts:      []string{"host.docker.internal:host-gateway"},
 			NoNewPrivileges: true,
-			PIDsLimit:      256,
+			PIDsLimit:       256,
 		}
 		if cfToken != "" {
 			spec.Env = append(spec.Env, "CLOUDFLARE_API_TOKEN="+cfToken)
@@ -7863,6 +7962,9 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 	// routing map (so nothing new can be sent to it) before removing it,
 	// instead of yanking it out from under active traffic.
 	if s.runtime.IsRunning(candidateName) {
+		if state != nil && state.TrafficMode == "session" && normalizeActiveSlot(state.StandbySlot) == nextSlot {
+			return fmt.Errorf("previous version still serves live sessions; wait for its drain to finish before deploying again")
+		}
 		if log != nil {
 			log("slot %s still draining a previous deploy; finishing that drain before reuse", nextSlot)
 		}
@@ -7872,7 +7974,7 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 	if err := s.runSlotContainer(log, req.App, req.Env, req.Branch, nextSlot, imageTag, servicePort, networkName, extraEnv); err != nil {
 		return err
 	}
-	if err := s.waitForContainerReady(log, candidateName, servicePort, rolloutReadyTimeout()); err != nil {
+	if err := s.waitForRuntimeContainerReadyOnPath(s.runtime, log, candidateName, servicePort, rolloutReadyTimeout(), req.ReadinessPath); err != nil {
 		s.runtime.Remove(candidateName)
 		return err
 	}
@@ -7893,70 +7995,82 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 	if state != nil && normalizeActiveSlot(activeSlot) != "" {
 		splitPercent = state.TrafficSplitPercent
 	}
+	if trafficMode == "session" {
+		splitPercent = 100
+	}
 	// Keep the route reload and its matching state transition atomic with
 	// respect to delayed drain cleanup from earlier deployments.
 	proxyLock := s.edgeProxyLock(req.App, req.Env, req.Branch)
 	proxyLock.Lock()
 	defer proxyLock.Unlock()
-	if err := s.ensureEdgeProxyLocked(log, req.App, req.Env, req.Branch, networkName, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, splitPercent, recreateEdge); err != nil {
-		if log != nil {
-			log("edge proxy failed: %v", err)
-		}
-		s.runtime.Remove(candidateName)
-		return err
+	canary := trafficMode != "session" && splitPercent > 0 && splitPercent < 100
+	drainUntil := time.Now().Add(rolloutDrainDuration()).UnixMilli()
+	if trafficMode == "session" {
+		drainUntil = time.Now().Add(edgeMaxDrain()).UnixMilli()
+	} else if canary {
+		drainUntil = 0
 	}
+	var planned *AppState
+	if state != nil {
+		copyState := *state
+		planned = &copyState
+		planned.ActiveSlot, planned.TrafficMode = nextSlot, trafficMode
+		planned.TrafficSplitPercent, planned.HostPort, planned.ServicePort = splitPercent, hostPort, servicePort
+		if activeSlot != "" && activeSlot != nextSlot {
+			planned.StandbySlot, planned.DrainUntil = activeSlot, drainUntil
+			if trafficMode == "session" {
+				planned.RolloutStartedAt, planned.RolloutDeployID, planned.RolloutStatus = time.Now().UnixMilli(), "", "draining"
+			} else if canary {
+				planned.RolloutStartedAt, planned.RolloutDeployID, planned.RolloutStatus = time.Now().UnixMilli(), "", "monitoring"
+			} else {
+				planned.RolloutStartedAt, planned.RolloutDeployID, planned.RolloutStatus = 0, "", "graduated"
+			}
+		} else {
+			planned.StandbySlot, planned.DrainUntil, planned.RolloutStartedAt, planned.RolloutDeployID, planned.RolloutStatus = "", 0, 0, "", ""
+		}
+	}
+	switchRoute := func() error {
+		return s.ensureEdgeProxyLocked(log, req.App, req.Env, req.Branch, networkName, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, splitPercent, recreateEdge)
+	}
+	var routeErr error
+	if planned != nil {
+		routeErr = s.applyLaneRollout(planned, switchRoute)
+	} else {
+		routeErr = switchRoute()
+	}
+	if routeErr != nil {
+		if log != nil {
+			log("edge proxy or Lane State transition failed: %v", routeErr)
+		}
+		// applyLaneRollout deliberately retains a route-live candidate when a
+		// durable state write needs reconciliation.
+		if !strings.Contains(routeErr.Error(), "pending reconciliation") {
+			s.runtime.Remove(candidateName)
+		}
+		return routeErr
+	}
+	state = planned
 
 	if activeSlot != "" && activeSlot != nextSlot {
-		canary := splitPercent > 0 && splitPercent < 100
-		drainUntil := time.Now().Add(rolloutDrainDuration()).UnixMilli()
-		if canary {
-			drainUntil = 0
-		}
 		oldName := appSlotContainerName(req.App, req.Env, req.Branch, activeSlot)
 		if log != nil {
-			if canary {
+			if trafficMode == "session" {
+				log("new visitors use %s; keeping existing sessions on %s until presence and requests drain", nextSlot, activeSlot)
+			} else if canary {
 				log("routing %d%% of traffic to new slot %s while keeping %s hot", splitPercent, nextSlot, activeSlot)
 			} else {
 				log("draining previous slot %s for %s", oldName, rolloutDrainDuration())
 			}
 		}
-		if state != nil {
-			state.ActiveSlot = nextSlot
-			state.StandbySlot = activeSlot
-			state.DrainUntil = drainUntil
-			state.TrafficMode = trafficMode
-			state.TrafficSplitPercent = splitPercent
-			state.HostPort = hostPort
-			state.ServicePort = servicePort
-			if canary {
-				state.RolloutStartedAt = time.Now().UnixMilli()
-				state.RolloutDeployID = ""
-				state.RolloutStatus = "monitoring"
-			} else {
-				state.RolloutStartedAt = 0
-				state.RolloutDeployID = ""
-				state.RolloutStatus = "graduated"
-			}
-			_ = s.saveAppState(state)
-			s.broadcastSnapshot()
-		}
-		if canary {
+		s.broadcastSnapshot()
+		if trafficMode == "session" {
+			s.startSessionDrain(req.App, req.Env, req.Branch, nextSlot, activeSlot)
+		} else if canary {
 			s.startRolloutWatch(req.App, req.Env, req.Branch)
 		} else {
 			s.cleanupStandbySlotAfter(req.App, req.Env, req.Branch, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, rolloutDrainDuration())
 		}
 	} else if state != nil {
-		state.ActiveSlot = nextSlot
-		state.StandbySlot = ""
-		state.DrainUntil = 0
-		state.TrafficMode = trafficMode
-		state.TrafficSplitPercent = defaultTrafficSplitPercent()
-		state.HostPort = hostPort
-		state.ServicePort = servicePort
-		state.RolloutStartedAt = 0
-		state.RolloutDeployID = ""
-		state.RolloutStatus = ""
-		_ = s.saveAppState(state)
 		s.broadcastSnapshot()
 	}
 	return nil
@@ -8434,9 +8548,9 @@ func loginClientIP(r *http.Request) string {
 }
 
 const (
-	loginRateWindow  = 15 * time.Minute
-	loginMaxPerIP    = 20
-	loginMaxPerUser  = 10
+	loginRateWindow = 15 * time.Minute
+	loginMaxPerIP   = 20
+	loginMaxPerUser = 10
 )
 
 // ensureLoginRateMaps lazily initializes the throttle maps for servers built

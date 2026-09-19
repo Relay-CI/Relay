@@ -22,6 +22,20 @@ var sqliteSchemaMigrations = []schemaMigration{
 	{version: 7, name: "github delivery workflow", up: migrateGitHubWorkflowTables},
 	{version: 8, name: "github app installations", up: migrateGitHubAppTables},
 	{version: 9, name: "session activity tracking", up: migrateSessionSecurityColumns},
+	{version: 10, name: "presence and recoverable lane rollouts", up: migratePresenceAndRolloutIntents},
+}
+
+func migratePresenceAndRolloutIntents(tx *sql.Tx) error {
+	return execSQLiteStatements(tx, []string{
+		`CREATE TABLE IF NOT EXISTS edge_presence (
+			id TEXT PRIMARY KEY, app TEXT NOT NULL, env TEXT NOT NULL, branch TEXT NOT NULL,
+			slot TEXT NOT NULL, last_seen_at INTEGER NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS edge_presence_lane_slot ON edge_presence(app,env,branch,slot,last_seen_at)`,
+		`CREATE TABLE IF NOT EXISTS lane_rollout_intents (
+			app TEXT NOT NULL, env TEXT NOT NULL, branch TEXT NOT NULL,
+			planned_state TEXT NOT NULL, created_at INTEGER NOT NULL,
+			PRIMARY KEY(app,env,branch))`,
+	})
 }
 
 func migrateDB(db *sql.DB) error {
