@@ -754,6 +754,29 @@ func TestRetireStandbySlotIgnoresStaleCleanupAfterNewerSwitch(t *testing.T) {
 	}
 }
 
+func TestRetireStandbySlotClearsOwnershipBeforeCandidateReuse(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	app, env, branch := "demo", EnvPreview, "main"
+	rt := s.runtime.(*mockRuntime)
+	rt.running[appBaseContainerName(app, env, branch)] = true
+	if err := s.saveAppState(&AppState{
+		App: app, Env: env, Branch: branch,
+		ActiveSlot: "blue", StandbySlot: "green", TrafficMode: "edge",
+	}); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+
+	// This is the cleanup performed immediately before a rollback reuses green.
+	// A delayed copy of the old timer must become a no-op afterwards rather
+	// than deleting the freshly-started candidate with the same slot name.
+	s.retireStandbySlot(app, env, branch, "blue", "green", 3000, 0, "port", "edge", "")
+	rt.events = nil
+	s.retireStandbySlot(app, env, branch, "blue", "green", 3000, 0, "port", "edge", "")
+	if len(rt.events) != 0 {
+		t.Fatalf("stale cleanup removed a reused candidate: %v", rt.events)
+	}
+}
+
 func TestWaitForRuntimeContainerReadyFailsFastForExitedContainer(t *testing.T) {
 	s := newPreviewPortTestServer(t)
 	rt := &mockRuntime{

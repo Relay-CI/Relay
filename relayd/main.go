@@ -5921,11 +5921,9 @@ func (s *Server) runDeploy(job DeployJob) {
 			}
 			return engine
 		}())
-		if rollbackEngine == EngineDocker {
-			_ = s.stopStationLane(req.App, req.Env, req.Branch)
-		} else {
-			s.stopDockerAppLane(req.App, req.Env, req.Branch)
-		}
+		// Do not tear down the currently-serving lane before the rollback image
+		// is ready. A rollback is still a blue/green deployment: if its image
+		// cannot start, the version users had must remain available.
 		extraEnv := map[string]string{}
 		s.mergeLaneSecretsIntoEnv(req.App, req.Env, req.Branch, extraEnv, log)
 		var runErr error
@@ -6983,7 +6981,7 @@ func (s *Server) runSlotContainerWithRuntime(runtime ContainerRuntime, log func(
 	t0 := time.Now()
 	err := runtime.RunDetached(spec)
 	if log != nil {
-		log("station run completed in %s", time.Since(t0).Round(time.Millisecond))
+		log("runtime run completed in %s", time.Since(t0).Round(time.Millisecond))
 	}
 	return err
 }
@@ -7943,6 +7941,21 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 	activeSlot := s.currentActiveSlot(req.App, req.Env, req.Branch, state)
 	nextSlot := nextActiveSlot(activeSlot)
 	candidateName := appSlotContainerName(req.App, req.Env, req.Branch, nextSlot)
+	// A completed or interrupted earlier rollout can leave this slot recorded
+	// as standby even after its container stopped. Its delayed drain timer will
+	// otherwise still believe it owns nextSlot and can remove the new rollback
+	// candidate moments after it starts. Retire and clear that old standby
+	// ownership before reusing the slot.
+	if state != nil && normalizeActiveSlot(state.StandbySlot) == nextSlot {
+		if state.TrafficMode == "session" && s.runtime.IsRunning(candidateName) {
+			return fmt.Errorf("previous version still serves live sessions; wait for its drain to finish before deploying again")
+		}
+		if log != nil {
+			log("clearing stale standby slot %s before candidate reuse", nextSlot)
+		}
+		s.retireStandbySlot(req.App, req.Env, req.Branch, activeSlot, nextSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost)
+		state, _ = s.getAppState(req.App, req.Env, req.Branch)
+	}
 
 	// nextSlot is the OTHER of only two slot names (blue/green), reused by
 	// every deploy. If it's still running, it can only be a previous
