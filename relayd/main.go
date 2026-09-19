@@ -2421,19 +2421,11 @@ func main() {
 	go superviseWorker("rollout-intent-reconciler", s.runRolloutIntentReconciler)
 	go runGuarded("warm-images", s.warmBuildpackBaseImages)
 
-	// Start worker pool: deploy jobs are I/O-bound (git, image pull/push,
-	// container ops), so we can run more workers than CPU cores. On very small
-	// hosts, cap the pool so two simultaneous Docker builds don't race for the
-	// same RAM budget and OOM-kill each other.
-	n := runtime.NumCPU()
-	if n < 2 {
-		n = 2
-	}
-	if total := hostTotalMemMB(); total > 0 && total <= 1024 {
-		n = 1 // single build at a time on hosts ≤ 1 GB
-	} else if total > 0 && total <= 2200 && n > 2 {
-		n = 2 // cap at 2 on small hosts so builds don't race for RAM
-	}
+	// Shared hosting must favor traffic over deployment throughput. A worker
+	// can run a Docker build, so use one worker by default through 4 GB of RAM;
+	// this avoids two builds independently starving the reverse proxy or a live
+	// app. Dedicated build capacity can opt in to more concurrency.
+	n := deployWorkerCount(runtime.NumCPU(), hostTotalMemMB(), os.Getenv("RELAY_MAX_CONCURRENT_BUILDS"))
 	s.worker(n)
 
 	mux := http.NewServeMux()
@@ -5929,11 +5921,9 @@ func (s *Server) runDeploy(job DeployJob) {
 			}
 			return engine
 		}())
-		if rollbackEngine == EngineDocker {
-			_ = s.stopStationLane(req.App, req.Env, req.Branch)
-		} else {
-			s.stopDockerAppLane(req.App, req.Env, req.Branch)
-		}
+		// Do not tear down the currently-serving lane before the rollback image
+		// is ready. A rollback is still a blue/green deployment: if its image
+		// cannot start, the version users had must remain available.
 		extraEnv := map[string]string{}
 		s.mergeLaneSecretsIntoEnv(req.App, req.Env, req.Branch, extraEnv, log)
 		var runErr error
@@ -6909,6 +6899,9 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 			return "", err
 		}
 		conf.WriteString(fmt.Sprintf("      proxy_set_header X-Relay-Edge-Token \"%s\";\n", token))
+		conf.WriteString(fmt.Sprintf("      proxy_set_header X-Relay-Lane-App \"%s\";\n", app))
+		conf.WriteString(fmt.Sprintf("      proxy_set_header X-Relay-Lane-Env \"%s\";\n", env))
+		conf.WriteString(fmt.Sprintf("      proxy_set_header X-Relay-Lane-Branch \"%s\";\n", branch))
 		conf.WriteString("      proxy_set_header X-Relay-Original-Uri $request_uri;\n")
 		conf.WriteString("      proxy_set_header X-Forwarded-Host $host;\n")
 		conf.WriteString("      proxy_pass " + edgeSessionProxyURL(relayPort, "host.docker.internal", app, env, branch) + ";\n")
@@ -6963,7 +6956,7 @@ func (s *Server) runSlotContainerWithRuntime(runtime ContainerRuntime, log func(
 		ReadOnlyRootFS:   getenvBool("RELAY_APP_READ_ONLY_ROOTFS", true),
 		PIDsLimit:        256,
 		User:             strings.TrimSpace(os.Getenv("RELAY_APP_RUN_AS")),
-		Tmpfs:            []string{"/tmp:rw,noexec,nosuid,size=64m", "/run:rw,noexec,nosuid,size=8m"},
+		Tmpfs:            []string{"/tmp:rw,noexec,nosuid,size=64m", "/run:rw,noexec,nosuid,size=8m", "/app/node_modules/.vite-temp:rw,noexec,nosuid,size=32m"},
 	}
 	if st, err := s.getAppState(app, env, branch); err == nil && st != nil {
 		if st.ResourceMode != "auto" {
@@ -6991,7 +6984,7 @@ func (s *Server) runSlotContainerWithRuntime(runtime ContainerRuntime, log func(
 	t0 := time.Now()
 	err := runtime.RunDetached(spec)
 	if log != nil {
-		log("station run completed in %s", time.Since(t0).Round(time.Millisecond))
+		log("runtime run completed in %s", time.Since(t0).Round(time.Millisecond))
 	}
 	return err
 }
@@ -7951,6 +7944,21 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 	activeSlot := s.currentActiveSlot(req.App, req.Env, req.Branch, state)
 	nextSlot := nextActiveSlot(activeSlot)
 	candidateName := appSlotContainerName(req.App, req.Env, req.Branch, nextSlot)
+	// A completed or interrupted earlier rollout can leave this slot recorded
+	// as standby even after its container stopped. Its delayed drain timer will
+	// otherwise still believe it owns nextSlot and can remove the new rollback
+	// candidate moments after it starts. Retire and clear that old standby
+	// ownership before reusing the slot.
+	if state != nil && normalizeActiveSlot(state.StandbySlot) == nextSlot {
+		if state.TrafficMode == "session" && s.runtime.IsRunning(candidateName) {
+			return fmt.Errorf("previous version still serves live sessions; wait for its drain to finish before deploying again")
+		}
+		if log != nil {
+			log("clearing stale standby slot %s before candidate reuse", nextSlot)
+		}
+		s.retireStandbySlot(req.App, req.Env, req.Branch, activeSlot, nextSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost)
+		state, _ = s.getAppState(req.App, req.Env, req.Branch)
+	}
 
 	// nextSlot is the OTHER of only two slot names (blue/green), reused by
 	// every deploy. If it's still running, it can only be a previous

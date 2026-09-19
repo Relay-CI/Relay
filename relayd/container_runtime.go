@@ -250,6 +250,18 @@ func (r *DockerRuntime) Build(ctx context.Context, tag, contextDir, dockerfilePa
 		args = append(args, fmt.Sprintf("--memory=%dm", limitMB))
 		args = append(args, "--memory-swap=-1")
 	}
+	// A build runs beside the edge proxy and already-serving containers.  Keep
+	// CPU headroom for them: without a quota, a compiler can occupy every core
+	// long enough for upstream health checks to time out and turn into a 502.
+	// Docker's cpu quota works for both the legacy builder and BuildKit's
+	// Docker driver. RELAY_BUILD_CPU_LIMIT overrides this conservative default.
+	if milli := buildCPUQuotaMilli(); milli > 0 {
+		const period = 100000
+		args = append(args,
+			fmt.Sprintf("--cpu-period=%d", period),
+			fmt.Sprintf("--cpu-quota=%d", milli*period/1000),
+		)
+	}
 	if len(buildArgs) > 0 {
 		keys := make([]string, 0, len(buildArgs))
 		for key := range buildArgs {

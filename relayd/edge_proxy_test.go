@@ -40,7 +40,7 @@ func TestWriteEdgeProxyConfigDelegatesSessionRoutingToPresenceProxy(t *testing.T
 		t.Fatalf("read edge proxy config: %v", err)
 	}
 	text := string(data)
-	if !strings.Contains(text, "/api/edge/session-proxy?") || !strings.Contains(text, "X-Relay-Edge-Token") || !strings.Contains(text, "X-Relay-Original-Uri") {
+	if !strings.Contains(text, "/api/edge/session-proxy") || !strings.Contains(text, "X-Relay-Edge-Token") || !strings.Contains(text, "X-Relay-Original-Uri") || !strings.Contains(text, "X-Relay-Lane-App") || !strings.Contains(text, "X-Relay-Lane-Env") || !strings.Contains(text, "X-Relay-Lane-Branch") {
 		t.Fatalf("expected authenticated session proxy routing, got:\n%s", text)
 	}
 	if strings.Contains(text, "Set-Cookie") {
