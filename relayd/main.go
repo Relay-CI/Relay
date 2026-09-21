@@ -4822,7 +4822,7 @@ func (s *Server) handleAppStart(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		s.mergeLaneSecretsIntoEnv(req.App, req.Env, req.Branch, extraEnv, nil)
-		if err := s.runContainer(nil, st.App, st.Env, st.Branch, st.CurrentImage, st.ServicePort, st.HostPort, st.Mode, st.TrafficMode, networkName, extraEnv); err != nil {
+		if err := s.runContainer(nil, st.App, st.Env, st.Branch, st.CurrentImage, st.ServicePort, st.HostPort, st.Mode, st.TrafficMode, st.PublicHost, networkName, extraEnv); err != nil {
 			httpError(w, 500, err.Error())
 			return
 		}
@@ -4923,7 +4923,7 @@ func (s *Server) handleAppRestart(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		s.mergeLaneSecretsIntoEnv(req.App, req.Env, req.Branch, extraEnv, nil)
-		if err := s.runContainer(nil, st.App, st.Env, st.Branch, st.CurrentImage, st.ServicePort, st.HostPort, st.Mode, st.TrafficMode, networkName, extraEnv); err != nil {
+		if err := s.runContainer(nil, st.App, st.Env, st.Branch, st.CurrentImage, st.ServicePort, st.HostPort, st.Mode, st.TrafficMode, st.PublicHost, networkName, extraEnv); err != nil {
 			httpError(w, 500, err.Error())
 			return
 		}
@@ -8172,7 +8172,7 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 	return nil
 }
 
-func (s *Server) runContainer(log func(string, ...any), app string, env DeployEnv, branch string, image string, servicePort int, hostPort int, mode string, trafficMode string, networkName string, extraEnv map[string]string) error {
+func (s *Server) runContainer(log func(string, ...any), app string, env DeployEnv, branch string, image string, servicePort int, hostPort int, mode string, trafficMode string, publicHost string, networkName string, extraEnv map[string]string) error {
 	return s.swapContainer(log, DeployRequest{
 		App:              app,
 		Branch:           branch,
@@ -8182,6 +8182,7 @@ func (s *Server) runContainer(log func(string, ...any), app string, env DeployEn
 		HostPortExplicit: false,
 		Mode:             mode,
 		TrafficMode:      trafficMode,
+		PublicHost:       publicHost,
 	}, image, networkName, extraEnv)
 }
 
