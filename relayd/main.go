@@ -4993,7 +4993,7 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 		if body.TrafficMode != nil {
 			trafficMode := normalizeTrafficMode(*body.TrafficMode)
 			if trafficMode == "" {
-				httpError(w, 400, "traffic_mode must be edge or session")
+				httpError(w, 400, "traffic_mode must be edge, canary, or session")
 				return
 			}
 			st.TrafficMode = trafficMode
@@ -6551,6 +6551,8 @@ func normalizeTrafficMode(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "session":
 		return "session"
+	case "canary":
+		return "canary"
 	case "edge":
 		return "edge"
 	default:
@@ -8105,6 +8107,7 @@ func runCmdLoggedEnvCtx(ctx context.Context, dir string, logw io.Writer, extraEn
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), extraEnv...)
+	cmd.Stdin = strings.NewReader("") // prevent Go from opening /dev/null for stdin
 	cmd.Stdout = logw
 	cmd.Stderr = logw
 	return cmd.Run()
