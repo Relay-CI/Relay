@@ -1664,7 +1664,7 @@ func (s *Server) runStationApp(log func(string, ...any), req DeployRequest, snap
 	if err := s.runSlotContainerWithRuntime(runtime, log, req.App, req.Env, req.Branch, nextSlot, snapshotName, servicePort, networkName, extraEnv); err != nil {
 		return err
 	}
-	if err := s.waitForRuntimeContainerReady(runtime, log, candidateName, servicePort, rolloutReadyTimeout()); err != nil {
+	if err := s.waitForRuntimeContainerReady(runtime, log, candidateName, servicePort, s.rolloutReadyTimeoutDuration()); err != nil {
 		runtime.Remove(candidateName)
 		return err
 	}
@@ -1681,7 +1681,7 @@ func (s *Server) runStationApp(log func(string, ...any), req DeployRequest, snap
 	if !recreateProxy && edgeProxyPublishedPortChanged(runtime, req.App, req.Env, req.Branch, hostPort, mode, req.PublicHost) {
 		recreateProxy = true
 	}
-	drainUntil := time.Now().Add(rolloutDrainDuration()).UnixMilli()
+	drainUntil := time.Now().Add(s.rolloutDrainDuration()).UnixMilli()
 	if trafficMode == "session" {
 		drainUntil = time.Now().Add(edgeMaxDrain()).UnixMilli()
 	}
@@ -1720,7 +1720,7 @@ func (s *Server) runStationApp(log func(string, ...any), req DeployRequest, snap
 		if trafficMode == "session" {
 			s.startSessionDrain(req.App, req.Env, req.Branch, nextSlot, activeSlot)
 		} else {
-			s.cleanupstationStandbySlotAfter(req.App, req.Env, req.Branch, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, rolloutDrainDuration())
+			s.cleanupstationStandbySlotAfter(req.App, req.Env, req.Branch, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, s.rolloutDrainDuration())
 		}
 	} else if state != nil {
 		s.broadcastSnapshot()

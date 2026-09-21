@@ -383,6 +383,7 @@ type Server struct {
 	edgePresenceReady     bool
 	corsOrigins           map[string]struct{}
 	allowAllCORS          bool
+	corsMu                sync.RWMutex
 	enablePluginMutations bool
 	pluginMutationsMu     sync.RWMutex
 
@@ -1106,34 +1107,52 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		writeJSON(w, 200, map[string]any{
-			"base_domain":                 s.serverBaseDomain(),
-			"dashboard_host":              s.serverDashboardHost(),
-			"acme_disabled":               s.serverConfigGet("acme_disabled"),
-			"custom_host_rules":           s.serverCustomHostRules(),
-			"theme_name":                  s.serverConfigGet("theme_name"),
-			"theme_css":                   s.serverConfigGet("theme_css"),
-			"plugin_mutations_enabled":    s.pluginMutationsEnabled(),
-			"relay_secret_key_configured": s.relaySecretKeyConfigured(),
-			"relay_secret_key_source":     s.relaySecretKeySource(),
-			"doctor":                      s.buildDoctorReport(),
-			"image_retention_per_lane":    s.imageRetentionPerLaneSetting(),
-			"unused_image_max_age_days":   s.unusedImageMaxAgeDaysSetting(),
-			"log_retention_days":          s.logRetentionDaysSetting(),
-			"build_cache_keep_gb":         s.buildCacheKeepGBSetting(),
+			"base_domain":                     s.serverBaseDomain(),
+			"dashboard_host":                  s.serverDashboardHost(),
+			"acme_disabled":                   s.serverConfigGet("acme_disabled"),
+			"custom_host_rules":               s.serverCustomHostRules(),
+			"theme_name":                      s.serverConfigGet("theme_name"),
+			"theme_css":                       s.serverConfigGet("theme_css"),
+			"plugin_mutations_enabled":        s.pluginMutationsEnabled(),
+			"relay_secret_key_configured":     s.relaySecretKeyConfigured(),
+			"relay_secret_key_source":         s.relaySecretKeySource(),
+			"doctor":                          s.buildDoctorReport(),
+			"image_retention_per_lane":        s.imageRetentionPerLaneSetting(),
+			"unused_image_max_age_days":       s.unusedImageMaxAgeDaysSetting(),
+			"log_retention_days":              s.logRetentionDaysSetting(),
+			"build_cache_keep_gb":             s.buildCacheKeepGBSetting(),
+			"app_read_only_rootfs":            s.appReadOnlyRootFS(),
+			"app_run_as":                      s.appRunAs(),
+			"cors_origins":                    s.corsOriginsRaw(),
+			"rollout_ready_timeout_seconds":   s.rolloutReadyTimeoutSecs(),
+			"rollout_drain_seconds":           s.rolloutDrainSecs(),
+			"max_upload_bytes":                s.maxUploadBytes(),
+			"acme_email":                      s.acmeEmailSetting(),
+			"cloudflare_api_token_configured": s.cloudflareAPITokenSetting() != "",
+			"max_concurrent_builds":           s.maxConcurrentBuildsRaw(),
 		})
 	case http.MethodPost:
 		var body struct {
-			BaseDomain            *string           `json:"base_domain"`
-			DashboardHost         *string           `json:"dashboard_host"`
-			ACMEDisabled          *string           `json:"acme_disabled"`
-			CustomHostRules       *[]customHostRule `json:"custom_host_rules"`
-			ThemeName             *string           `json:"theme_name"`
-			ThemeCSS              *string           `json:"theme_css"`
-			RelaySecretKey        *string           `json:"relay_secret_key"`
-			ImageRetentionPerLane *int              `json:"image_retention_per_lane"`
-			UnusedImageMaxAgeDays *int              `json:"unused_image_max_age_days"`
-			LogRetentionDays      *int              `json:"log_retention_days"`
-			BuildCacheKeepGB      *int              `json:"build_cache_keep_gb"`
+			BaseDomain                 *string           `json:"base_domain"`
+			DashboardHost              *string           `json:"dashboard_host"`
+			ACMEDisabled               *string           `json:"acme_disabled"`
+			CustomHostRules            *[]customHostRule `json:"custom_host_rules"`
+			ThemeName                  *string           `json:"theme_name"`
+			ThemeCSS                   *string           `json:"theme_css"`
+			RelaySecretKey             *string           `json:"relay_secret_key"`
+			ImageRetentionPerLane      *int              `json:"image_retention_per_lane"`
+			UnusedImageMaxAgeDays      *int              `json:"unused_image_max_age_days"`
+			LogRetentionDays           *int              `json:"log_retention_days"`
+			BuildCacheKeepGB           *int              `json:"build_cache_keep_gb"`
+			AppReadOnlyRootFS          *bool             `json:"app_read_only_rootfs"`
+			AppRunAs                   *string           `json:"app_run_as"`
+			CORSOrigins                *string           `json:"cors_origins"`
+			RolloutReadyTimeoutSeconds *int              `json:"rollout_ready_timeout_seconds"`
+			RolloutDrainSeconds        *int              `json:"rollout_drain_seconds"`
+			MaxUploadBytes             *int64            `json:"max_upload_bytes"`
+			ACMEEmail                  *string           `json:"acme_email"`
+			CloudflareAPIToken         *string           `json:"cloudflare_api_token"`
+			MaxConcurrentBuilds        *string           `json:"max_concurrent_builds"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httpError(w, 400, "invalid JSON")
@@ -1241,6 +1260,53 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 			}
 			updates["build_cache_keep_gb"] = strconv.Itoa(*body.BuildCacheKeepGB)
 		}
+		if body.AppReadOnlyRootFS != nil {
+			if *body.AppReadOnlyRootFS {
+				updates["app_read_only_rootfs"] = "true"
+			} else {
+				updates["app_read_only_rootfs"] = "false"
+			}
+		}
+		if body.AppRunAs != nil {
+			updates["app_run_as"] = strings.TrimSpace(*body.AppRunAs)
+		}
+		corsChanged := false
+		if body.CORSOrigins != nil {
+			updates["cors_origins"] = strings.TrimSpace(*body.CORSOrigins)
+			corsChanged = true
+		}
+		if body.RolloutReadyTimeoutSeconds != nil {
+			if *body.RolloutReadyTimeoutSeconds < 0 {
+				httpError(w, 400, "rollout_ready_timeout_seconds must be >= 0")
+				return
+			}
+			updates["rollout_ready_timeout_seconds"] = strconv.Itoa(*body.RolloutReadyTimeoutSeconds)
+		}
+		if body.RolloutDrainSeconds != nil {
+			if *body.RolloutDrainSeconds < 0 {
+				httpError(w, 400, "rollout_drain_seconds must be >= 0")
+				return
+			}
+			updates["rollout_drain_seconds"] = strconv.Itoa(*body.RolloutDrainSeconds)
+		}
+		if body.MaxUploadBytes != nil {
+			if *body.MaxUploadBytes < 0 {
+				httpError(w, 400, "max_upload_bytes must be >= 0")
+				return
+			}
+			updates["max_upload_bytes"] = strconv.FormatInt(*body.MaxUploadBytes, 10)
+		}
+		if body.ACMEEmail != nil {
+			updates["acme_email"] = strings.TrimSpace(*body.ACMEEmail)
+			proxyChanged = true
+		}
+		if body.CloudflareAPIToken != nil {
+			updates["cloudflare_api_token"] = strings.TrimSpace(*body.CloudflareAPIToken)
+			proxyChanged = true
+		}
+		if body.MaxConcurrentBuilds != nil {
+			updates["max_concurrent_builds"] = strings.TrimSpace(*body.MaxConcurrentBuilds)
+		}
 		previous := map[string]string{
 			"base_domain":       s.serverConfigGet("base_domain"),
 			"dashboard_host":    s.serverConfigGet("dashboard_host"),
@@ -1270,6 +1336,9 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 		if newRelaySecretKey != "" && strings.TrimSpace(os.Getenv("RELAY_SECRET_KEY")) == "" {
 			s.setRelaySecretKey(newRelaySecretKey, "dashboard")
 		}
+		if corsChanged {
+			s.setCORSOrigins(parseAllowedOrigins(s.corsOriginsRaw()))
+		}
 		if proxyChanged {
 			s.startACMEListener()
 			if err := s.ensureGlobalProxy(); err != nil {
@@ -1279,20 +1348,29 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		writeJSON(w, 200, map[string]any{
-			"base_domain":                 s.serverConfigGet("base_domain"),
-			"dashboard_host":              s.serverConfigGet("dashboard_host"),
-			"acme_disabled":               s.serverConfigGet("acme_disabled"),
-			"custom_host_rules":           s.serverCustomHostRules(),
-			"theme_name":                  s.serverConfigGet("theme_name"),
-			"theme_css":                   s.serverConfigGet("theme_css"),
-			"plugin_mutations_enabled":    s.pluginMutationsEnabled(),
-			"relay_secret_key_configured": s.relaySecretKeyConfigured(),
-			"relay_secret_key_source":     s.relaySecretKeySource(),
-			"doctor":                      s.buildDoctorReport(),
-			"image_retention_per_lane":    s.imageRetentionPerLaneSetting(),
-			"unused_image_max_age_days":   s.unusedImageMaxAgeDaysSetting(),
-			"log_retention_days":          s.logRetentionDaysSetting(),
-			"build_cache_keep_gb":         s.buildCacheKeepGBSetting(),
+			"base_domain":                     s.serverConfigGet("base_domain"),
+			"dashboard_host":                  s.serverConfigGet("dashboard_host"),
+			"acme_disabled":                   s.serverConfigGet("acme_disabled"),
+			"custom_host_rules":               s.serverCustomHostRules(),
+			"theme_name":                      s.serverConfigGet("theme_name"),
+			"theme_css":                       s.serverConfigGet("theme_css"),
+			"plugin_mutations_enabled":        s.pluginMutationsEnabled(),
+			"relay_secret_key_configured":     s.relaySecretKeyConfigured(),
+			"relay_secret_key_source":         s.relaySecretKeySource(),
+			"doctor":                          s.buildDoctorReport(),
+			"image_retention_per_lane":        s.imageRetentionPerLaneSetting(),
+			"unused_image_max_age_days":       s.unusedImageMaxAgeDaysSetting(),
+			"log_retention_days":              s.logRetentionDaysSetting(),
+			"build_cache_keep_gb":             s.buildCacheKeepGBSetting(),
+			"app_read_only_rootfs":            s.appReadOnlyRootFS(),
+			"app_run_as":                      s.appRunAs(),
+			"cors_origins":                    s.corsOriginsRaw(),
+			"rollout_ready_timeout_seconds":   s.rolloutReadyTimeoutSecs(),
+			"rollout_drain_seconds":           s.rolloutDrainSecs(),
+			"max_upload_bytes":                s.maxUploadBytes(),
+			"acme_email":                      s.acmeEmailSetting(),
+			"cloudflare_api_token_configured": s.cloudflareAPITokenSetting() != "",
+			"max_concurrent_builds":           s.maxConcurrentBuildsRaw(),
 		})
 	default:
 		httpError(w, 405, "method not allowed")
@@ -2391,7 +2469,7 @@ func main() {
 		runtime:               &DockerRuntime{},
 		stationRuntime:        newStationRuntime(dataDir),
 	}
-	s.corsOrigins, s.allowAllCORS = parseAllowedOrigins(os.Getenv("RELAY_CORS_ORIGINS"))
+	s.setCORSOrigins(parseAllowedOrigins(s.corsOriginsRaw()))
 	if err := s.initCloud(runCfg); err != nil {
 		panic(err)
 	}
@@ -3719,12 +3797,7 @@ func (s *Server) handleSyncStart(w http.ResponseWriter, r *http.Request) {
 	mustMkdir(repoDir)
 	mustMkdir(stagingDir)
 
-	maxBytes := int64(524288000)
-	if v := os.Getenv("RELAY_MAX_UPLOAD_BYTES"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-			maxBytes = n
-		}
-	}
+	maxBytes := s.maxUploadBytes()
 
 	sess := &SyncSession{
 		ID:            sessionID,
@@ -6571,21 +6644,6 @@ func dockerPath(p string) string {
 	return filepath.ToSlash(filepath.Clean(p))
 }
 
-func rolloutReadyTimeout() time.Duration {
-	secs, err := strconv.Atoi(strings.TrimSpace(os.Getenv("RELAY_ROLLOUT_READY_TIMEOUT_SECONDS")))
-	if err != nil || secs <= 0 {
-		secs = 60
-	}
-	return time.Duration(secs) * time.Second
-}
-
-func rolloutDrainDuration() time.Duration {
-	secs, err := strconv.Atoi(strings.TrimSpace(os.Getenv("RELAY_ROLLOUT_DRAIN_SECONDS")))
-	if err != nil || secs < 0 {
-		secs = 30
-	}
-	return time.Duration(secs) * time.Second
-}
 
 func logRuntimeContainerDiagnostics(runtime ContainerRuntime, log func(string, ...any), name string) {
 	if log == nil {
@@ -6955,9 +7013,9 @@ func (s *Server) runSlotContainerWithRuntime(runtime ContainerRuntime, log func(
 		PortBindings:     []string{fmt.Sprintf("127.0.0.1::%d", firstNonZero(servicePort, 3000))},
 		NoNewPrivileges:  true,
 		DropCapabilities: []string{"ALL"},
-		ReadOnlyRootFS:   getenvBool("RELAY_APP_READ_ONLY_ROOTFS", true),
+		ReadOnlyRootFS:   s.appReadOnlyRootFS(),
 		PIDsLimit:        256,
-		User:             strings.TrimSpace(os.Getenv("RELAY_APP_RUN_AS")),
+		User:             s.appRunAs(),
 		Tmpfs:            []string{"/tmp:rw,noexec,nosuid,size=64m", "/run:rw,noexec,nosuid,size=8m", "/app/node_modules/.vite-temp:rw,noexec,nosuid,size=32m"},
 	}
 	if st, err := s.getAppState(app, env, branch); err == nil && st != nil {
@@ -7461,7 +7519,7 @@ func (s *Server) graduateCanary(app string, env DeployEnv, branch string, total 
 	if deployID := strings.TrimSpace(st.RolloutDeployID); deployID != "" {
 		s.emitGitHubDeployStatusAsync(deployID)
 	}
-	s.cleanupStandbySlotAfter(app, env, branch, st.ActiveSlot, st.StandbySlot, st.ServicePort, st.HostPort, st.Mode, st.TrafficMode, st.PublicHost, rolloutDrainDuration())
+	s.cleanupStandbySlotAfter(app, env, branch, st.ActiveSlot, st.StandbySlot, st.ServicePort, st.HostPort, st.Mode, st.TrafficMode, st.PublicHost, s.rolloutDrainDuration())
 	return nil
 }
 
@@ -7729,7 +7787,7 @@ func (s *Server) ensureGlobalProxy() error {
 	// Always emit a global options block so we can configure access logging
 	// (and optionally the ACME email for Let's Encrypt account registration).
 	cf.WriteString("{\n")
-	if email := strings.TrimSpace(os.Getenv("RELAY_ACME_EMAIL")); email != "" {
+	if email := s.acmeEmailSetting(); email != "" {
 		cf.WriteString(fmt.Sprintf("\temail %s\n", email))
 	}
 	cf.WriteString("\tlog {\n")
@@ -7746,7 +7804,7 @@ func (s *Server) ensureGlobalProxy() error {
 	// record instead and works regardless of what's in front of the origin.
 	// Requires a Caddy image built with the cloudflare-dns plugin, set via
 	// RELAY_CADDY_IMAGE (see docker/caddy/Dockerfile).
-	cfToken := strings.TrimSpace(os.Getenv("CLOUDFLARE_API_TOKEN"))
+	cfToken := s.cloudflareAPITokenSetting()
 	for _, r := range routes {
 		cf.WriteString(strings.TrimSpace(r.host) + " {\n")
 		if cfToken != "" {
@@ -7984,7 +8042,7 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 	if err := s.runSlotContainer(log, req.App, req.Env, req.Branch, nextSlot, imageTag, servicePort, networkName, extraEnv); err != nil {
 		return err
 	}
-	if err := s.waitForRuntimeContainerReadyOnPath(s.runtime, log, candidateName, servicePort, rolloutReadyTimeout(), req.ReadinessPath); err != nil {
+	if err := s.waitForRuntimeContainerReadyOnPath(s.runtime, log, candidateName, servicePort, s.rolloutReadyTimeoutDuration(), req.ReadinessPath); err != nil {
 		s.runtime.Remove(candidateName)
 		return err
 	}
@@ -8014,7 +8072,7 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 	proxyLock.Lock()
 	defer proxyLock.Unlock()
 	canary := trafficMode != "session" && splitPercent > 0 && splitPercent < 100
-	drainUntil := time.Now().Add(rolloutDrainDuration()).UnixMilli()
+	drainUntil := time.Now().Add(s.rolloutDrainDuration()).UnixMilli()
 	if trafficMode == "session" {
 		drainUntil = time.Now().Add(edgeMaxDrain()).UnixMilli()
 	} else if canary {
@@ -8069,7 +8127,7 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 			} else if canary {
 				log("routing %d%% of traffic to new slot %s while keeping %s hot", splitPercent, nextSlot, activeSlot)
 			} else {
-				log("draining previous slot %s for %s", oldName, rolloutDrainDuration())
+				log("draining previous slot %s for %s", oldName, s.rolloutDrainDuration())
 			}
 		}
 		s.broadcastSnapshot()
@@ -8078,7 +8136,7 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 		} else if canary {
 			s.startRolloutWatch(req.App, req.Env, req.Branch)
 		} else {
-			s.cleanupStandbySlotAfter(req.App, req.Env, req.Branch, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, rolloutDrainDuration())
+			s.cleanupStandbySlotAfter(req.App, req.Env, req.Branch, nextSlot, activeSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost, s.rolloutDrainDuration())
 		}
 	} else if state != nil {
 		s.broadcastSnapshot()
@@ -8294,7 +8352,11 @@ func (s *Server) isOriginAllowed(r *http.Request) bool {
 	if origin == "" {
 		return true
 	}
-	if s.allowAllCORS {
+	s.corsMu.RLock()
+	allowAll := s.allowAllCORS
+	origins := s.corsOrigins
+	s.corsMu.RUnlock()
+	if allowAll {
 		return true
 	}
 	u, err := url.Parse(origin)
@@ -8302,7 +8364,7 @@ func (s *Server) isOriginAllowed(r *http.Request) bool {
 		return false
 	}
 	normalized := strings.ToLower(u.Scheme + "://" + u.Host)
-	if _, ok := s.corsOrigins[normalized]; ok {
+	if _, ok := origins[normalized]; ok {
 		return true
 	}
 	return isSameOriginRequest(r)
@@ -9153,8 +9215,11 @@ func (s *Server) withCORS(next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		setControlSecurityHeaders(w, r)
 		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		s.corsMu.RLock()
+		allowAll := s.allowAllCORS
+		s.corsMu.RUnlock()
 		if origin != "" && s.isOriginAllowed(r) {
-			if s.allowAllCORS {
+			if allowAll {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 			} else {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
