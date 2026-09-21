@@ -195,6 +195,17 @@ func (s *Server) handleEdgeSessionProxy(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "unauthorized edge", http.StatusUnauthorized)
 		return
 	}
+	// Parse the original URI before the session-mode check so that browsers
+	// with HTML cached from a prior session deployment don't get 404 for
+	// /__relay/presence.js after the app is switched to a non-session mode.
+	original := r.Header.Get("X-Relay-Original-Uri")
+	uri, uriErr := url.ParseRequestURI(original)
+	if uriErr == nil && strings.HasPrefix(uri.Path, "/") && uri.Path == edgePresenceScriptPath && r.Method == http.MethodGet {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = io.WriteString(w, edgePresenceScript)
+		return
+	}
 	if err := s.ensureEdgePresenceSchema(); err != nil {
 		http.Error(w, "presence unavailable", http.StatusServiceUnavailable)
 		return
@@ -212,16 +223,8 @@ func (s *Server) handleEdgeSessionProxy(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "session route unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	original := r.Header.Get("X-Relay-Original-Uri")
-	uri, err := url.ParseRequestURI(original)
-	if err != nil || !strings.HasPrefix(uri.Path, "/") {
+	if uriErr != nil || !strings.HasPrefix(uri.Path, "/") {
 		http.Error(w, "invalid request URI", http.StatusBadRequest)
-		return
-	}
-	if uri.Path == edgePresenceScriptPath && r.Method == http.MethodGet {
-		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		_, _ = io.WriteString(w, edgePresenceScript)
 		return
 	}
 	now := time.Now()

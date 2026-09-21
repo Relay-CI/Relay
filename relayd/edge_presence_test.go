@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -111,6 +112,38 @@ func TestEdgeSessionProxyRequiresLaneToken(t *testing.T) {
 	s.handleEdgeSessionProxy(w, req)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("unsigned route returned %d", w.Code)
+	}
+}
+
+func TestEdgePresenceScriptServedRegardlessOfTrafficMode(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	// No app state saved — the handler would normally return 503 for session routes.
+	// The presence.js script should still be served because it is mode-independent:
+	// browsers may have cached HTML with the injected tag from a prior session deploy.
+	w := testEdgeProxyRequest(t, s, nil, edgePresenceScriptPath, http.MethodGet, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for presence.js with no session state, got %d: %s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/javascript") {
+		t.Fatalf("expected application/javascript content-type, got %q", ct)
+	}
+}
+
+func TestEdgeSessionPresenceScriptLocationInAllNginxModes(t *testing.T) {
+	for _, mode := range []string{"edge", "session", "canary"} {
+		s := &Server{dataDir: t.TempDir(), httpAddr: ":8080"}
+		configPath, err := s.writeEdgeProxyConfig("demo", EnvPreview, "main", "blue", "", 3000, mode, 100)
+		if err != nil {
+			t.Fatalf("mode=%s: write edge proxy config: %v", mode, err)
+		}
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("mode=%s: read config: %v", mode, err)
+		}
+		text := string(data)
+		if !strings.Contains(text, "location = /__relay/presence.js") {
+			t.Fatalf("mode=%s: expected presence.js location block in all traffic modes, got:\n%s", mode, text)
+		}
 	}
 }
 

@@ -1044,7 +1044,11 @@ func writeStaticDockerArtifacts(repoDir string, dockerfile string, includeWasmMi
 	conf.WriteString("  root /usr/share/nginx/html;\n")
 	conf.WriteString("  index index.html;\n")
 	if includeWasmMime {
+		// A bare types{} block in a server context overrides the http-level
+		// mime.types entirely, breaking CSS/JS serving. Include the standard
+		// types first so only the wasm extension is added on top.
 		conf.WriteString("  types {\n")
+		conf.WriteString("    include /etc/nginx/mime.types;\n")
 		conf.WriteString("    application/wasm wasm;\n")
 		conf.WriteString("  }\n")
 	}

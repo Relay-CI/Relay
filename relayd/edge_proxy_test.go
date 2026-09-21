@@ -77,6 +77,26 @@ func TestWriteEdgeProxyConfigPreservesIncomingForwardedProto(t *testing.T) {
 	}
 }
 
+func TestWriteEdgeProxyConfigUsesWeightedSplitForNonSessionCanary(t *testing.T) {
+	s := &Server{dataDir: t.TempDir(), httpAddr: ":8080"}
+	// 20% to new slot (green = active), 80% to old (blue = standby).
+	configPath, err := s.writeEdgeProxyConfig("demo", EnvPreview, "main", "green", "blue", 3000, "canary", 20)
+	if err != nil {
+		t.Fatalf("write edge proxy config: %v", err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "split_clients") {
+		t.Fatalf("expected split_clients block for canary with standby, got:\n%s", text)
+	}
+	if !strings.Contains(text, "default $relay_weighted_slot") {
+		t.Fatalf("expected relay_target_slot to default to $relay_weighted_slot for canary, got:\n%s", text)
+	}
+}
+
 func TestValidateEdgeProxyLogPathsRejectsUnboundFileLogs(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "nginx.conf")
 	cfg := `

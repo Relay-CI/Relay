@@ -6836,6 +6836,8 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 	conf.WriteString("  fastcgi_temp_path     /tmp/fastcgi_temp;\n")
 	conf.WriteString("  uwsgi_temp_path       /tmp/uwsgi_temp;\n")
 	conf.WriteString("  scgi_temp_path        /tmp/scgi_temp;\n")
+	conf.WriteString("  include /etc/nginx/mime.types;\n")
+	conf.WriteString("  default_type application/octet-stream;\n")
 	conf.WriteString("  map $http_upgrade $connection_upgrade {\n")
 	conf.WriteString("    default upgrade;\n")
 	conf.WriteString("    '' close;\n")
@@ -6894,7 +6896,11 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 		conf.WriteString("  }\n")
 	} else {
 		conf.WriteString("  map $relay_slot_override $relay_target_slot {\n")
-		conf.WriteString(fmt.Sprintf("    default %s;\n", activeSlot))
+		if standbyMode != "" && splitPercent < 100 {
+			conf.WriteString("    default $relay_weighted_slot;\n")
+		} else {
+			conf.WriteString(fmt.Sprintf("    default %s;\n", activeSlot))
+		}
 		conf.WriteString(fmt.Sprintf("    ~^%s$ %s;\n", activeSlot, activeSlot))
 		if standbyMode != "" {
 			conf.WriteString(fmt.Sprintf("    ~^%s$ %s;\n", standbyMode, standbyMode))
@@ -6937,6 +6943,32 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 		conf.WriteString("      return 403 'request blocked';\n")
 		conf.WriteString("    }\n")
 	}
+	// Generate token once; used by both the presence.js location and session mode.
+	var edgeToken string
+	if relayPort > 0 {
+		var tokenErr error
+		edgeToken, tokenErr = s.edgeSessionToken(app, env, branch)
+		if tokenErr != nil {
+			return "", tokenErr
+		}
+		// Browsers with cached HTML from a prior session deployment will request
+		// /__relay/presence.js even after the app is switched to a non-session
+		// traffic mode. Route it directly to relayd in all modes so it never
+		// falls through to the app container (which always returns 404 for it).
+		conf.WriteString("    location = /__relay/presence.js {\n")
+		conf.WriteString("      access_log off;\n")
+		conf.WriteString("      proxy_http_version 1.1;\n")
+		conf.WriteString("      proxy_set_header Host $host;\n")
+		conf.WriteString("      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n")
+		conf.WriteString("      proxy_set_header X-Forwarded-Proto $relay_xfp;\n")
+		conf.WriteString(fmt.Sprintf("      proxy_set_header X-Relay-Edge-Token \"%s\";\n", edgeToken))
+		conf.WriteString(fmt.Sprintf("      proxy_set_header X-Relay-Lane-App \"%s\";\n", app))
+		conf.WriteString(fmt.Sprintf("      proxy_set_header X-Relay-Lane-Env \"%s\";\n", env))
+		conf.WriteString(fmt.Sprintf("      proxy_set_header X-Relay-Lane-Branch \"%s\";\n", branch))
+		conf.WriteString("      proxy_set_header X-Relay-Original-Uri /__relay/presence.js;\n")
+		conf.WriteString("      proxy_pass " + edgeSessionProxyURL(relayPort, "host.docker.internal", app, env, branch) + ";\n")
+		conf.WriteString("    }\n")
+	}
 	conf.WriteString("    location / {\n")
 	if authURL != "" {
 		conf.WriteString("      auth_request /__relay/authz;\n")
@@ -6954,11 +6986,7 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 	conf.WriteString("      proxy_send_timeout 300s;\n")
 	conf.WriteString("      proxy_connect_timeout 5s;\n")
 	if trafficMode == "session" {
-		token, err := s.edgeSessionToken(app, env, branch)
-		if err != nil {
-			return "", err
-		}
-		conf.WriteString(fmt.Sprintf("      proxy_set_header X-Relay-Edge-Token \"%s\";\n", token))
+		conf.WriteString(fmt.Sprintf("      proxy_set_header X-Relay-Edge-Token \"%s\";\n", edgeToken))
 		conf.WriteString(fmt.Sprintf("      proxy_set_header X-Relay-Lane-App \"%s\";\n", app))
 		conf.WriteString(fmt.Sprintf("      proxy_set_header X-Relay-Lane-Env \"%s\";\n", env))
 		conf.WriteString(fmt.Sprintf("      proxy_set_header X-Relay-Lane-Branch \"%s\";\n", branch))
