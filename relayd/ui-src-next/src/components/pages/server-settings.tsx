@@ -18,7 +18,7 @@ interface ServerSettingsPageProps {
   currentUser: CurrentUser;
 }
 
-type ServerTab = "routing" | "rules" | "security" | "cleanup";
+type ServerTab = "routing" | "rules" | "security" | "cleanup" | "runtime";
 
 type RuleDraft = CustomHostRule & { id: string };
 
@@ -34,6 +34,16 @@ type DraftState = {
   unusedImageMaxAgeDays: number;
   logRetentionDays: number;
   buildCacheKeepGB: number;
+  appReadOnlyRootfs: boolean;
+  appRunAs: string;
+  corsOrigins: string;
+  rolloutReadyTimeoutSecs: number;
+  rolloutDrainSecs: number;
+  maxUploadBytes: number;
+  acmeEmail: string;
+  cloudflareApiTokenConfigured: boolean;
+  cloudflareApiToken: string;
+  maxConcurrentBuilds: string;
 };
 
 const SERVER_TABS: Array<{ id: ServerTab; label: string }> = [
@@ -41,6 +51,7 @@ const SERVER_TABS: Array<{ id: ServerTab; label: string }> = [
   { id: "rules", label: "Custom Rules" },
   { id: "security", label: "Security" },
   { id: "cleanup", label: "Cleanup" },
+  { id: "runtime", label: "Runtime" },
 ];
 
 // Mirrors relayd's housekeeping.go defaults so the form shows a sensible
@@ -128,6 +139,16 @@ function toDraftState(data?: ServerConfig | null): DraftState {
       data?.unused_image_max_age_days ?? CLEANUP_DEFAULTS.unusedImageMaxAgeDays,
     logRetentionDays: data?.log_retention_days ?? CLEANUP_DEFAULTS.logRetentionDays,
     buildCacheKeepGB: data?.build_cache_keep_gb ?? CLEANUP_DEFAULTS.buildCacheKeepGB,
+    appReadOnlyRootfs: data?.app_read_only_rootfs ?? false,
+    appRunAs: data?.app_run_as ?? "",
+    corsOrigins: data?.cors_origins ?? "",
+    rolloutReadyTimeoutSecs: data?.rollout_ready_timeout_seconds ?? 60,
+    rolloutDrainSecs: data?.rollout_drain_seconds ?? 30,
+    maxUploadBytes: data?.max_upload_bytes ?? 524288000,
+    acmeEmail: data?.acme_email ?? "",
+    cloudflareApiTokenConfigured: data?.cloudflare_api_token_configured ?? false,
+    cloudflareApiToken: "",
+    maxConcurrentBuilds: data?.max_concurrent_builds ?? "",
   };
 }
 
@@ -146,6 +167,15 @@ function serializeDraft(draft: DraftState): string {
     unusedImageMaxAgeDays: draft.unusedImageMaxAgeDays,
     logRetentionDays: draft.logRetentionDays,
     buildCacheKeepGB: draft.buildCacheKeepGB,
+    appReadOnlyRootfs: draft.appReadOnlyRootfs,
+    appRunAs: draft.appRunAs.trim(),
+    corsOrigins: draft.corsOrigins.trim(),
+    rolloutReadyTimeoutSecs: draft.rolloutReadyTimeoutSecs,
+    rolloutDrainSecs: draft.rolloutDrainSecs,
+    maxUploadBytes: draft.maxUploadBytes,
+    acmeEmail: draft.acmeEmail.trim(),
+    cloudflareApiToken: draft.cloudflareApiToken.trim(),
+    maxConcurrentBuilds: draft.maxConcurrentBuilds.trim(),
   });
 }
 
@@ -228,6 +258,19 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
       if (activeTab === "security" && draft.relaySecretKey.trim()) {
         payload.relay_secret_key = draft.relaySecretKey.trim();
       }
+      if (activeTab === "runtime") {
+        payload.app_read_only_rootfs = draft.appReadOnlyRootfs;
+        payload.app_run_as = draft.appRunAs.trim();
+        payload.cors_origins = draft.corsOrigins.trim();
+        payload.rollout_ready_timeout_seconds = draft.rolloutReadyTimeoutSecs;
+        payload.rollout_drain_seconds = draft.rolloutDrainSecs;
+        payload.max_upload_bytes = draft.maxUploadBytes;
+        payload.acme_email = draft.acmeEmail.trim();
+        payload.max_concurrent_builds = draft.maxConcurrentBuilds.trim();
+        if (draft.cloudflareApiToken.trim()) {
+          payload.cloudflare_api_token = draft.cloudflareApiToken.trim();
+        }
+      }
       const saved = await saveServerConfig(payload);
       const nextDraft = toDraftState(saved);
       setDoctor((saved?.doctor as DoctorReport | undefined) ?? null);
@@ -242,6 +285,8 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
               ? "Saved. Secret encryption is active for future credentials and app secrets."
             : activeTab === "cleanup"
               ? "Saved. New cleanup limits take effect on the next housekeeping pass."
+            : activeTab === "runtime"
+              ? "Saved. Runtime settings apply to new deploys and requests immediately."
               : "Saved. Global routing settings and managed domains were refreshed.",
       });
     } catch (err) {
@@ -1010,6 +1055,261 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {activeTab === "runtime" && (
+        <div className="space-y-4">
+          <div className="bg-white/[0.02] border border-white/[0.06] rounded-xl p-5 space-y-4">
+            <div>
+              <div className="eyebrow mb-0.5">Container security</div>
+              <h2 className="text-base font-semibold text-white">App runtime</h2>
+              <p className="text-xs text-white/40 mt-1">
+                These settings apply to new deploys. Running containers are not
+                affected until they are next restarted or redeployed.
+              </p>
+            </div>
+
+            <label className="flex items-center gap-3 cursor-pointer select-none">
+              <div className="relative">
+                <input
+                  type="checkbox"
+                  className="sr-only peer"
+                  checked={draft.appReadOnlyRootfs}
+                  onChange={(e) =>
+                    setDraft((current) => ({
+                      ...current,
+                      appReadOnlyRootfs: e.target.checked,
+                    }))
+                  }
+                />
+                <div className="w-9 h-5 rounded-full border border-white/20 bg-white/[0.06] peer-checked:bg-relay-accent/80 peer-checked:border-relay-accent/60 transition-colors" />
+                <div className="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white/50 peer-checked:translate-x-4 transition-transform" />
+              </div>
+              <div>
+                <div className="text-sm text-white font-medium">
+                  Read-only root filesystem
+                </div>
+                <div className="text-xs text-white/40">
+                  Mounts the container root as read-only. Apps that need
+                  writable storage should use a volume mount in relay.config.json.
+                  Env: <code className="font-mono text-white/50">RELAY_APP_READ_ONLY_ROOTFS</code>
+                </div>
+              </div>
+            </label>
+
+            <Field label="Run as user (RELAY_APP_RUN_AS)">
+              <input
+                className="text-input font-mono"
+                value={draft.appRunAs}
+                onChange={(e) =>
+                  setDraft((current) => ({
+                    ...current,
+                    appRunAs: e.target.value,
+                  }))
+                }
+                placeholder="e.g. 1000 or 1000:1000 (blank = container default)"
+              />
+              <p className="text-xs text-white/35 mt-1.5">
+                UID or UID:GID to run app containers as. Leave blank to use the
+                image default.
+              </p>
+            </Field>
+          </div>
+
+          <div className="bg-white/[0.02] border border-white/[0.06] rounded-xl p-5 space-y-4">
+            <div>
+              <div className="eyebrow mb-0.5">Traffic &amp; rollout</div>
+              <h2 className="text-base font-semibold text-white">Rollout timings</h2>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Field label="Readiness timeout (seconds)">
+                <input
+                  type="number"
+                  min={1}
+                  className="text-input"
+                  value={draft.rolloutReadyTimeoutSecs}
+                  onChange={(e) =>
+                    setDraft((current) => ({
+                      ...current,
+                      rolloutReadyTimeoutSecs: Number(e.target.value) || 60,
+                    }))
+                  }
+                />
+                <p className="text-xs text-white/35 mt-1.5">
+                  How long to wait for a new container to pass its readiness
+                  check before failing the deploy. Env:{" "}
+                  <code className="font-mono text-white/50">
+                    RELAY_ROLLOUT_READY_TIMEOUT_SECONDS
+                  </code>
+                </p>
+              </Field>
+              <Field label="Drain period (seconds)">
+                <input
+                  type="number"
+                  min={0}
+                  className="text-input"
+                  value={draft.rolloutDrainSecs}
+                  onChange={(e) =>
+                    setDraft((current) => ({
+                      ...current,
+                      rolloutDrainSecs: Number(e.target.value) || 0,
+                    }))
+                  }
+                />
+                <p className="text-xs text-white/35 mt-1.5">
+                  How long to keep the old container alive after a new slot
+                  goes live, to drain in-flight requests. Env:{" "}
+                  <code className="font-mono text-white/50">
+                    RELAY_ROLLOUT_DRAIN_SECONDS
+                  </code>
+                </p>
+              </Field>
+            </div>
+          </div>
+
+          <div className="bg-white/[0.02] border border-white/[0.06] rounded-xl p-5 space-y-4">
+            <div>
+              <div className="eyebrow mb-0.5">API &amp; network</div>
+              <h2 className="text-base font-semibold text-white">Limits &amp; CORS</h2>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Field label="Max upload size (bytes)">
+                <input
+                  type="number"
+                  min={1}
+                  className="text-input"
+                  value={draft.maxUploadBytes}
+                  onChange={(e) =>
+                    setDraft((current) => ({
+                      ...current,
+                      maxUploadBytes: Number(e.target.value) || 524288000,
+                    }))
+                  }
+                />
+                <p className="text-xs text-white/35 mt-1.5">
+                  Maximum size of a source sync upload. Default: 524288000 (500 MB).
+                  Env:{" "}
+                  <code className="font-mono text-white/50">
+                    RELAY_MAX_UPLOAD_BYTES
+                  </code>
+                </p>
+              </Field>
+              <Field label="Max concurrent builds (requires restart)">
+                <input
+                  className="text-input font-mono"
+                  value={draft.maxConcurrentBuilds}
+                  onChange={(e) =>
+                    setDraft((current) => ({
+                      ...current,
+                      maxConcurrentBuilds: e.target.value,
+                    }))
+                  }
+                  placeholder="blank = auto (based on CPU / RAM)"
+                />
+                <p className="text-xs text-white/35 mt-1.5">
+                  Number of concurrent build workers. Takes effect after
+                  relayd restarts. Env:{" "}
+                  <code className="font-mono text-white/50">
+                    RELAY_MAX_CONCURRENT_BUILDS
+                  </code>
+                </p>
+              </Field>
+            </div>
+
+            <Field label="CORS origins (RELAY_CORS_ORIGINS)">
+              <input
+                className="text-input font-mono"
+                value={draft.corsOrigins}
+                onChange={(e) =>
+                  setDraft((current) => ({
+                    ...current,
+                    corsOrigins: e.target.value,
+                  }))
+                }
+                placeholder="https://app.example.com,https://other.example.com  or  *"
+              />
+              <p className="text-xs text-white/35 mt-1.5">
+                Comma-separated list of allowed cross-origin request origins,
+                or <code className="font-mono text-white/50">*</code> to allow
+                all. Changes apply immediately without restart.
+              </p>
+            </Field>
+          </div>
+
+          <div className="bg-white/[0.02] border border-white/[0.06] rounded-xl p-5 space-y-4">
+            <div>
+              <div className="eyebrow mb-0.5">TLS / ACME</div>
+              <h2 className="text-base font-semibold text-white">
+                Certificate settings
+              </h2>
+              <p className="text-xs text-white/40 mt-1">
+                Changes here regenerate the Caddy proxy config. The token is
+                write-only — only whether it is set is shown.
+              </p>
+            </div>
+
+            <Field label="ACME email (RELAY_ACME_EMAIL)">
+              <input
+                type="email"
+                className="text-input"
+                value={draft.acmeEmail}
+                onChange={(e) =>
+                  setDraft((current) => ({
+                    ...current,
+                    acmeEmail: e.target.value,
+                  }))
+                }
+                placeholder="admin@example.com"
+              />
+              <p className="text-xs text-white/35 mt-1.5">
+                Email registered with Let&apos;s Encrypt for certificate
+                expiry notices.
+              </p>
+            </Field>
+
+            <div className="grid grid-cols-1 lg:grid-cols-[1fr_auto] gap-3 items-end">
+              <Field
+                label={`Cloudflare API token (CLOUDFLARE_API_TOKEN) — ${
+                  draft.cloudflareApiTokenConfigured ? "configured" : "not set"
+                }`}
+              >
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  className="text-input font-mono"
+                  value={draft.cloudflareApiToken}
+                  onChange={(e) =>
+                    setDraft((current) => ({
+                      ...current,
+                      cloudflareApiToken: e.target.value,
+                    }))
+                  }
+                  placeholder={
+                    draft.cloudflareApiTokenConfigured
+                      ? "Leave blank to keep current token"
+                      : "Required for DNS-01 ACME challenges via Cloudflare"
+                  }
+                />
+              </Field>
+            </div>
+            <p className="text-xs text-white/35">
+              Used for DNS-01 ACME challenges when the origin is behind a
+              Cloudflare tunnel or CDN. Requires a Caddy image built with the
+              cloudflare-dns plugin (set via{" "}
+              <code className="font-mono text-white/50">RELAY_CADDY_IMAGE</code>
+              ).
+            </p>
+          </div>
+
+          <SaveBar
+            busy={busy}
+            dirty={dirty}
+            onSave={save}
+            label="Save runtime settings"
+          />
         </div>
       )}
     </div>

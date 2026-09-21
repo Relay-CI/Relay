@@ -750,6 +750,16 @@ export interface ServerConfig {
   unused_image_max_age_days?: number;
   log_retention_days?: number;
   build_cache_keep_gb?: number;
+  app_read_only_rootfs?: boolean;
+  app_run_as?: string;
+  cors_origins?: string;
+  rollout_ready_timeout_seconds?: number;
+  rollout_drain_seconds?: number;
+  max_upload_bytes?: number;
+  acme_email?: string;
+  cloudflare_api_token?: string;
+  cloudflare_api_token_configured?: boolean;
+  max_concurrent_builds?: string;
   [key: string]: unknown;
 }
 
