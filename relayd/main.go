@@ -8107,6 +8107,7 @@ func runCmdLoggedEnvCtx(ctx context.Context, dir string, logw io.Writer, extraEn
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), extraEnv...)
+	cmd.Stdin = strings.NewReader("") // prevent Go from opening /dev/null for stdin
 	cmd.Stdout = logw
 	cmd.Stderr = logw
 	return cmd.Run()
