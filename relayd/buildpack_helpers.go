@@ -1034,7 +1034,9 @@ func writeStaticDockerArtifacts(repoDir string, dockerfile string, includeWasmMi
 	}
 	defPath := filepath.Join(repoDir, "default.conf")
 	marker := filepath.Join(repoDir, ".relay_default_conf_created")
-	if fileExists(defPath) {
+	// Preserve user-provided default.conf (no marker means relay didn't create it).
+	// If marker exists, relay owns the file — regenerate it so fixes take effect.
+	if fileExists(defPath) && !fileExists(marker) {
 		return nil
 	}
 	var conf strings.Builder

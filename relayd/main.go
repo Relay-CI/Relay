@@ -6992,7 +6992,11 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 		conf.WriteString(fmt.Sprintf("      proxy_set_header X-Relay-Lane-Branch \"%s\";\n", branch))
 		conf.WriteString("      proxy_set_header X-Relay-Original-Uri $request_uri;\n")
 		conf.WriteString("      proxy_set_header X-Forwarded-Host $host;\n")
-		conf.WriteString("      proxy_pass " + edgeSessionProxyURL(relayPort, "host.docker.internal", app, env, branch) + ";\n")
+		// rewrite pins the upstream path to /api/edge/session-proxy for every
+		// request; without it, nginx URI substitution would mangle sub-paths
+		// (e.g. /style.css → /api/edge/session-proxystyle.css → Go mux 404).
+		conf.WriteString("      rewrite ^ /api/edge/session-proxy break;\n")
+		conf.WriteString(fmt.Sprintf("      proxy_pass http://host.docker.internal:%d;\n", relayPort))
 	} else {
 		conf.WriteString("      add_header X-Relay-Target $relay_target_slot always;\n")
 		conf.WriteString(fmt.Sprintf("      add_header X-Relay-Traffic-Mode \"%s\" always;\n", trafficMode))
