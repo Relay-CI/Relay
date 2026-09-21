@@ -1549,6 +1549,7 @@ func (b *StaticBuildpack) Plan(req DeployRequest, repoDir string, cfg *RelayConf
 			}
 			df := fmt.Sprintf(`FROM %s
 COPY %s /usr/share/nginx/html
+COPY default.conf /etc/nginx/conf.d/default.conf
 EXPOSE 80
 `, firstNonEmpty(cfgStr(cfg, "RunImage"), runImg), root)
 			return writeStaticDockerArtifacts(repoDir, df, false)
