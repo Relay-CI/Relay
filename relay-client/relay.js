@@ -1583,14 +1583,14 @@ async function buildManifest(rootDir) {
     const mtime = Math.floor(rawMtime / 1000) * 1000;
     let sh = "";
     const cached = cache[f.rel];
-    if (cached && cached.size === st.size && cached.mtime === mtime && cached.sha) {
+    if (cached && cached.size === st.size && cached.rawMtime === rawMtime && cached.sha) {
       sh = cached.sha;
       reused++;
     } else {
       sh = await sha256File(f.abs);
       hashed++;
     }
-    nextCache[f.rel] = { size: st.size, mtime, sha: sh };
+    nextCache[f.rel] = { size: st.size, mtime, rawMtime, sha: sh };
     manifest.push({
       Path: f.rel,
       Size: st.size,
