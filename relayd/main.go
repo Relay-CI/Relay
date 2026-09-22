@@ -235,6 +235,7 @@ type DeployRequest struct {
 	TrafficMode string `json:"traffic_mode"` // "edge" or "session"
 	Source      string `json:"source"`       // "git" or "sync"
 	Engine      string `json:"engine"`       // "docker" or "station"/"vessel"; overrides stored app state when set
+	ForceDrain  bool   `json:"force_drain"`  // kill draining standby slot immediately instead of waiting
 
 	CommitMessage string `json:"commit_message,omitempty"`
 	DeployedBy    string `json:"-"` // username of the user who triggered the deploy
@@ -4248,6 +4249,7 @@ func (s *Server) handleSyncFinish(w http.ResponseWriter, r *http.Request) {
 		BuildCmd    string `json:"build_cmd"`
 		StartCmd    string `json:"start_cmd"`
 		Engine      string `json:"engine,omitempty"`
+		ForceDrain  bool   `json:"force_drain,omitempty"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
@@ -4311,6 +4313,7 @@ func (s *Server) handleSyncFinish(w http.ResponseWriter, r *http.Request) {
 		StartCmd:         body.StartCmd,
 		Engine:           normalizeEngine(body.Engine),
 		DeployedBy:       deployedBy,
+		ForceDrain:       body.ForceDrain,
 	}
 	if err := s.ensureBaselineLanes(sess.App, sess.Branch, sess.Env, "", req.Engine); err != nil {
 		httpError(w, 500, "failed to seed baseline lanes: "+err.Error())
@@ -8046,9 +8049,13 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 	// ownership before reusing the slot.
 	if state != nil && normalizeActiveSlot(state.StandbySlot) == nextSlot {
 		if state.TrafficMode == "session" && s.runtime.IsRunning(candidateName) {
-			return fmt.Errorf("previous version still serves live sessions; wait for its drain to finish before deploying again")
-		}
-		if log != nil {
+			if !req.ForceDrain {
+				return fmt.Errorf("previous version still serves live sessions; wait for its drain to finish before deploying again")
+			}
+			if log != nil {
+				log("force-drain: terminating active sessions on slot %s to proceed with deploy", nextSlot)
+			}
+		} else if log != nil {
 			log("clearing stale standby slot %s before candidate reuse", nextSlot)
 		}
 		s.retireStandbySlot(req.App, req.Env, req.Branch, activeSlot, nextSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost)
@@ -8066,9 +8073,13 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 	// instead of yanking it out from under active traffic.
 	if s.runtime.IsRunning(candidateName) {
 		if state != nil && state.TrafficMode == "session" && normalizeActiveSlot(state.StandbySlot) == nextSlot {
-			return fmt.Errorf("previous version still serves live sessions; wait for its drain to finish before deploying again")
-		}
-		if log != nil {
+			if !req.ForceDrain {
+				return fmt.Errorf("previous version still serves live sessions; wait for its drain to finish before deploying again")
+			}
+			if log != nil {
+				log("force-drain: terminating active sessions on slot %s to proceed with deploy", nextSlot)
+			}
+		} else if log != nil {
 			log("slot %s still draining a previous deploy; finishing that drain before reuse", nextSlot)
 		}
 		s.retireStandbySlot(req.App, req.Env, req.Branch, activeSlot, nextSlot, servicePort, hostPort, mode, trafficMode, req.PublicHost)

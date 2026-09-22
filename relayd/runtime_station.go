@@ -1658,7 +1658,25 @@ func (s *Server) runStationApp(log func(string, ...any), req DeployRequest, snap
 	nextSlot := nextActiveSlot(activeSlot)
 	candidateName := appSlotContainerName(req.App, req.Env, req.Branch, nextSlot)
 	if runtime.IsRunning(candidateName) && state != nil && state.TrafficMode == "session" && normalizeActiveSlot(state.StandbySlot) == nextSlot {
-		return fmt.Errorf("previous version still serves live sessions; wait for its drain to finish before deploying again")
+		if !req.ForceDrain {
+			return fmt.Errorf("previous version still serves live sessions; wait for its drain to finish before deploying again")
+		}
+		if log != nil {
+			log("force-drain: terminating active sessions on slot %s to proceed with deploy", nextSlot)
+		}
+		if err := s.ensurestationEdgeProxy(log, req.App, req.Env, req.Branch, normalizeActiveSlot(state.ActiveSlot), "", servicePort, hostPort, mode, trafficMode, req.PublicHost, false); err != nil {
+			return fmt.Errorf("force-drain edge update: %w", err)
+		}
+		runtime.Remove(candidateName)
+		if st, err := s.getAppState(req.App, req.Env, req.Branch); err == nil && st != nil {
+			if normalizeActiveSlot(st.StandbySlot) == nextSlot {
+				st.StandbySlot = ""
+				st.DrainUntil = 0
+				st.RolloutStatus = "drained"
+				_ = s.saveAppState(st)
+				s.broadcastSnapshot()
+			}
+		}
 	}
 
 	if err := s.runSlotContainerWithRuntime(runtime, log, req.App, req.Env, req.Branch, nextSlot, snapshotName, servicePort, networkName, extraEnv); err != nil {

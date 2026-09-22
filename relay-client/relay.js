@@ -3275,6 +3275,7 @@ async function main() {
   if (hasHostPortOverride) deployPayload.host_port = hostPort;
   if (hasServicePortOverride) deployPayload.service_port = servicePort;
   if (hasPublicHostOverride) deployPayload.public_host = publicHost;
+  if (args["force-drain"] === "true") deployPayload.force_drain = true;
   const deploy = await apiJSON(
     transport,
     "POST",
