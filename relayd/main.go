@@ -2516,6 +2516,9 @@ func main() {
 	uiRoot, _ := fs.Sub(uiFS, "ui")
 	uiHandler := uiAssetHandler(uiRoot)
 	mux.Handle("/dashboard/", http.StripPrefix("/dashboard/", uiHandler))
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/relay-app-icon.png", http.StatusMovedPermanently)
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
 			http.Redirect(w, r, "/dashboard/", http.StatusFound)
@@ -9246,7 +9249,11 @@ func pbkdf2HMACSHA256(password, salt []byte, iter int) []byte {
 
 func (s *Server) withCORS(next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		setControlSecurityHeaders(w, r)
+		// Session proxy is a transparent reverse proxy for user apps.
+		// Injecting relay's dashboard CSP onto app responses breaks them.
+		if r.URL.Path != "/api/edge/session-proxy" {
+			setControlSecurityHeaders(w, r)
+		}
 		origin := strings.TrimSpace(r.Header.Get("Origin"))
 		s.corsMu.RLock()
 		allowAll := s.allowAllCORS
@@ -9279,7 +9286,7 @@ func setControlSecurityHeaders(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 	w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data:; font-src 'self' data: https://fonts.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self' 'unsafe-inline'; connect-src 'self' https: ws: wss:; form-action 'self'")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data: blob:; font-src 'self' data: https://fonts.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self' 'unsafe-inline'; connect-src 'self' https: ws: wss:; form-action 'self'")
 	if isHTTPSRequest(r) {
 		w.Header().Set("Strict-Transport-Security", "max-age=31536000")
 	}
