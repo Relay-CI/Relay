@@ -47,7 +47,7 @@ const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
 const { execSync, spawnSync } = require("child_process");
-const { putBundle } = require("./sync-bundle");
+const { putBundleBatched } = require("./sync-bundle");
 const {
   resolveDeployArgs,
   resolveServerArgs,
@@ -3224,14 +3224,19 @@ async function main() {
     const uploadStartedAt = nowMs();
     if (need.length) {
       let uploadMode = "1 request";
-      info(`upload ${need.length} changed file${need.length === 1 ? "" : "s"} as one compressed bundle`);
+      info(`upload ${need.length} changed file${need.length === 1 ? "" : "s"} as compressed bundle(s)`);
     try {
-      await putBundle(
+      const bundleResult = await putBundleBatched(
         transport,
         `/api/sync/bundle/${sessionId}`,
         rootDir,
         need,
       );
+      // A large diff is split into several capped-size requests so no
+      // single upload's transfer time depends on total diff size — a big
+      // one-shot request over a slow link can otherwise sit past
+      // Cloudflare's 100s edge timeout and come back as an opaque 524.
+      if (bundleResult.batches > 1) uploadMode = `${bundleResult.batches} requests`;
     } catch (bundleErr) {
       const oldServer = [400, 404, 405, 415].includes(bundleErr.status);
       if (!oldServer) throw bundleErr;
