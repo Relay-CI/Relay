@@ -135,12 +135,21 @@ func setupMemoryLimits() {
 // defaultAppMemLimitMB returns the --memory cap (in MB) applied to app
 // containers that have no explicit limit configured. Without it, one leaky
 // app can take down the whole host — relayd, the other apps, and the build
-// pipeline with it. Sized to leave room for a second app plus the daemon and
-// Docker even on a 2 GB instance. The default container memory-swap allowance
-// (2x the cap) means apps hit swap before they hit the OOM killer.
+// pipeline with it. The default container memory-swap allowance (2x the cap)
+// means apps hit swap before they hit the OOM killer.
+//
+// runningApps is how many apps are currently scheduled on this host (callers
+// should pass at least 1). The budget is split across all of them instead of
+// handing each one the full per-app share: a flat 45%-of-host cap per app
+// (the old behavior) sums to well over 100% of the box the moment more than
+// two apps are running, which is exactly what overcommits a small host and
+// leaves the kernel OOM killer to pick victims — surfacing as containers
+// dying and restarting under load, which callers (and Cloudflare, sitting in
+// front of them) see as intermittent 502s and partial page/asset failures
+// across whichever apps got picked.
 //
 // RELAY_APP_MEM_LIMIT_MB=<n> overrides; RELAY_APP_MEM_LIMIT_MB=0 disables.
-func defaultAppMemLimitMB() int {
+func defaultAppMemLimitMB(runningApps int) int {
 	if v := strings.TrimSpace(os.Getenv("RELAY_APP_MEM_LIMIT_MB")); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {
@@ -152,7 +161,24 @@ func defaultAppMemLimitMB() int {
 	if total <= 0 {
 		return 0
 	}
-	limit := total * 45 / 100
+	if runningApps < 1 {
+		runningApps = 1
+	}
+	// Reserve for relayd, Docker, the OS, and the global/edge proxies before
+	// splitting what's left across concurrently running apps.
+	reserve := total * 20 / 100
+	if reserve < 512 {
+		reserve = 512
+	}
+	usable := total - reserve
+	if usable < 0 {
+		usable = 0
+	}
+	// Only divide 70% of what's left across apps, keeping slack for a
+	// blue/green switch (one app briefly running two containers at once)
+	// and each app's own nginx-edge sidecar — this doesn't eliminate that
+	// transient overlap, just keeps steady-state usage well inside the host.
+	limit := (usable * 70 / 100) / runningApps
 	if limit < 256 {
 		limit = 256
 	}

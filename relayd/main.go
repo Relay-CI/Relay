@@ -7017,6 +7017,18 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 	return p, nil
 }
 
+// activeAppCount returns how many apps are currently deployed (not stopped)
+// on this host, for sizing the default per-app memory cap — see
+// defaultAppMemLimitMB. Falls back to 1 (today's single-app behavior) if the
+// count can't be read, so a DB hiccup never produces a zero divisor.
+func (s *Server) activeAppCount() int {
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM app_state WHERE COALESCE(stopped,0)=0`).Scan(&count); err != nil || count < 1 {
+		return 1
+	}
+	return count
+}
+
 func (s *Server) runSlotContainerWithRuntime(runtime ContainerRuntime, log func(string, ...any), app string, env DeployEnv, branch string, slot string, image string, servicePort int, networkName string, extraEnv map[string]string) error {
 	containerName := appSlotContainerName(app, env, branch, slot)
 	runtime.Remove(containerName)
@@ -7071,8 +7083,11 @@ func (s *Server) runSlotContainerWithRuntime(runtime ContainerRuntime, log func(
 		// No explicit limit: cap the container to a host-sized default so one
 		// leaky app can't OOM the whole host (relayd, builds, and the other
 		// apps included). Docker's default memory-swap allowance (2x the cap)
-		// lets the app spill to swap before the kernel kills anything.
-		if mb := defaultAppMemLimitMB(); mb > 0 {
+		// lets the app spill to swap before the kernel kills anything. The
+		// budget is split across however many apps are actually running so
+		// it doesn't overcommit a small host the moment a third or fourth
+		// app is deployed to it.
+		if mb := defaultAppMemLimitMB(s.activeAppCount()); mb > 0 {
 			spec.MemLimit = fmt.Sprintf("%dm", mb)
 		}
 	}

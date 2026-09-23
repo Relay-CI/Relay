@@ -97,11 +97,70 @@ func TestHousekeepingBuildCacheKeepGB(t *testing.T) {
 
 func TestDefaultAppMemLimitMB(t *testing.T) {
 	t.Setenv("RELAY_APP_MEM_LIMIT_MB", "512")
-	if got := defaultAppMemLimitMB(); got != 512 {
+	if got := defaultAppMemLimitMB(3); got != 512 {
 		t.Fatalf("explicit override: got %d, want 512", got)
 	}
 	t.Setenv("RELAY_APP_MEM_LIMIT_MB", "0")
-	if got := defaultAppMemLimitMB(); got != 0 {
+	if got := defaultAppMemLimitMB(1); got != 0 {
 		t.Fatalf("RELAY_APP_MEM_LIMIT_MB=0 must disable the cap, got %d", got)
 	}
+}
+
+// TestDefaultAppMemLimitMBForHostDoesNotOvercommit pins totalMB explicitly
+// (real defaultAppMemLimitMB always reads the actual host's RAM, which
+// varies per machine) to check the invariant the fix exists for: the old
+// behavior — a flat 45%% of host per app regardless of how many apps were
+// running — let per-app caps sum past 100%% of the host the moment more than
+// ~2 apps were deployed. That overcommit is exactly what hands the kernel
+// OOM killer a reason to start killing containers mid-request, which
+// Cloudflare (sitting in front of them) sees as intermittent 502s and
+// partial asset failures across whichever apps got picked.
+func TestDefaultAppMemLimitMBForHostDoesNotOvercommit(t *testing.T) {
+	for _, totalMB := range []int{2048, 4096, 8192} {
+		for _, apps := range []int{2, 3, 5, 8} {
+			perApp := defaultAppMemLimitMBForHost(totalMB, apps)
+			if sum := perApp * apps; sum > totalMB {
+				t.Errorf("totalMB=%d apps=%d: %d MB each sums to %d MB, overcommits the host", totalMB, apps, perApp, sum)
+			}
+		}
+	}
+}
+
+func TestDefaultAppMemLimitMBForHostSplitsAcrossRunningApps(t *testing.T) {
+	one := defaultAppMemLimitMBForHost(4096, 1)
+	three := defaultAppMemLimitMBForHost(4096, 3)
+	if three >= one {
+		t.Fatalf("3 concurrent apps should each get less than 1 app alone: one=%d three=%d", one, three)
+	}
+	if got := defaultAppMemLimitMBForHost(4096, 8); got < 256 {
+		t.Fatalf("per-app floor should still apply under heavy split, got %d", got)
+	}
+}
+
+// defaultAppMemLimitMBForHost mirrors defaultAppMemLimitMB's env-override-free
+// formula with an explicit totalMB so tests don't depend on the real host's
+// RAM. Keep in sync with defaultAppMemLimitMB in memlimit.go.
+func defaultAppMemLimitMBForHost(total, runningApps int) int {
+	if total <= 0 {
+		return 0
+	}
+	if runningApps < 1 {
+		runningApps = 1
+	}
+	reserve := total * 20 / 100
+	if reserve < 512 {
+		reserve = 512
+	}
+	usable := total - reserve
+	if usable < 0 {
+		usable = 0
+	}
+	limit := (usable * 70 / 100) / runningApps
+	if limit < 256 {
+		limit = 256
+	}
+	if limit > 4096 {
+		limit = 4096
+	}
+	return limit
 }
