@@ -382,6 +382,7 @@ type Server struct {
 	edgeTokenKey          []byte
 	edgePresenceMu        sync.Mutex
 	edgePresenceReady     bool
+	edgeSlotUpstreams     sync.Map // edgeSlotEndpointKey -> edgeSlotEndpoint
 	corsOrigins           map[string]struct{}
 	allowAllCORS          bool
 	corsMu                sync.RWMutex
@@ -429,6 +430,7 @@ type Server struct {
 
 	runtime        ContainerRuntime
 	stationRuntime ContainerRuntime
+	globalProxyMu  sync.Mutex
 
 	acmeMu       sync.Mutex
 	acmeServer   *http.Server
@@ -5011,7 +5013,16 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var previousState *AppState
-		st, _ := s.getAppState(body.App, body.Env, body.Branch)
+		// Configuration and slot switches share ownership of the live route.
+		// Serialize the read/save/reload sequence with deployments and drains.
+		laneLock := s.edgeProxyLock(body.App, body.Env, body.Branch)
+		laneLock.Lock()
+		defer laneLock.Unlock()
+		st, stateErr := s.getAppState(body.App, body.Env, body.Branch)
+		if stateErr != nil {
+			httpError(w, 500, "failed to load app state: "+stateErr.Error())
+			return
+		}
 		if st != nil {
 			copyState := *st
 			previousState = &copyState
@@ -5232,8 +5243,10 @@ func (s *Server) handleAppConfig(w http.ResponseWriter, r *http.Request) {
 		// Apply a traffic-policy change to a live lane immediately. In
 		// particular, this gives active visitors a slot cookie before the next
 		// deployment makes that slot the standby target.
-		if previousState != nil && previousState.TrafficMode != st.TrafficMode {
-			if err := s.refreshLiveLaneTrafficPolicy(st); err != nil {
+		if previousState != nil && (previousState.TrafficMode != st.TrafficMode ||
+			previousState.TrafficSplitPercent != st.TrafficSplitPercent || previousState.ServicePort != st.ServicePort ||
+			previousState.Mode != st.Mode || previousState.HostPort != st.HostPort || previousState.PublicHost != st.PublicHost) {
+			if err := s.refreshLiveLaneTrafficPolicyLocked(st, previousState); err != nil {
 				_ = s.saveAppState(previousState)
 				httpError(w, 500, "failed to apply traffic policy: "+err.Error())
 				return
@@ -6650,7 +6663,6 @@ func dockerPath(p string) string {
 	return filepath.ToSlash(filepath.Clean(p))
 }
 
-
 func logRuntimeContainerDiagnostics(runtime ContainerRuntime, log func(string, ...any), name string) {
 	if log == nil {
 		return
@@ -6988,6 +7000,7 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 	conf.WriteString("      proxy_set_header Upgrade $http_upgrade;\n")
 	conf.WriteString("      proxy_set_header Connection $connection_upgrade;\n")
 	conf.WriteString("      proxy_request_buffering off;\n")
+	conf.WriteString("      proxy_buffering off;\n")
 	conf.WriteString("      proxy_read_timeout 300s;\n")
 	conf.WriteString("      proxy_send_timeout 300s;\n")
 	conf.WriteString("      proxy_connect_timeout 5s;\n")
@@ -7031,6 +7044,7 @@ func (s *Server) activeAppCount() int {
 
 func (s *Server) runSlotContainerWithRuntime(runtime ContainerRuntime, log func(string, ...any), app string, env DeployEnv, branch string, slot string, image string, servicePort int, networkName string, extraEnv map[string]string) error {
 	containerName := appSlotContainerName(app, env, branch, slot)
+	s.forgetEdgeSlotUpstreams(containerName)
 	runtime.Remove(containerName)
 
 	secs, _ := s.getAppSecrets(app, env, branch)
@@ -7122,7 +7136,7 @@ func (s *Server) ensureEdgeProxy(log func(string, ...any), app string, env Deplo
 // refreshLiveLaneTrafficPolicy updates a running edge proxy without replacing
 // either app slot. That distinction matters for rolling releases: clients must
 // receive their affinity cookie while the old slot is still the live target.
-func (s *Server) refreshLiveLaneTrafficPolicy(st *AppState) error {
+func (s *Server) refreshLiveLaneTrafficPolicyLocked(st, previous *AppState) error {
 	if st == nil || st.Stopped {
 		return nil
 	}
@@ -7142,7 +7156,9 @@ func (s *Server) refreshLiveLaneTrafficPolicy(st *AppState) error {
 	if firstNonEmptyEngine(st.Engine) == EngineStation {
 		return s.ensurestationEdgeProxy(nil, st.App, st.Env, st.Branch, activeSlot, standbySlot, servicePort, hostPort, mode, trafficMode, st.PublicHost, false)
 	}
-	return s.ensureEdgeProxy(nil, st.App, st.Env, st.Branch, appNetworkName(st.App, st.Env, st.Branch), activeSlot, standbySlot, servicePort, hostPort, mode, trafficMode, st.PublicHost, st.TrafficSplitPercent, false)
+	recreate := edgeProxyBindingChanged(previous, mode, hostPort, st.PublicHost) ||
+		edgeProxyPublishedPortChanged(runtime, st.App, st.Env, st.Branch, hostPort, mode, st.PublicHost)
+	return s.ensureEdgeProxyLocked(nil, st.App, st.Env, st.Branch, appNetworkName(st.App, st.Env, st.Branch), activeSlot, standbySlot, servicePort, hostPort, mode, trafficMode, st.PublicHost, st.TrafficSplitPercent, recreate)
 }
 
 func (s *Server) ensureEdgeProxyLocked(log func(string, ...any), app string, env DeployEnv, branch string, networkName string, activeSlot string, standbySlot string, servicePort int, hostPort int, mode string, trafficMode string, publicHost string, splitPercent int, recreate bool) error {
@@ -7344,20 +7360,27 @@ func (s *Server) retireStandbySlot(app string, env DeployEnv, branch string, act
 	lock := s.edgeProxyLock(app, env, branch)
 	lock.Lock()
 	defer lock.Unlock()
+	s.retireStandbySlotLocked(app, env, branch, activeSlot, oldSlot, servicePort, hostPort, mode, trafficMode, publicHost)
+}
+
+func (s *Server) retireStandbySlotLocked(app string, env DeployEnv, branch string, activeSlot string, oldSlot string, servicePort int, hostPort int, mode string, trafficMode string, publicHost string) {
 
 	// A cleanup timer belongs to one exact active/standby pair. If a newer
 	// deployment changed that pair, this timer is stale and must do nothing.
-	if st, err := s.getAppState(app, env, branch); err == nil && st != nil {
-		if normalizeActiveSlot(st.ActiveSlot) != normalizeActiveSlot(activeSlot) ||
-			normalizeActiveSlot(st.StandbySlot) != normalizeActiveSlot(oldSlot) {
-			return
-		}
+	st, err := s.getAppState(app, env, branch)
+	if err != nil || st == nil || normalizeActiveSlot(st.ActiveSlot) != normalizeActiveSlot(activeSlot) ||
+		normalizeActiveSlot(st.StandbySlot) != normalizeActiveSlot(oldSlot) {
+		return
 	}
 	name := appSlotContainerName(app, env, branch, oldSlot)
 	if err := s.ensureEdgeProxyLocked(nil, app, env, branch, appNetworkName(app, env, branch), activeSlot, "", servicePort, hostPort, mode, trafficMode, publicHost, 100, false); err != nil {
 		return
 	}
-	time.Sleep(2 * time.Second)
+	// Session mode has already waited for every in-flight proxy request. An
+	// extra sleep here holds the selection lock and stalls all new visitors.
+	if trafficMode != "session" {
+		time.Sleep(2 * time.Second)
+	}
 	s.runtime.Remove(name)
 	if st, err := s.getAppState(app, env, branch); err == nil && st != nil {
 		if normalizeActiveSlot(st.ActiveSlot) == normalizeActiveSlot(activeSlot) && normalizeActiveSlot(st.StandbySlot) == normalizeActiveSlot(oldSlot) {
@@ -7556,27 +7579,38 @@ func (s *Server) startRolloutWatch(app string, env DeployEnv, branch string) {
 }
 
 func (s *Server) graduateCanary(app string, env DeployEnv, branch string, total int, errorPercent float64, assessErr error) error {
+	lock := s.edgeProxyLock(app, env, branch)
+	lock.Lock()
+	defer lock.Unlock()
 	st, err := s.getAppState(app, env, branch)
 	if err != nil || st == nil {
 		return err
 	}
-	if normalizeActiveSlot(st.StandbySlot) == "" {
+	if normalizeActiveSlot(st.StandbySlot) == "" || st.RolloutStatus != "monitoring" {
 		return nil
 	}
 	st.TrafficSplitPercent = 100
 	st.RolloutStartedAt = 0
 	st.RolloutStatus = "graduated"
-	_ = s.saveRolloutGraduation(st)
+	if err := s.applyLaneRollout(st, func() error {
+		return s.ensureEdgeProxyLocked(nil, app, env, branch, appNetworkName(app, env, branch), st.ActiveSlot, st.StandbySlot, st.ServicePort, st.HostPort, st.Mode, st.TrafficMode, st.PublicHost, 100, false)
+	}); err != nil {
+		return err
+	}
 	s.broadcastSnapshot()
 	s.auditLog("relay-rollout", "rollout.graduate", app, fmt.Sprintf("env=%s branch=%s requests=%d error_percent=%.2f err=%v", env, branch, total, errorPercent, assessErr))
 	if deployID := strings.TrimSpace(st.RolloutDeployID); deployID != "" {
 		s.emitGitHubDeployStatusAsync(deployID)
 	}
-	s.cleanupStandbySlotAfter(app, env, branch, st.ActiveSlot, st.StandbySlot, st.ServicePort, st.HostPort, st.Mode, st.TrafficMode, st.PublicHost, s.rolloutDrainDuration())
+	// A zero drain duration must not try to reacquire this lane's lock inline.
+	go s.cleanupStandbySlotAfter(app, env, branch, st.ActiveSlot, st.StandbySlot, st.ServicePort, st.HostPort, st.Mode, st.TrafficMode, st.PublicHost, s.rolloutDrainDuration())
 	return nil
 }
 
 func (s *Server) rollbackCanary(app string, env DeployEnv, branch string, detail string) error {
+	lock := s.edgeProxyLock(app, env, branch)
+	lock.Lock()
+	defer lock.Unlock()
 	st, err := s.getAppState(app, env, branch)
 	if err != nil || st == nil {
 		return err
@@ -7586,7 +7620,7 @@ func (s *Server) rollbackCanary(app string, env DeployEnv, branch string, detail
 	if oldSlot == "" || newSlot == "" {
 		return nil
 	}
-	if err := s.ensureEdgeProxy(nil, app, env, branch, appNetworkName(app, env, branch), oldSlot, "", st.ServicePort, st.HostPort, st.Mode, st.TrafficMode, st.PublicHost, 100, false); err != nil {
+	if err := s.ensureEdgeProxyLocked(nil, app, env, branch, appNetworkName(app, env, branch), oldSlot, "", st.ServicePort, st.HostPort, st.Mode, st.TrafficMode, st.PublicHost, 100, false); err != nil {
 		return err
 	}
 	s.runtime.Remove(appSlotContainerName(app, env, branch, newSlot))
@@ -7748,6 +7782,8 @@ func customHostRuleBlock(rule customHostRule, relayPort int) (string, error) {
 }
 
 func (s *Server) ensureGlobalProxy() error {
+	s.globalProxyMu.Lock()
+	defer s.globalProxyMu.Unlock()
 	if _, err := s.repairLegacyAppHostPortsFromRuntime(); err != nil {
 		return err
 	}
@@ -8109,14 +8145,7 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 	}
 
 	recreateEdge := !s.runtime.IsRunning(appBaseContainerName(req.App, req.Env, req.Branch)) || activeSlot == ""
-	if state != nil {
-		prevMode := firstNonEmpty(strings.ToLower(strings.TrimSpace(state.Mode)), "port")
-		prevTrafficMode := firstNonEmpty(normalizeTrafficMode(state.TrafficMode), "edge")
-		prevHostPort := firstNonZero(state.HostPort, defaultHostPort(req.Env))
-		if prevMode != mode || prevHostPort != hostPort || prevTrafficMode != trafficMode || state.PublicHost != req.PublicHost {
-			recreateEdge = true
-		}
-	}
+	recreateEdge = recreateEdge || edgeProxyBindingChanged(state, mode, hostPort, req.PublicHost)
 	if !recreateEdge && edgeProxyPublishedPortChanged(s.runtime, req.App, req.Env, req.Branch, hostPort, mode, req.PublicHost) {
 		recreateEdge = true
 	}
@@ -10498,6 +10527,9 @@ func repoFingerprint(repoDir string) string {
 	// not strong enough.
 	h := sha256.New()
 	_, _ = h.Write([]byte(runtime.GOOS))
+	// Reuse a bounded buffer across files instead of allocating each entire
+	// source asset alongside the apps already serving traffic on this host.
+	buffer := make([]byte, 256*1024)
 	_ = filepath.Walk(repoDir, func(p string, info os.FileInfo, err error) error {
 		if err != nil || info == nil {
 			return nil
@@ -10516,13 +10548,16 @@ func repoFingerprint(repoDir string) string {
 		if info.IsDir() {
 			return nil
 		}
-		data, readErr := os.ReadFile(p)
-		if readErr != nil {
+		file, openErr := os.Open(p)
+		if openErr != nil {
 			return nil
 		}
 		_, _ = h.Write([]byte(rel))
 		_, _ = h.Write([]byte{0})
-		_, _ = h.Write(data)
+		// Hide File.WriteTo so CopyBuffer uses this shared buffer rather than
+		// allocating a second, smaller buffer for every file.
+		_, _ = io.CopyBuffer(h, struct{ io.Reader }{file}, buffer)
+		_ = file.Close()
 		_, _ = h.Write([]byte{0})
 		return nil
 	})

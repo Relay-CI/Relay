@@ -273,7 +273,8 @@ func (s *Server) constrainAppState(st *AppState) {
 	st.RolloutStatus = strings.TrimSpace(st.RolloutStatus)
 	st.PublicHost, st.PublicHosts = canonicalizePublicHosts(st.PublicHost, st.PublicHosts)
 	if st.TrafficSplitPercent >= 100 || normalizeActiveSlot(st.StandbySlot) == "" {
-		st.TrafficSplitPercent = defaultTrafficSplitPercent()
+		// With no standby, the proxy already sends all traffic to the only
+		// slot. Preserve the configured split for the next canary deployment.
 		if st.RolloutStatus == "monitoring" {
 			st.RolloutStatus = "graduated"
 		}

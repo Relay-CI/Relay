@@ -208,6 +208,17 @@ func persistedHostPortExplicit(req DeployRequest, states ...*AppState) bool {
 // whenever a state replacement is written.
 func persistedPublicHosts(req DeployRequest, states ...*AppState) []string {
 	hosts := req.PublicHosts
+	// Dashboard and queued GitHub deploys may carry a stale host snapshot.
+	// For the same primary host, the latest lane settings own the alias list,
+	// including deliberate alias removals. A different primary can still
+	// supply a new host set for an explicit deployment override.
+	for _, state := range states {
+		if state != nil && strings.TrimSpace(state.PublicHost) != "" &&
+			(strings.TrimSpace(req.PublicHost) == "" || normalizedHostname(req.PublicHost) == normalizedHostname(state.PublicHost)) {
+			_, configured := canonicalizePublicHosts(state.PublicHost, state.PublicHosts)
+			return configured
+		}
+	}
 	if len(hosts) == 0 {
 		for _, state := range states {
 			if state != nil && len(state.PublicHosts) > 0 {
@@ -415,6 +426,24 @@ func (s *Server) previewHostPortReservedByOtherApp(app string, env DeployEnv, br
 		return true
 	}
 	return false
+}
+
+// Policy, upstream and hostname edits can be reloaded in place. Only a changed
+// host binding requires replacing the edge container and its listening socket.
+func edgeProxyBindingChanged(previous *AppState, mode string, hostPort int, publicHost string) bool {
+	if previous == nil {
+		return false
+	}
+	binding := func(mode string, port int, host string) string {
+		if firstNonEmpty(strings.ToLower(strings.TrimSpace(mode)), "port") == "port" {
+			return fmt.Sprintf("0.0.0.0:%d", port)
+		}
+		if strings.TrimSpace(host) != "" {
+			return fmt.Sprintf("127.0.0.1:%d", port)
+		}
+		return ""
+	}
+	return binding(previous.Mode, firstNonZero(previous.HostPort, defaultHostPort(previous.Env)), previous.PublicHost) != binding(mode, hostPort, publicHost)
 }
 
 func edgeProxyPublishedPortChanged(runtime ContainerRuntime, app string, env DeployEnv, branch string, hostPort int, mode string, publicHost string) bool {

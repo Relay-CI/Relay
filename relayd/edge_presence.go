@@ -28,6 +28,49 @@ const edgePresenceScriptPath = "/__relay/presence.js"
 // after a crash; it never expires an active visitor early.
 const edgePresenceWriteLease = 10 * time.Second
 
+type edgeSlotEndpointKey struct {
+	Engine string
+	Name   string
+	Port   int
+}
+
+type edgeSlotEndpoint struct {
+	Address string
+	Expires time.Time
+}
+
+func (s *Server) edgeSlotUpstream(st *AppState, slot string) (edgeSlotEndpointKey, string) {
+	key := edgeSlotEndpointKey{firstNonEmptyEngine(st.Engine), appSlotContainerName(st.App, st.Env, st.Branch, slot), firstNonZero(st.ServicePort, 3000)}
+	if cached, ok := s.edgeSlotUpstreams.Load(key); ok {
+		entry := cached.(edgeSlotEndpoint)
+		if time.Now().Before(entry.Expires) {
+			return key, entry.Address
+		}
+	}
+	runtime := s.runtimeForEngine(st.Engine)
+	address := ""
+	if key.Engine == EngineStation {
+		address = stationSlotUpstream(runtime, key.Name, key.Port)
+	} else if port := runtime.PublishedPort(key.Name, key.Port); port > 0 {
+		address = "127.0.0.1:" + strconv.Itoa(port)
+	}
+	if address != "" {
+		// Docker inspection launches a subprocess. Coalesce it across requests
+		// while bounding staleness after an external container replacement.
+		s.edgeSlotUpstreams.Store(key, edgeSlotEndpoint{address, time.Now().Add(time.Second)})
+	}
+	return key, address
+}
+
+func (s *Server) forgetEdgeSlotUpstreams(name string) {
+	s.edgeSlotUpstreams.Range(func(key, _ any) bool {
+		if key.(edgeSlotEndpointKey).Name == name {
+			s.edgeSlotUpstreams.Delete(key)
+		}
+		return true
+	})
+}
+
 func (s *Server) edgeSessionToken(app string, env DeployEnv, branch string) (string, error) {
 	s.edgeTokenMu.Lock()
 	defer s.edgeTokenMu.Unlock()
@@ -219,7 +262,7 @@ func (s *Server) handleEdgeSessionProxy(w http.ResponseWriter, r *http.Request) 
 		}
 	}()
 	st, err := s.getAppState(app, env, branch)
-	if err != nil || st == nil || st.Stopped || st.TrafficMode != "session" {
+	if err != nil || st == nil || st.Stopped {
 		http.Error(w, "session route unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -241,7 +284,7 @@ func (s *Server) handleEdgeSessionProxy(w http.ResponseWriter, r *http.Request) 
 	active := normalizeActiveSlot(st.ActiveSlot)
 	standby := normalizeActiveSlot(st.StandbySlot)
 	slot := active
-	if rec != nil && now.UnixMilli()-rec.LastSeen <= edgePresenceTTL().Milliseconds() {
+	if st.TrafficMode == "session" && rec != nil && now.UnixMilli()-rec.LastSeen <= edgePresenceTTL().Milliseconds() {
 		if rec.Slot == active || (rec.Slot == standby && st.RolloutStatus != "retiring" && now.UnixMilli() < st.DrainUntil) {
 			slot = rec.Slot
 		}
@@ -253,6 +296,11 @@ func (s *Server) handleEdgeSessionProxy(w http.ResponseWriter, r *http.Request) 
 	if uri.Path == edgePresencePath {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if st.TrafficMode != "session" {
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		if rec == nil || rec.Slot != slot {
@@ -286,15 +334,8 @@ func (s *Server) handleEdgeSessionProxy(w http.ResponseWriter, r *http.Request) 
 	s.setEdgePresenceCookie(w, r, cookieName, id)
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("X-Relay-Target", slot)
-	w.Header().Set("X-Relay-Traffic-Mode", "session")
-	runtime := s.runtimeForEngine(st.Engine)
-	name := appSlotContainerName(app, env, branch, slot)
-	upstream := ""
-	if firstNonEmptyEngine(st.Engine) == EngineStation {
-		upstream = stationSlotUpstream(runtime, name, st.ServicePort)
-	} else if port := runtime.PublishedPort(name, st.ServicePort); port > 0 {
-		upstream = "127.0.0.1:" + strconv.Itoa(port)
-	}
+	w.Header().Set("X-Relay-Traffic-Mode", firstNonEmpty(st.TrafficMode, "edge"))
+	endpointKey, upstream := s.edgeSlotUpstream(st, slot)
 	if upstream == "" {
 		http.Error(w, "slot unavailable", http.StatusBadGateway)
 		return
@@ -320,6 +361,7 @@ func (s *Server) handleEdgeSessionProxy(w http.ResponseWriter, r *http.Request) 
 		}
 	}()
 	proxy := &httputil.ReverseProxy{
+		FlushInterval: -1,
 		Director: func(req *http.Request) {
 			req.URL.Scheme = "http"
 			req.URL.Host = upstream
@@ -332,43 +374,109 @@ func (s *Server) handleEdgeSessionProxy(w http.ResponseWriter, r *http.Request) 
 			}
 			req.Header.Del("X-Relay-Edge-Token")
 			req.Header.Del("X-Relay-Original-Uri")
-			req.Header.Set("Accept-Encoding", "identity")
+			// HTML needs a readable body for the heartbeat injection. Assets and
+			// API responses should retain the browser's gzip/brotli negotiation.
+			if strings.Contains(strings.ToLower(req.Header.Get("Accept")), "text/html") ||
+				strings.EqualFold(req.Header.Get("Sec-Fetch-Dest"), "document") {
+				req.Header.Set("Accept-Encoding", "identity")
+			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
+			// ReverseProxy adds upstream headers to existing response headers.
+			// Clear the fallback policy so it cannot shadow the asset policy.
+			w.Header().Del("Cache-Control")
+			upstreamCache := resp.Header.Get("Cache-Control")
 			resp.Header.Set("Cache-Control", "private, no-store")
+			// Immutable assets have content-addressed URLs and can be reused by
+			// this browser. Keep them private because the proxy sets affinity cookies.
+			if (resp.Request.Method == http.MethodGet || resp.Request.Method == http.MethodHead) && resp.StatusCode == http.StatusOK &&
+				!strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/html") && len(resp.Header.Values("Set-Cookie")) == 0 {
+				var directives []string
+				immutable := false
+				for _, directive := range strings.Split(upstreamCache, ",") {
+					directive = strings.TrimSpace(directive)
+					if strings.EqualFold(directive, "immutable") {
+						immutable = true
+					}
+					if directive != "" && !strings.EqualFold(directive, "public") && !strings.EqualFold(directive, "private") {
+						directives = append(directives, directive)
+					}
+				}
+				if immutable {
+					resp.Header.Set("Cache-Control", "private, "+strings.Join(directives, ", "))
+				}
+			}
+			resp.Header.Set("X-Accel-Buffering", "no")
 			if resp.Request.Method != http.MethodGet || resp.StatusCode != http.StatusOK ||
 				!strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/html") ||
 				resp.Header.Get("Content-Encoding") != "" || resp.Header.Get("Content-Range") != "" {
 				return nil
 			}
-			// Bound buffering. Large or streaming HTML is left unmodified; its
-			// regular requests still refresh presence, and apps can include the
-			// documented heartbeat script themselves.
-			body, readErr := io.ReadAll(io.LimitReader(resp.Body, (4<<20)+1))
-			if readErr != nil {
-				return readErr
-			}
-			if len(body) <= 4<<20 {
-				body = injectEdgePresenceScript(body)
-				resp.Header.Del("Content-Length")
-				resp.ContentLength = int64(len(body))
-				_ = resp.Body.Close()
-				resp.Body = io.NopCloser(bytes.NewReader(body))
-			} else {
-				resp.Body = &edgePrefixedBody{Reader: io.MultiReader(bytes.NewReader(body), resp.Body), Closer: resp.Body}
-			}
+			resp.Header.Del("Content-Length")
+			resp.Header.Del("ETag")
+			resp.Header.Del("Content-MD5")
+			resp.Header.Del("Digest")
+			resp.ContentLength = -1
+			resp.Body = &edgePresenceBody{ReadCloser: resp.Body}
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+			s.edgeSlotUpstreams.Delete(endpointKey)
 			http.Error(w, "slot unavailable", http.StatusBadGateway)
 		},
 	}
 	proxy.ServeHTTP(w, r)
 }
 
-type edgePrefixedBody struct {
-	io.Reader
-	io.Closer
+// Inject the heartbeat without waiting for the rest of a streamed SSR page.
+// Keep only a possible split <head tag between reads; never buffer the page.
+type edgePresenceBody struct {
+	io.ReadCloser
+	scan     []byte
+	pending  []byte
+	inserted bool
+	readErr  error
+	buffer   [4096]byte
+}
+
+func (b *edgePresenceBody) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	for len(b.pending) == 0 {
+		if b.readErr != nil {
+			return 0, b.readErr
+		}
+		if b.inserted {
+			return b.ReadCloser.Read(p)
+		}
+		n, err := b.ReadCloser.Read(b.buffer[:])
+		b.readErr = err
+		b.scan = append(b.scan, b.buffer[:n]...)
+		start := bytes.Index(bytes.ToLower(b.scan), []byte("<head"))
+		if start >= 0 && bytes.IndexByte(b.scan[start:], '>') >= 0 {
+			b.pending = injectEdgePresenceScript(b.scan)
+			b.scan, b.inserted = nil, true
+		} else if err != nil {
+			b.pending = append(b.scan, []byte(`<script src="`+edgePresenceScriptPath+`" defer></script>`)...)
+			b.scan, b.inserted = nil, true
+		} else if start >= 0 && len(b.scan) < 32*1024 {
+			if start > 0 {
+				b.pending = append([]byte(nil), b.scan[:start]...)
+				b.scan = b.scan[start:]
+			}
+		} else if start >= 0 {
+			// A malformed/oversized tag must not grow memory without bound.
+			b.pending, b.scan, b.inserted = b.scan, nil, true
+		} else if len(b.scan) > 5 {
+			at := len(b.scan) - 5
+			b.pending = b.scan[:at]
+			b.scan = append([]byte(nil), b.scan[at:]...)
+		}
+	}
+	n := copy(p, b.pending)
+	b.pending = b.pending[n:]
+	return n, nil
 }
 
 func (s *Server) setEdgePresenceCookie(w http.ResponseWriter, r *http.Request, name, id string) {
@@ -424,28 +532,24 @@ func (s *Server) startSessionDrain(app string, env DeployEnv, branch, active, ol
 func (s *Server) sessionDrainTick(app string, env DeployEnv, branch, active, old string) bool {
 	selectionLock := s.edgeProxyLock(app, env, branch)
 	selectionLock.Lock()
+	defer selectionLock.Unlock()
 	st, err := s.getAppState(app, env, branch)
 	if err != nil {
-		selectionLock.Unlock()
 		return false
 	}
 	if st == nil || normalizeActiveSlot(st.ActiveSlot) != active || normalizeActiveSlot(st.StandbySlot) != old || st.TrafficMode != "session" {
-		selectionLock.Unlock()
 		return true
 	}
 	if st.RolloutStatus != "retiring" {
 		count, err := s.activeOldSessions(st, time.Now())
 		if err != nil {
-			selectionLock.Unlock()
 			return false
 		} // Unknown presence must keep the old slot.
 		if time.Now().UnixMilli() < st.DrainUntil && (count > 0 || s.activeEdgeRequests(app, env, branch, old) > 0) {
-			selectionLock.Unlock()
 			return false
 		}
 		st.RolloutStatus = "retiring"
 		if err := s.saveAppState(st); err != nil {
-			selectionLock.Unlock()
 			return false
 		}
 		s.broadcastSnapshot()
@@ -453,7 +557,6 @@ func (s *Server) sessionDrainTick(app string, env DeployEnv, branch, active, old
 			s.auditLog("relay-rollout", "session.max_drain", app, fmt.Sprintf("env=%s branch=%s expired_sessions=%d; waiting for active requests", env, branch, count))
 		}
 	}
-	selectionLock.Unlock()
 	if s.activeEdgeRequests(app, env, branch, old) > 0 {
 		return false
 	}
@@ -470,7 +573,7 @@ func (s *Server) sessionDrainTick(app string, env DeployEnv, branch, active, old
 		}
 		s.broadcastSnapshot()
 	} else {
-		s.retireStandbySlot(app, env, branch, active, old, st.ServicePort, st.HostPort, st.Mode, st.TrafficMode, st.PublicHost)
+		s.retireStandbySlotLocked(app, env, branch, active, old, st.ServicePort, st.HostPort, st.Mode, st.TrafficMode, st.PublicHost)
 		updated, err := s.getAppState(app, env, branch)
 		if err != nil || updated == nil || normalizeActiveSlot(updated.StandbySlot) == old {
 			return false

@@ -1,10 +1,45 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
+
+func TestRepoFingerprintPreservesLargeFileDigest(t *testing.T) {
+	dir := t.TempDir()
+	data := bytes.Repeat([]byte("source-content\n"), 100000)
+	if err := os.WriteFile(filepath.Join(dir, "source.txt"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	h := sha256.New()
+	h.Write([]byte(runtime.GOOS))
+	h.Write([]byte("source.txt\x00"))
+	h.Write(data)
+	h.Write([]byte{0})
+	want := hex.EncodeToString(h.Sum(nil))[:16]
+	if got := repoFingerprint(dir); got != want {
+		t.Fatalf("digest changed: got %s, want %s", got, want)
+	}
+}
+
+func BenchmarkRepoFingerprintLargeFile(b *testing.B) {
+	dir := b.TempDir()
+	data := bytes.Repeat([]byte("source-content\n"), 2000000)
+	if err := os.WriteFile(filepath.Join(dir, "source.txt"), data, 0600); err != nil {
+		b.Fatal(err)
+	}
+	b.SetBytes(int64(len(data)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		repoFingerprint(dir)
+	}
+}
 
 func TestRepoFingerprintIgnoresTransientDirs(t *testing.T) {
 	repoDir := t.TempDir()

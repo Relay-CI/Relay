@@ -64,6 +64,18 @@ func TestInjectBuildEnvIntoDockerfileWrapsExecRunSteps(t *testing.T) {
 	}
 }
 
+func TestInjectBuildEnvPreservesNextBuildCacheMount(t *testing.T) {
+	content := "# syntax=docker/dockerfile:1.7\nFROM node:22-bookworm-slim AS builder\nWORKDIR /app\n" +
+		"RUN --mount=type=cache,id=ethrealm-next-webpack,target=/app/.next/cache,sharing=locked \\\n" +
+		"    NODE_OPTIONS=\"--max-old-space-size=4096\" npm run build:standalone\n"
+	got := injectBuildEnvIntoDockerfile(content, "YWJj", false)
+	if !strings.HasPrefix(got, "# syntax=docker/dockerfile:1.7\n") ||
+		!strings.Contains(got, "RUN --mount=type=cache,id=ethrealm-next-webpack,target=/app/.next/cache,sharing=locked /bin/sh -lc ") ||
+		!strings.Contains(got, "npm run build:standalone") {
+		t.Fatalf("build env wrapping lost persistent Next.js cache: %s", got)
+	}
+}
+
 func TestPrepareBuildDockerfileWithEnvCreatesWrappedCopy(t *testing.T) {
 	dir := t.TempDir()
 	orig := filepath.Join(dir, "Dockerfile")

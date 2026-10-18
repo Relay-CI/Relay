@@ -509,6 +509,56 @@ func TestEnsureGlobalProxyWritesAllPublicHostAliases(t *testing.T) {
 	}
 }
 
+func TestRedeployPreservesConfiguredAliasesWithStaleHostPayload(t *testing.T) {
+	s := newPreviewPortTestServer(t)
+	configured := &AppState{
+		App: "ethrealm", Env: EnvProd, Branch: "main", Engine: EngineDocker,
+		Mode: "traefik", HostPort: 3002, PublicHost: "ethrealm.com",
+		PublicHosts: []string{"ethrealm.com", "www.ethrealm.com"},
+	}
+	if err := s.saveAppState(configured); err != nil {
+		t.Fatal(err)
+	}
+	// A queued dashboard deployment can contain only the primary host from
+	// an older snapshot. Deploy inputs must not replace lane host settings.
+	req := DeployRequest{App: configured.App, Env: configured.Env, Branch: configured.Branch,
+		PublicHost: "ethrealm.com", PublicHosts: []string{"ethrealm.com"}}
+	for _, rollback := range []bool{false, true} {
+		current, err := s.getAppState(req.App, req.Env, req.Branch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var next *AppState
+		if rollback {
+			next = buildRollbackLaneState(rollbackLaneTransition{Request: req, Current: current, Engine: EngineDocker})
+		} else {
+			next = buildSuccessfulLaneState(successfulLaneTransition{Request: req, Current: current, Previous: current, Engine: EngineDocker})
+		}
+		if err := s.saveAppState(next); err != nil {
+			t.Fatal(err)
+		}
+		stored, err := s.getAppState(req.App, req.Env, req.Branch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(stored.PublicHosts, ","); got != "ethrealm.com,www.ethrealm.com" {
+			t.Fatalf("rollback=%t: redeploy lost configured aliases: %s", rollback, got)
+		}
+		if err := s.ensureGlobalProxy(); err != nil {
+			t.Fatal(err)
+		}
+		config, err := os.ReadFile(filepath.Join(s.dataDir, "global-proxy", "Caddyfile"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, host := range configured.PublicHosts {
+			if !strings.Contains(string(config), host+" {\n") {
+				t.Fatalf("route missing for %s", host)
+			}
+		}
+	}
+}
+
 func TestEnsureGlobalProxyKeepsStationLaneOnHostPort(t *testing.T) {
 	s := newPreviewPortTestServer(t)
 	rt := s.runtime.(*mockRuntime)
@@ -710,6 +760,9 @@ func TestRetireStandbySlotReloadsBeforeRemoving(t *testing.T) {
 	oldSlotName := appSlotContainerName(app, env, branch, "blue")
 	rt := s.runtime.(*mockRuntime)
 	rt.running[edgeName] = true
+	if err := s.saveAppState(&AppState{App: app, Env: env, Branch: branch, ActiveSlot: "green", StandbySlot: "blue", TrafficMode: "edge"}); err != nil {
+		t.Fatal(err)
+	}
 
 	s.retireStandbySlot(app, env, branch, "green", "blue", 3000, 0, "port", "edge", "")
 

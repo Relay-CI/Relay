@@ -14,6 +14,14 @@ func TestNormalizeTrafficModeSupportsCanary(t *testing.T) {
 	}
 }
 
+func TestPersistedPublicHostsDoesNotRestoreRemovedAliasFromQueuedDeploy(t *testing.T) {
+	state := &AppState{PublicHost: "ethrealm.com", PublicHosts: []string{"ethrealm.com"}}
+	req := DeployRequest{PublicHost: "ethrealm.com", PublicHosts: []string{"ethrealm.com", "www.ethrealm.com"}}
+	if got := persistedPublicHosts(req, state); !reflect.DeepEqual(got, state.PublicHosts) {
+		t.Fatalf("queued deploy restored a removed alias: %v", got)
+	}
+}
+
 func fullyConfiguredLaneState() *AppState {
 	return &AppState{
 		App:                  "demo",
