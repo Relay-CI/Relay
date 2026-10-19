@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Container runtime module: the shared interface and Docker adapter.
@@ -56,30 +57,59 @@ type ContainerRuntime interface {
 
 // ContainerSpec describes a container to launch via ContainerRuntime.RunDetached.
 type ContainerSpec struct {
-	Name          string
-	Image         string
-	Network       string
-	RestartPolicy string   // "always", "unless-stopped", or "" (no --restart flag)
-	Env           []string // "KEY=VALUE" pairs
-	Volumes       []string // "source:target[:options]" bindings
-	ExtraHosts    []string // "name:ip" aliases to inject via /etc/hosts
-	PortBindings  []string // "hostSpec:containerPort" e.g. "127.0.0.1::3000"
-	HealthArgs    []string // pre-computed --health-* flag pairs (from healthArgs())
-	Command       []string // optional command override
-	CPULimit      string   // docker --cpus value e.g. "0.5"
-	MemLimit      string   // docker --memory value e.g. "512m"
-	NoNewPrivileges bool     // prevent setuid/file-capability privilege escalation
+	Name             string
+	Image            string
+	Network          string
+	RestartPolicy    string   // "always", "unless-stopped", or "" (no --restart flag)
+	Env              []string // "KEY=VALUE" pairs
+	Volumes          []string // "source:target[:options]" bindings
+	ExtraHosts       []string // "name:ip" aliases to inject via /etc/hosts
+	PortBindings     []string // "hostSpec:containerPort" e.g. "127.0.0.1::3000"
+	HealthArgs       []string // pre-computed --health-* flag pairs (from healthArgs())
+	Command          []string // optional command override
+	CPULimit         string   // docker --cpus value e.g. "0.5"
+	MemLimit         string   // docker --memory value e.g. "512m"
+	NoNewPrivileges  bool     // prevent setuid/file-capability privilege escalation
 	DropCapabilities []string // Linux capabilities removed from the container
-	ReadOnlyRootFS bool       // mount the image root filesystem read-only
-	PIDsLimit      int        // maximum number of processes/threads (0 = Docker default)
-	User           string     // optional numeric/name UID:GID override
-	Tmpfs          []string   // writable in-memory mounts, e.g. /tmp:rw,noexec,nosuid,size=64m
+	ReadOnlyRootFS   bool     // mount the image root filesystem read-only
+	PIDsLimit        int      // maximum number of processes/threads (0 = Docker default)
+	User             string   // optional numeric/name UID:GID override
+	Tmpfs            []string // writable in-memory mounts, e.g. /tmp:rw,noexec,nosuid,size=64m
+	// NetworkAliases are extra DNS names on Network. Replicas of one slot share
+	// a pool alias so the edge proxy's resolver round-robins across them.
+	NetworkAliases []string
+	// LogMaxSize/LogMaxFile cap json-file container logs. Empty means "use
+	// Relay's default rotation when the daemon's driver supports it".
+	LogMaxSize string
+	LogMaxFile int
+}
+
+var (
+	dockerLogDriverOnce sync.Once
+	dockerLogDriver     string
+)
+
+// dockerSupportsLogRotation reports whether max-size/max-file are valid for
+// the daemon's default log driver; passing them to e.g. journald fails the run.
+func dockerSupportsLogRotation() bool {
+	dockerLogDriverOnce.Do(func() {
+		out, err := exec.Command("docker", "info", "--format", "{{.LoggingDriver}}").Output()
+		if err == nil {
+			dockerLogDriver = strings.TrimSpace(string(out))
+		}
+	})
+	return dockerLogDriver == "json-file" || dockerLogDriver == "local"
 }
 
 // DockerRuntime implements ContainerRuntime by calling the local Docker CLI.
 type DockerRuntime struct{}
 
 func (r *DockerRuntime) RunDetached(spec ContainerSpec) error {
+	if spec.LogMaxSize == "" && dockerSupportsLogRotation() {
+		// Without a cap the json-file driver keeps every line forever; the edge
+		// proxy logs one line per request, so a busy site fills the disk.
+		spec.LogMaxSize, spec.LogMaxFile = "10m", 3
+	}
 	args := dockerRunArgs(spec)
 	out, err := exec.Command("docker", args...).CombinedOutput()
 	if err != nil {
@@ -95,6 +125,17 @@ func dockerRunArgs(spec ContainerSpec) []string {
 	}
 	if spec.Network != "" {
 		args = append(args, "--network", spec.Network)
+		for _, alias := range spec.NetworkAliases {
+			if alias = strings.TrimSpace(alias); alias != "" {
+				args = append(args, "--network-alias", alias)
+			}
+		}
+	}
+	if spec.LogMaxSize != "" {
+		args = append(args, "--log-opt", "max-size="+spec.LogMaxSize)
+		if spec.LogMaxFile > 0 {
+			args = append(args, "--log-opt", "max-file="+strconv.Itoa(spec.LogMaxFile))
+		}
 	}
 	for _, e := range spec.Env {
 		args = append(args, "-e", e)

@@ -82,30 +82,55 @@ function barWidth(percent: number, fallbackValue: number, cap = 100): string {
   return "4%";
 }
 
+const REFRESH_MS = 10_000;
+
 export function OperationsPage() {
   const [data, setData] = useState<AdminOpsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [paused, setPaused] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
 
+  // Poll while the tab is visible so the page reflects what's running now,
+  // not what was running when it was opened. Refreshes keep the last good
+  // snapshot on screen instead of flashing a loading state.
   useEffect(() => {
+    if (paused) return;
     let cancelled = false;
-    setLoading(true);
-    setError("");
-    getAdminOps()
-      .then((result) => {
-        if (cancelled) return;
-        setData(result);
-        setLoading(false);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setError(err instanceof Error ? err.message : "Failed to load operations data");
-        setLoading(false);
-      });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const load = () => {
+      if (document.visibilityState === "hidden") {
+        timer = setTimeout(load, REFRESH_MS);
+        return;
+      }
+      getAdminOps()
+        .then((result) => {
+          if (cancelled) return;
+          setData(result);
+          setError("");
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          setError(err instanceof Error ? err.message : "Failed to load operations data");
+        })
+        .finally(() => {
+          if (cancelled) return;
+          setLoading(false);
+          timer = setTimeout(load, REFRESH_MS);
+        });
+    };
+    load();
     return () => {
       cancelled = true;
+      if (timer) clearTimeout(timer);
     };
+  }, [paused]);
+
+  useEffect(() => {
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(tick);
   }, []);
+  const updatedAgo = data ? Math.max(0, Math.round((now - data.generated_at) / 1000)) : 0;
 
   const hottestApps = useMemo(() => {
     return (data?.apps ?? [])
@@ -116,22 +141,37 @@ export function OperationsPage() {
 
   return (
     <div className="space-y-5">
-      <div>
-        <div className="eyebrow mb-0.5">Administration</div>
-        <h1 className="text-xl font-semibold text-white">Operations</h1>
-        <p className="text-sm text-white/40 mt-1">
-          Live lane resource usage plus deploy-to-deploy deltas for build time, traffic, and server error rate.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="eyebrow mb-0.5">Administration</div>
+          <h1 className="text-xl font-semibold text-white">Operations</h1>
+          <p className="text-sm text-white/40 mt-1">
+            Live lane resource usage plus deploy-to-deploy deltas for build time, traffic, and server error rate.
+          </p>
+        </div>
+        {data && (
+          <div className="flex items-center gap-2 text-xs text-white/45">
+            <span className={cn("w-1.5 h-1.5 rounded-full", paused ? "bg-white/30" : "bg-emerald-400 animate-pulse")} />
+            <span>{paused ? "Paused" : `Updated ${updatedAgo}s ago`}</span>
+            <button
+              type="button"
+              onClick={() => setPaused((p) => !p)}
+              className="rounded border border-white/[0.1] px-2 py-1 text-white/60 hover:text-white hover:border-white/25 transition-colors"
+            >
+              {paused ? "Resume" : "Pause"}
+            </button>
+          </div>
+        )}
       </div>
 
       {loading && <div className="text-sm text-white/30 py-8 text-center">Loading operations telemetry…</div>}
       {error && (
         <div className="rounded-xl border border-red-500/25 bg-red-500/10 px-4 py-3 text-sm text-red-300">
-          {error}
+          {error}{data ? " — showing the last successful snapshot." : ""}
         </div>
       )}
 
-      {!loading && !error && data && (
+      {!loading && data && (
         <>
           <div className="grid grid-cols-2 xl:grid-cols-5 gap-3">
             <SummaryCard label="Apps" value={String(data.summary.app_count)} meta={`${data.summary.lane_count} lanes`} />
@@ -148,7 +188,7 @@ export function OperationsPage() {
                   <div className="eyebrow mb-0.5">Heat map</div>
                   <div className="text-base font-semibold text-white">Hottest apps right now</div>
                 </div>
-                <div className="text-xs text-white/35">Snapshot updates each page load</div>
+                <div className="text-xs text-white/35">Live · refreshes every {REFRESH_MS / 1000}s</div>
               </div>
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
                 {hottestApps.map((app) => (
@@ -318,6 +358,16 @@ function LaneCard({ lane }: { lane: AdminOpsLane }) {
             >
               {lane.stopped || lane.usage.running_containers === 0 ? "offline" : "live"}
             </span>
+            {(lane.replicas ?? 1) > 1 && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded border border-sky-500/20 text-sky-300 bg-sky-500/10">
+                ×{lane.replicas} replicas
+              </span>
+            )}
+            {!!lane.variants && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded border border-violet-500/20 text-violet-300 bg-violet-500/10">
+                {lane.variants} variant{lane.variants === 1 ? "" : "s"}
+              </span>
+            )}
           </div>
           <div className="text-xs text-white/40 mt-1">
             {lane.engine} {lane.public_host ? `· ${lane.public_host}` : lane.host_port ? `· port ${lane.host_port}` : ""}
@@ -334,6 +384,22 @@ function LaneCard({ lane }: { lane: AdminOpsLane }) {
         <MiniMetric label="Storage" value={formatBytes(lane.usage.storage_bytes)} sub={`${lane.usage.container_count} containers`} />
         <MiniMetric label="Network" value={formatBytes(lane.usage.net_rx_bytes + lane.usage.net_tx_bytes)} sub="rx + tx" />
       </div>
+
+      {lane.live && (
+        <div className="grid grid-cols-3 gap-2">
+          <MiniMetric
+            label="Traffic (15m)"
+            value={lane.live.requests ? `${lane.live.requests_per_min.toFixed(lane.live.requests_per_min >= 10 ? 0 : 1)}/min` : "idle"}
+            sub={`${lane.live.requests.toLocaleString()} requests`}
+          />
+          <MiniMetric
+            label="5xx (15m)"
+            value={lane.live.requests ? formatRate(lane.live.server_error_rate) : "—"}
+            sub={lane.live.server_error_rate >= 1 ? "investigate" : "healthy"}
+          />
+          <MiniMetric label="p95 latency" value={lane.live.p95_ms ? `${lane.live.p95_ms} ms` : "—"} sub="pages + API" />
+        </div>
+      )}
 
       {lane.latest && <DeployDeltaPanel delta={lane.latest} />}
 

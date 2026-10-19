@@ -20,6 +20,19 @@ CREATE TABLE user_sessions (
     expires_at INTEGER
 );
 
+CREATE TABLE analytics_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    host TEXT NOT NULL DEFAULT '',
+    method TEXT NOT NULL DEFAULT '',
+    path TEXT NOT NULL DEFAULT '',
+    status INTEGER NOT NULL DEFAULT 0,
+    bytes INTEGER NOT NULL DEFAULT 0,
+    remote_ip TEXT NOT NULL DEFAULT '',
+    country_code TEXT NOT NULL DEFAULT '',
+    country_name TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE lane_policies (
     env TEXT PRIMARY KEY,
     display_name TEXT DEFAULT '',

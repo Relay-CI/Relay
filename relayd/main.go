@@ -237,6 +237,15 @@ type DeployRequest struct {
 	Engine      string `json:"engine"`       // "docker" or "station"/"vessel"; overrides stored app state when set
 	ForceDrain  bool   `json:"force_drain"`  // kill draining standby slot immediately instead of waiting
 
+	// Variant deploys a production experiment next to the lane's control
+	// instead of replacing it (see variants.go). VariantWeight is the percent
+	// of new visitors it receives; nil keeps the variant's current weight.
+	Variant            string   `json:"variant,omitempty"`
+	VariantWeight      *float64 `json:"variant_weight,omitempty"`
+	VariantDescription string   `json:"variant_description,omitempty"`
+	// Replicas, when > 0, sets the lane's container count before this deploy.
+	Replicas int `json:"replicas,omitempty"`
+
 	CommitMessage string `json:"commit_message,omitempty"`
 	DeployedBy    string `json:"-"` // username of the user who triggered the deploy
 	GitToken      string `json:"-"` // injected at clone time, never serialized
@@ -270,6 +279,10 @@ type DeployJob struct {
 	Rollback      bool
 	RollbackImage string
 	PromoteImage  string
+	// PreserveHistory redeploys RollbackImage without making the outgoing
+	// image the new rollback target — used when re-rolling the same build
+	// (e.g. to apply a replica count), where "previous" must not change.
+	PreserveHistory bool
 }
 
 type AppSecret struct {
@@ -1102,7 +1115,7 @@ func (s *Server) removeSlotContainerIfNotActive(app string, env DeployEnv, branc
 			return
 		}
 	}
-	s.runtime.Remove(appSlotContainerName(app, env, branch, slot))
+	s.removeSlotContainers(s.runtime, app, env, branch, slot)
 }
 
 // handleServerConfig handles GET/POST /api/server/config.
@@ -1477,6 +1490,9 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 		MemLimit             string   `json:"mem_limit,omitempty"`
 		ResourceMode         string   `json:"resource_mode,omitempty"`
 		BuildpackKind        string   `json:"buildpack_kind,omitempty"`
+		Replicas             int      `json:"replicas"`
+		RunningReplicas      int      `json:"running_replicas,omitempty"`
+		Variants             int      `json:"variants,omitempty"`
 	}
 
 	type ProjectInfo struct {
@@ -1515,6 +1531,22 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 			byApp[pe.App] = &ProjectInfo{Name: pe.App, Envs: []ProjectEnv{}, Services: []ProjectService{}}
 		}
 		byApp[pe.App].Envs = append(byApp[pe.App].Envs, pe)
+	}
+	rows.Close()
+	for _, proj := range byApp {
+		for i := range proj.Envs {
+			pe := &proj.Envs[i]
+			topo := s.getLaneTopology(pe.App, DeployEnv(pe.Env), pe.Branch)
+			pe.Replicas = topo.Replicas
+			pe.RunningReplicas = topo.SlotPools[normalizeActiveSlot(pe.ActiveSlot)]
+			if variants, err := s.listLaneVariants(pe.App, DeployEnv(pe.Env), pe.Branch); err == nil {
+				for _, v := range variants {
+					if v.Status == "running" {
+						pe.Variants++
+					}
+				}
+			}
+		}
 	}
 
 	// Attach services to each project.
@@ -1801,9 +1833,10 @@ func (s *Server) deleteLaneData(app string, env DeployEnv, branch string) (map[s
 	edgeConfigs := map[string]struct{}{}
 	volumes := map[string]struct{}{}
 
+	s.stopLaneVariants(app, env, branch, true)
 	s.runtime.Remove(appBaseContainerName(app, env, branch))
-	s.runtime.Remove(appSlotContainerName(app, env, branch, "blue"))
-	s.runtime.Remove(appSlotContainerName(app, env, branch, "green"))
+	s.removeSlotContainers(s.runtime, app, env, branch, "blue")
+	s.removeSlotContainers(s.runtime, app, env, branch, "green")
 	_ = s.stopStationLane(app, env, branch)
 	networks[appNetworkName(app, env, branch)] = struct{}{}
 	workspaces[filepath.Join(s.workspacesDir, fmt.Sprintf("%s__%s__%s", safe(app), safe(string(env)), safe(branch)))] = struct{}{}
@@ -2164,9 +2197,10 @@ func (s *Server) deleteProjectData(app string) (map[string]int64, []string, erro
 	volumes := map[string]struct{}{}
 
 	for _, lane := range lanes {
+		s.stopLaneVariants(app, lane.Env, lane.Branch, true)
 		s.runtime.Remove(appBaseContainerName(app, lane.Env, lane.Branch))
-		s.runtime.Remove(appSlotContainerName(app, lane.Env, lane.Branch, "blue"))
-		s.runtime.Remove(appSlotContainerName(app, lane.Env, lane.Branch, "green"))
+		s.removeSlotContainers(s.runtime, app, lane.Env, lane.Branch, "blue")
+		s.removeSlotContainers(s.runtime, app, lane.Env, lane.Branch, "green")
 		_ = s.stopStationLane(app, lane.Env, lane.Branch)
 		networks[appNetworkName(app, lane.Env, lane.Branch)] = struct{}{}
 		workspaces[filepath.Join(s.workspacesDir, fmt.Sprintf("%s__%s__%s", safe(app), safe(string(lane.Env)), safe(lane.Branch)))] = struct{}{}
@@ -2588,6 +2622,9 @@ func main() {
 	go s.startACMEListener()
 	// Tail Caddy access logs and aggregate per-request analytics.
 	go superviseWorker("log-tailer", s.startLogTailer)
+	// Per-lane edge proxy logs: the source of truth for app traffic (covers
+	// port-mode lanes Caddy never sees, and carries slot/variant/latency).
+	go superviseWorker("edge-analytics", s.startEdgeAnalytics)
 	if s.cloud != nil && s.cloud.agentEnabled {
 		go superviseWorker("cloud-agent", s.runCloudAgentLoop)
 	}
@@ -2835,6 +2872,11 @@ func (s *Server) handleDeploys(w http.ResponseWriter, r *http.Request) {
 		if _, ok := s.requireLaneAccess(w, r, req.App, req.Env, "deployer"); !ok {
 			return
 		}
+		req.Variant = strings.ToLower(strings.TrimSpace(req.Variant))
+		if err := s.validateDeployExtras(req.App, req.Env, req.Branch, req.Variant, req.VariantWeight, req.Replicas); err != nil {
+			httpError(w, 400, err.Error())
+			return
+		}
 		if err := s.ensureBaselineLanes(req.App, req.Branch, req.Env, req.RepoURL, req.Engine); err != nil {
 			httpError(w, 500, "failed to seed baseline lanes: "+err.Error())
 			return
@@ -3079,6 +3121,19 @@ func (s *Server) runtimeLogTargets(app string, env DeployEnv, branch string) ([]
 			Image:     st.CurrentImage,
 		})
 	}
+	if activeSlot != "" {
+		for i := 2; i <= s.slotPoolSize(app, env, branch, activeSlot); i++ {
+			add(RuntimeLogTarget{
+				ID:        fmt.Sprintf("live:r%d", i),
+				Label:     fmt.Sprintf("Live app (%s) · replica %d", activeSlot, i),
+				Kind:      "app",
+				Container: appSlotReplicaName(app, env, branch, activeSlot, i),
+				Live:      true,
+				Slot:      activeSlot,
+				Image:     st.CurrentImage,
+			})
+		}
+	}
 	if standbySlot != "" && standbySlot != activeSlot {
 		add(RuntimeLogTarget{
 			ID:        "standby",
@@ -3088,6 +3143,36 @@ func (s *Server) runtimeLogTargets(app string, env DeployEnv, branch string) ([]
 			Slot:      standbySlot,
 			Image:     st.PreviousImage,
 		})
+		for i := 2; i <= s.slotPoolSize(app, env, branch, standbySlot); i++ {
+			add(RuntimeLogTarget{
+				ID:        fmt.Sprintf("standby:r%d", i),
+				Label:     fmt.Sprintf("Standby app (%s) · replica %d", standbySlot, i),
+				Kind:      "app",
+				Container: appSlotReplicaName(app, env, branch, standbySlot, i),
+				Slot:      standbySlot,
+				Image:     st.PreviousImage,
+			})
+		}
+	}
+	if variants, err := s.listLaneVariants(app, env, branch); err == nil {
+		for _, v := range variants {
+			if v.Status != "running" {
+				continue
+			}
+			for i := 1; i <= max(v.Replicas, 1); i++ {
+				label := fmt.Sprintf("Variant %s (%s)", v.Name, formatSplitPercent(v.Weight))
+				if v.Replicas > 1 {
+					label += fmt.Sprintf(" · replica %d", i)
+				}
+				add(RuntimeLogTarget{
+					ID:        fmt.Sprintf("variant:%s:r%d", v.Name, i),
+					Label:     label,
+					Kind:      "app",
+					Container: variantReplicaName(app, env, branch, v.Name, v.Generation, i),
+					Image:     v.Image,
+				})
+			}
+		}
 	}
 	for _, slot := range []string{"blue", "green"} {
 		if slot == activeSlot || slot == standbySlot {
@@ -3718,6 +3803,9 @@ func (s *Server) pruneAppImages(app string, env DeployEnv, branch string, keep .
 	repo := fmt.Sprintf("relay/%s", safe(app))
 	tagPrefix := fmt.Sprintf("%s-%s-", safe(string(env)), safe(branch))
 	keepSet := map[string]struct{}{}
+	// A running production variant's build lives in the same repo/tag space;
+	// force-removing it would break the variant's next restart or promotion.
+	keep = append(keep, s.variantImages(app, env, branch)...)
 	for _, img := range keep {
 		img = strings.TrimSpace(img)
 		if img == "" {
@@ -4252,8 +4340,17 @@ func (s *Server) handleSyncFinish(w http.ResponseWriter, r *http.Request) {
 		StartCmd    string `json:"start_cmd"`
 		Engine      string `json:"engine,omitempty"`
 		ForceDrain  bool   `json:"force_drain,omitempty"`
+
+		Variant            string   `json:"variant,omitempty"`
+		VariantWeight      *float64 `json:"variant_weight,omitempty"`
+		VariantDescription string   `json:"variant_description,omitempty"`
+		Replicas           int      `json:"replicas,omitempty"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := s.validateDeployExtras(sess.App, sess.Env, sess.Branch, body.Variant, body.VariantWeight, body.Replicas); err != nil {
+		httpError(w, 400, err.Error())
+		return
+	}
 
 	// Persist engine preference to app state when provided so that runDeploy
 	// picks it up even if no prior app state exists (first deploy of a new project).
@@ -4316,6 +4413,11 @@ func (s *Server) handleSyncFinish(w http.ResponseWriter, r *http.Request) {
 		Engine:           normalizeEngine(body.Engine),
 		DeployedBy:       deployedBy,
 		ForceDrain:       body.ForceDrain,
+
+		Variant:            strings.ToLower(strings.TrimSpace(body.Variant)),
+		VariantWeight:      body.VariantWeight,
+		VariantDescription: strings.TrimSpace(body.VariantDescription),
+		Replicas:           body.Replicas,
 	}
 	if err := s.ensureBaselineLanes(sess.App, sess.Branch, sess.Env, "", req.Engine); err != nil {
 		httpError(w, 500, "failed to seed baseline lanes: "+err.Error())
@@ -6033,6 +6135,9 @@ func (s *Server) runDeploy(job DeployJob) {
 			return
 		}
 
+		if job.PreserveHistory && prevCurrent == job.RollbackImage {
+			prevCurrent = prevPrevious
+		}
 		end := time.Now()
 		d.Status = StatusSuccess
 		d.EndedAt = &end
@@ -6469,6 +6574,33 @@ func (s *Server) runDeploy(job DeployJob) {
 			log("runtime env: injected %d lane secret(s) into containers", runtimeSecretCount)
 		}
 
+		if req.Variant != "" {
+			if appStopped {
+				failDeploy(s, d, fmt.Errorf("lane stopped"), "start the lane before deploying a variant")
+				return
+			}
+			v, err := s.deployVariant(log, req, artifactRef, networkName, extraEnv)
+			if err != nil {
+				failDeploy(s, d, err, "variant deploy failed: "+err.Error())
+				return
+			}
+			// A variant never becomes the lane's current image, so lane state,
+			// rollback targets and image pruning are deliberately left alone.
+			end := time.Now()
+			d.Status = StatusSuccess
+			d.EndedAt = &end
+			d.ImageTag = artifactRef
+			_ = s.updateDeployStatus(d.ID, d.Status, "", d.StartedAt, d.EndedAt, d.ImageTag, "")
+			s.auditLog(firstNonEmpty(req.DeployedBy, "relay"), "variant.deploy", req.App, fmt.Sprintf("env=%s branch=%s variant=%s weight=%.2f deploy=%s", req.Env, req.Branch, v.Name, v.Weight, d.ID))
+			s.broadcastSnapshot()
+			return
+		}
+		if replicas := firstNonZero(req.Replicas, configReplicas(cfg)); replicas > 0 {
+			if replicas != s.laneReplicas(req.App, req.Env, req.Branch) {
+				log("replicas: running %d container(s) for this release", normalizeReplicaCount(replicas))
+			}
+			_ = s.setLaneReplicas(req.App, req.Env, req.Branch, replicas)
+		}
 		if !appStopped {
 			_ = s.stopStationLane(req.App, req.Env, req.Branch)
 			if err := s.swapContainer(log, req, artifactRef, networkName, extraEnv); err != nil {
@@ -6481,6 +6613,10 @@ func (s *Server) runDeploy(job DeployJob) {
 			}
 		}
 	} else {
+		if req.Variant != "" {
+			failDeploy(s, d, fmt.Errorf("unsupported engine"), "variants require the docker engine")
+			return
+		}
 		s.stopDockerAppLane(req.App, req.Env, req.Branch)
 		for _, svc := range desiredServices {
 			if appStopped {
@@ -6832,9 +6968,10 @@ func edgeCookieName(app string, env DeployEnv, branch string) string {
 
 func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, activeSlot string, standbySlot string, servicePort int, trafficMode string, splitPercent int) (string, error) {
 	p := s.edgeProxyConfigPath(app, env, branch)
-	activeUpstream := fmt.Sprintf("%s:%d", appSlotContainerName(app, env, branch, activeSlot), firstNonZero(servicePort, 3000))
+	activeUpstream := fmt.Sprintf("%s:%d", s.slotUpstreamHost(app, env, branch, activeSlot), firstNonZero(servicePort, 3000))
 	standbyMode := normalizeActiveSlot(standbySlot)
 	trafficMode = firstNonEmpty(normalizeTrafficMode(trafficMode), "edge")
+	variants := s.edgeVariantRoutingFor(app, env, branch, servicePort, trafficMode)
 	splitPercent = normalizeTrafficSplitPercent(splitPercent)
 	relayPort := listenAddrPort(s.httpAddr)
 	authURL := ""
@@ -6856,6 +6993,9 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 	conf.WriteString("  scgi_temp_path        /tmp/scgi_temp;\n")
 	conf.WriteString("  include /etc/nginx/mime.types;\n")
 	conf.WriteString("  default_type application/octet-stream;\n")
+	// Variant maps use "cookie|variant" keys; the default bucket (one CPU
+	// cache line) is too small for them and nginx refuses the config.
+	conf.WriteString("  map_hash_bucket_size 128;\n")
 	conf.WriteString("  map $http_upgrade $connection_upgrade {\n")
 	conf.WriteString("    default upgrade;\n")
 	conf.WriteString("    '' close;\n")
@@ -6877,7 +7017,18 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 	conf.WriteString("  client_max_body_size 0;\n")
 	conf.WriteString("  large_client_header_buffers 4 16k;\n")
 	conf.WriteString("  error_log /dev/stderr;\n")
-	conf.WriteString("  log_format relay_json escape=json '{\"ts\":$msec,\"status\":$status,\"host\":\"$host\",\"method\":\"$request_method\",\"path\":\"$request_uri\",\"slot\":\"$relay_target_slot\",\"request_id\":\"$request_id\"}';\n")
+	// The real visitor IP: Cloudflare's header when it's in front, else the
+	// first X-Forwarded-For hop (set by Caddy), else the TCP peer.
+	conf.WriteString("  map $http_x_forwarded_for $relay_xff_first {\n")
+	conf.WriteString("    default $remote_addr;\n")
+	conf.WriteString("    \"~^ *(?<relay_xff_ip>[^, ]+)\" $relay_xff_ip;\n")
+	conf.WriteString("  }\n")
+	conf.WriteString("  map $http_cf_connecting_ip $relay_client_ip {\n")
+	conf.WriteString("    default $http_cf_connecting_ip;\n")
+	conf.WriteString("    \"\" $relay_xff_first;\n")
+	conf.WriteString("  }\n")
+	conf.WriteString(variants.HTTPBlock)
+	conf.WriteString(edgeAccessLogFormat(app, env, branch))
 	conf.WriteString("  access_log /dev/stdout relay_json;\n")
 	conf.WriteString("  map $arg___relay_target $relay_slot_override {\n")
 	conf.WriteString("    default \"\";\n")
@@ -6928,7 +7079,7 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 	conf.WriteString(fmt.Sprintf("  map $relay_target_slot $relay_upstream {\n    default %s;\n", activeUpstream))
 	conf.WriteString(fmt.Sprintf("    ~^%s$ %s;\n", activeSlot, activeUpstream))
 	if standbyMode != "" {
-		conf.WriteString(fmt.Sprintf("    ~^%s$ %s:%d;\n", standbyMode, appSlotContainerName(app, env, branch, standbyMode), firstNonZero(servicePort, 3000)))
+		conf.WriteString(fmt.Sprintf("    ~^%s$ %s:%d;\n", standbyMode, s.slotUpstreamHost(app, env, branch, standbyMode), firstNonZero(servicePort, 3000)))
 	}
 	conf.WriteString("  }\n")
 	conf.WriteString("  server {\n")
@@ -6986,6 +7137,20 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 		conf.WriteString("      proxy_set_header X-Relay-Original-Uri /__relay/presence.js;\n")
 		conf.WriteString("      proxy_pass " + edgeSessionProxyURL(relayPort, "host.docker.internal", app, env, branch) + ";\n")
 		conf.WriteString("    }\n")
+		// Any page on any app can POST {vote|rating|comment} here; Relay files
+		// it under the variant this visitor is actually being served.
+		conf.WriteString("    location = /__relay/feedback {\n")
+		conf.WriteString("      client_max_body_size 8k;\n")
+		conf.WriteString("      proxy_http_version 1.1;\n")
+		conf.WriteString("      proxy_set_header Host $host;\n")
+		conf.WriteString(fmt.Sprintf("      proxy_set_header X-Relay-Edge-Token \"%s\";\n", edgeToken))
+		conf.WriteString(fmt.Sprintf("      proxy_set_header X-Relay-Lane-App \"%s\";\n", app))
+		conf.WriteString(fmt.Sprintf("      proxy_set_header X-Relay-Lane-Env \"%s\";\n", env))
+		conf.WriteString(fmt.Sprintf("      proxy_set_header X-Relay-Lane-Branch \"%s\";\n", branch))
+		conf.WriteString("      proxy_set_header X-Relay-Variant $relay_variant;\n")
+		conf.WriteString("      proxy_set_header X-Relay-Client-IP $relay_client_ip;\n")
+		conf.WriteString(fmt.Sprintf("      proxy_pass http://host.docker.internal:%d/api/edge/feedback;\n", relayPort))
+		conf.WriteString("    }\n")
 	}
 	conf.WriteString("    location / {\n")
 	if authURL != "" {
@@ -7019,7 +7184,18 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 	} else {
 		conf.WriteString("      add_header X-Relay-Target $relay_target_slot always;\n")
 		conf.WriteString(fmt.Sprintf("      add_header X-Relay-Traffic-Mode \"%s\" always;\n", trafficMode))
-		conf.WriteString("      proxy_pass http://$relay_upstream;\n")
+		conf.WriteString(variants.LocationHead)
+		// Set (or clear, when empty) the variant header so a client can never
+		// spoof which build it was served.
+		conf.WriteString("      proxy_set_header X-Relay-Variant $relay_variant;\n")
+		conf.WriteString("      proxy_set_header X-Real-IP $relay_client_ip;\n")
+		// A replica pool resolves to several addresses; if one refuses or is
+		// restarting, nginx retries the next instead of returning a 502.
+		// Requests that already streamed a body upstream are never retried.
+		conf.WriteString("      proxy_next_upstream error timeout http_502 http_503 http_504;\n")
+		conf.WriteString("      proxy_next_upstream_tries 3;\n")
+		conf.WriteString("      proxy_next_upstream_timeout 15s;\n")
+		conf.WriteString("      proxy_pass http://" + variants.Upstream + ";\n")
 	}
 	conf.WriteString("    }\n")
 	conf.WriteString("  }\n")
@@ -7030,23 +7206,67 @@ func (s *Server) writeEdgeProxyConfig(app string, env DeployEnv, branch string, 
 	return p, nil
 }
 
-// activeAppCount returns how many apps are currently deployed (not stopped)
-// on this host, for sizing the default per-app memory cap — see
-// defaultAppMemLimitMB. Falls back to 1 (today's single-app behavior) if the
-// count can't be read, so a DB hiccup never produces a zero divisor.
-func (s *Server) activeAppCount() int {
-	var count int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM app_state WHERE COALESCE(stopped,0)=0`).Scan(&count); err != nil || count < 1 {
-		return 1
-	}
-	return count
+// edgeAccessLogFormat is the per-request JSON line the edge proxy writes to
+// stdout. Relay tails it into analytics (edge_analytics.go) and the rollout
+// assessor reads ts/status/slot, so those field names must stay stable.
+func edgeAccessLogFormat(app string, env DeployEnv, branch string) string {
+	return `  log_format relay_json escape=json '{"ts":$msec,"status":$status,"host":"$host",` +
+		`"method":"$request_method","path":"$request_uri","slot":"$relay_target_slot",` +
+		`"request_id":"$request_id","app":"` + app + `","env":"` + string(env) + `","branch":"` + branch + `",` +
+		`"variant":"$relay_variant","ip":"$relay_client_ip","cc":"$http_cf_ipcountry",` +
+		`"rt":"$request_time","bytes":"$body_bytes_sent","ua":"$http_user_agent",` +
+		`"ref":"$http_referer","accept":"$http_accept"}';` + "\n"
 }
 
 func (s *Server) runSlotContainerWithRuntime(runtime ContainerRuntime, log func(string, ...any), app string, env DeployEnv, branch string, slot string, image string, servicePort int, networkName string, extraEnv map[string]string) error {
 	containerName := appSlotContainerName(app, env, branch, slot)
 	s.forgetEdgeSlotUpstreams(containerName)
-	runtime.Remove(containerName)
+	// Replica pools are a Docker feature; the station engine passes its own
+	// runtime and always runs a single container per slot.
+	pooled := runtime == s.runtime
+	replicas := 1
+	if pooled {
+		replicas = s.laneReplicas(app, env, branch)
+	}
+	s.removeSlotContainers(runtime, app, env, branch, slot)
 
+	spec := s.buildAppContainerSpec(runtime, app, env, branch, containerName, image, servicePort, networkName, extraEnv)
+	if !pooled {
+		if log != nil {
+			log("runtime run candidate: %s on %s", containerName, networkName)
+		}
+		t0 := time.Now()
+		err := runtime.RunDetached(spec)
+		if log != nil {
+			log("runtime run completed in %s", time.Since(t0).Round(time.Millisecond))
+		}
+		return err
+	}
+	// Record the pool before launching so a failure part-way still lets
+	// removeSlotContainers find and clean up every replica it started.
+	s.setSlotPoolSize(app, env, branch, slot, replicas)
+	alias := appSlotPoolAlias(app, env, branch, slot)
+	t0 := time.Now()
+	for i := 1; i <= replicas; i++ {
+		replica := replicaContainerSpec(spec, appSlotReplicaName(app, env, branch, slot, i), alias)
+		if log != nil {
+			log("runtime run candidate: %s on %s (replica %d/%d)", replica.Name, networkName, i, replicas)
+		}
+		if err := runtime.RunDetached(replica); err != nil {
+			s.removeSlotContainers(runtime, app, env, branch, slot)
+			return err
+		}
+	}
+	if log != nil {
+		log("runtime run completed in %s", time.Since(t0).Round(time.Millisecond))
+	}
+	return nil
+}
+
+// buildAppContainerSpec is the spec every app container shares — slot
+// replicas and production variants alike — so they get identical env,
+// secrets, volumes, resource limits and sandboxing.
+func (s *Server) buildAppContainerSpec(runtime ContainerRuntime, app string, env DeployEnv, branch string, containerName string, image string, servicePort int, networkName string, extraEnv map[string]string) ContainerSpec {
 	secs, _ := s.getAppSecrets(app, env, branch)
 	allEnv := make(map[string]string)
 	for k, v := range extraEnv {
@@ -7101,19 +7321,11 @@ func (s *Server) runSlotContainerWithRuntime(runtime ContainerRuntime, log func(
 		// budget is split across however many apps are actually running so
 		// it doesn't overcommit a small host the moment a third or fourth
 		// app is deployed to it.
-		if mb := defaultAppMemLimitMB(s.activeAppCount()); mb > 0 {
+		if mb := defaultAppMemLimitMB(s.activeReplicaCount()); mb > 0 {
 			spec.MemLimit = fmt.Sprintf("%dm", mb)
 		}
 	}
-	if log != nil {
-		log("runtime run candidate: %s on %s", containerName, networkName)
-	}
-	t0 := time.Now()
-	err := runtime.RunDetached(spec)
-	if log != nil {
-		log("runtime run completed in %s", time.Since(t0).Round(time.Millisecond))
-	}
-	return err
+	return spec
 }
 
 func (s *Server) runSlotContainer(log func(string, ...any), app string, env DeployEnv, branch string, slot string, image string, servicePort int, networkName string, extraEnv map[string]string) error {
@@ -7372,7 +7584,6 @@ func (s *Server) retireStandbySlotLocked(app string, env DeployEnv, branch strin
 		normalizeActiveSlot(st.StandbySlot) != normalizeActiveSlot(oldSlot) {
 		return
 	}
-	name := appSlotContainerName(app, env, branch, oldSlot)
 	if err := s.ensureEdgeProxyLocked(nil, app, env, branch, appNetworkName(app, env, branch), activeSlot, "", servicePort, hostPort, mode, trafficMode, publicHost, 100, false); err != nil {
 		return
 	}
@@ -7381,7 +7592,7 @@ func (s *Server) retireStandbySlotLocked(app string, env DeployEnv, branch strin
 	if trafficMode != "session" {
 		time.Sleep(2 * time.Second)
 	}
-	s.runtime.Remove(name)
+	s.removeSlotContainers(s.runtime, app, env, branch, oldSlot)
 	if st, err := s.getAppState(app, env, branch); err == nil && st != nil {
 		if normalizeActiveSlot(st.ActiveSlot) == normalizeActiveSlot(activeSlot) && normalizeActiveSlot(st.StandbySlot) == normalizeActiveSlot(oldSlot) {
 			st.StandbySlot = ""
@@ -7623,7 +7834,7 @@ func (s *Server) rollbackCanary(app string, env DeployEnv, branch string, detail
 	if err := s.ensureEdgeProxyLocked(nil, app, env, branch, appNetworkName(app, env, branch), oldSlot, "", st.ServicePort, st.HostPort, st.Mode, st.TrafficMode, st.PublicHost, 100, false); err != nil {
 		return err
 	}
-	s.runtime.Remove(appSlotContainerName(app, env, branch, newSlot))
+	s.removeSlotContainers(s.runtime, app, env, branch, newSlot)
 	st.ActiveSlot = oldSlot
 	st.StandbySlot = ""
 	st.DrainUntil = 0
@@ -7754,6 +7965,16 @@ func (s *Server) startACMEListener() {
 	}()
 }
 
+// caddyReverseProxy emits a reverse_proxy block that retries failed dials for
+// a few seconds. Without it, the instant an upstream (an app's edge proxy, or
+// relayd itself) restarts, every in-flight request becomes a 502 at Cloudflare.
+func caddyReverseProxy(upstream string) string {
+	return "\treverse_proxy " + upstream + " {\n" +
+		"\t\tlb_try_duration 5s\n" +
+		"\t\tlb_try_interval 250ms\n" +
+		"\t}\n"
+}
+
 func customHostRuleBlock(rule customHostRule, relayPort int) (string, error) {
 	switch rule.Action {
 	case "redirect":
@@ -7763,7 +7984,7 @@ func customHostRuleBlock(rule customHostRule, relayPort int) (string, error) {
 		}
 		return fmt.Sprintf("\tredir %s %d\n", target, rule.RedirectCode), nil
 	case "reverse_proxy":
-		return fmt.Sprintf("\treverse_proxy %s\n", rule.UpstreamURL), nil
+		return caddyReverseProxy(rule.UpstreamURL), nil
 	case "static_response":
 		var block strings.Builder
 		if ct := strings.TrimSpace(rule.ResponseContentType); ct != "" {
@@ -7775,7 +7996,7 @@ func customHostRuleBlock(rule customHostRule, relayPort int) (string, error) {
 		if relayPort <= 0 {
 			return "", fmt.Errorf("relay dashboard host rules require Relay to listen on a TCP port")
 		}
-		return fmt.Sprintf("\treverse_proxy host.docker.internal:%d\n", relayPort), nil
+		return caddyReverseProxy(fmt.Sprintf("host.docker.internal:%d", relayPort)), nil
 	default:
 		return "", fmt.Errorf("unsupported custom host rule action: %s", rule.Action)
 	}
@@ -7839,12 +8060,12 @@ func (s *Server) ensureGlobalProxy() error {
 			continue
 		}
 		for _, host := range hosts {
-			setRoute(host, fmt.Sprintf("\treverse_proxy %s\n", upstream))
+			setRoute(host, caddyReverseProxy(upstream))
 		}
 	}
 	if dashboardHost := strings.TrimSpace(s.serverDashboardHost()); dashboardHost != "" {
 		if relayPort := listenAddrPort(s.httpAddr); relayPort > 0 {
-			setRoute(dashboardHost, fmt.Sprintf("\treverse_proxy host.docker.internal:%d\n", relayPort))
+			setRoute(dashboardHost, caddyReverseProxy(fmt.Sprintf("host.docker.internal:%d", relayPort)))
 		}
 	}
 	relayPort := listenAddrPort(s.httpAddr)
@@ -8139,8 +8360,8 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 	if err := s.runSlotContainer(log, req.App, req.Env, req.Branch, nextSlot, imageTag, servicePort, networkName, extraEnv); err != nil {
 		return err
 	}
-	if err := s.waitForRuntimeContainerReadyOnPath(s.runtime, log, candidateName, servicePort, s.rolloutReadyTimeoutDuration(), req.ReadinessPath); err != nil {
-		s.runtime.Remove(candidateName)
+	if err := s.waitForSlotReplicasReady(s.runtime, log, req.App, req.Env, req.Branch, nextSlot, servicePort, s.rolloutReadyTimeoutDuration(), req.ReadinessPath); err != nil {
+		s.removeSlotContainers(s.runtime, req.App, req.Env, req.Branch, nextSlot)
 		return err
 	}
 
@@ -8203,7 +8424,7 @@ func (s *Server) swapContainer(log func(string, ...any), req DeployRequest, imag
 		// applyLaneRollout deliberately retains a route-live candidate when a
 		// durable state write needs reconciliation.
 		if !strings.Contains(routeErr.Error(), "pending reconciliation") {
-			s.runtime.Remove(candidateName)
+			s.removeSlotContainers(s.runtime, req.App, req.Env, req.Branch, nextSlot)
 		}
 		return routeErr
 	}

@@ -1641,6 +1641,19 @@ ${c.bold}COMMANDS${c.reset}
     --mode  --host-port  --service-port  --public-host
     --install-cmd  --build-cmd  --start-cmd
     --stream                 Stream build logs until complete
+    --replicas <n>           Containers per release (load-balanced, 1-16)
+    --variant <name>         Ship as a production variant next to the live release
+    --weight <percent>       Share of new visitors the variant gets (sticky per visitor)
+
+  ${c.cyan}scale${c.reset} <n>                    Run n load-balanced replicas (zero-downtime)
+    --app  --env  --branch
+
+  ${c.cyan}variants${c.reset} [list|feedback]       Variant traffic, errors, latency and feedback
+  ${c.cyan}variants weight${c.reset} <name> <percent>
+  ${c.cyan}variants promote${c.reset} <name>        Make a variant the live release
+  ${c.cyan}variants rm${c.reset} <name>             Stop a variant (visitors fall back to control)
+  ${c.cyan}variants reshuffle${c.reset}             Reassign every visitor under current weights
+    Preview any variant with ?__relay_variant=<name>
 
   ${c.cyan}status${c.reset}                       Latest deploy for an app/env/branch
     --app  --env  --branch
@@ -2428,6 +2441,92 @@ async function main() {
         branch: resolved.branch,
       });
       ok(`${cmd} sent for ${resolved.app}/${resolved.env}/${resolved.branch}`);
+    } catch (e) {
+      die(e.message);
+    }
+    process.exit(0);
+  }
+
+  // ── scale ──────────────────────────────────────────────────────────────
+  if (cmd === "scale") {
+    const replicas = parseInt(args._[1] || args.replicas, 10);
+    if (!Number.isInteger(replicas) || replicas < 1 || replicas > 16) {
+      die("usage: relay scale <1-16> [--app --env --branch]");
+    }
+    const { transport, resolved } = await resolveOrSetup(args, { needDeploy: true });
+    try {
+      const res = await apiJSON(transport, "POST", "/api/apps/scale", {
+        app: resolved.app,
+        env: resolved.env,
+        branch: resolved.branch,
+        replicas,
+      });
+      const lane = `${resolved.app}/${resolved.env}/${resolved.branch}`;
+      if (res.deploy_id) {
+        ok(`${lane} → ${res.replicas} replica(s); rolling out with zero downtime  id=${res.deploy_id}`);
+      } else {
+        ok(`${lane} → ${res.replicas} replica(s) (already running at that size, or applies on next deploy)`);
+      }
+    } catch (e) {
+      die(e.message);
+    }
+    process.exit(0);
+  }
+
+  // ── variants (production experiments) ───────────────────────────────────
+  if (cmd === "variants" || cmd === "variant") {
+    const sub = args._[1] || "list";
+    const { transport, resolved } = await resolveOrSetup(args, { needDeploy: true });
+    const lane = { app: resolved.app, env: resolved.env, branch: resolved.branch };
+    const post = (body) => apiJSON(transport, "POST", "/api/variants", { ...lane, ...body });
+    try {
+      if (sub === "list" || sub === "ls" || sub === "feedback") {
+        const qs = `?app=${encodeURIComponent(lane.app)}&env=${encodeURIComponent(lane.env)}&branch=${encodeURIComponent(lane.branch)}&period=${encodeURIComponent(args.period || "7d")}`;
+        const report = await apiJSON(transport, "GET", `/api/variants${qs}`);
+        if (sub === "feedback") {
+          const items = report.feedback || [];
+          if (!items.length) info("No feedback yet. Apps can POST {vote|rating|comment} to /__relay/feedback.");
+          for (const f of items) {
+            const vote = f.vote > 0 ? "👍" : f.vote < 0 ? "👎" : "  ";
+            const stars = f.rating ? "★".repeat(f.rating) : "";
+            console.log(`  ${new Date(f.ts).toISOString().slice(0, 16)}  ${c.cyan}${f.variant.padEnd(12)}${c.reset} ${vote} ${stars} ${f.comment || ""}${f.page ? c.dim + "  " + f.page + c.reset : ""}`);
+          }
+          process.exit(0);
+        }
+        if (!report.supported) warn(report.unsupported);
+        const rows = [{ name: "control", weight: report.control.weight, metrics: report.control.metrics }, ...(report.variants || [])];
+        console.log(`  ${"VARIANT".padEnd(16)}${"WEIGHT".padEnd(9)}${"VISITORS".padEnd(10)}${"VIEWS".padEnd(9)}${"5XX%".padEnd(8)}${"P95".padEnd(9)}FEEDBACK`);
+        for (const v of rows) {
+          const m = v.metrics || {};
+          const status = v.status && v.status !== "running" ? ` (${v.status})` : "";
+          const fb = m.feedback ? `👍${m.thumbs_up} 👎${m.thumbs_down}${m.avg_rating ? ` ★${m.avg_rating.toFixed(1)}` : ""}` : "-";
+          console.log(`  ${(v.name + status).padEnd(16)}${(Number(v.weight).toFixed(1) + "%").padEnd(9)}${String(m.visitors || 0).padEnd(10)}${String(m.page_views || 0).padEnd(9)}${(Number(m.error_rate || 0).toFixed(2)).padEnd(8)}${((m.p95_ms || 0) + "ms").padEnd(9)}${fb}`);
+        }
+        if (!(report.variants || []).length) {
+          info(`No variants yet. Ship one with: relay deploy --variant <name> --weight 10`);
+        }
+        process.exit(0);
+      }
+      const name = args._[2] || args.name;
+      if (sub === "weight") {
+        const weight = Number(args._[3] ?? args.weight);
+        if (!name || !Number.isFinite(weight)) die("usage: relay variants weight <name> <percent>");
+        await post({ action: "weight", name, weight });
+        ok(`variant ${name} now gets ${weight}% of new visitors (existing visitors keep their variant)`);
+      } else if (sub === "rm" || sub === "remove") {
+        if (!name) die("usage: relay variants rm <name>");
+        await post({ action: "remove", name });
+        ok(`variant ${name} removed; its visitors fall back to control`);
+      } else if (sub === "promote") {
+        if (!name) die("usage: relay variants promote <name>");
+        const res = await post({ action: "promote", name });
+        ok(`promoting ${name} to control  id=${res.deploy_id}`);
+      } else if (sub === "reshuffle") {
+        await post({ action: "reshuffle" });
+        ok("all visitors will be reassigned under the current weights");
+      } else {
+        die(`unknown subcommand "${sub}" (list, feedback, weight, rm, promote, reshuffle)`);
+      }
     } catch (e) {
       die(e.message);
     }
@@ -3281,6 +3380,20 @@ async function main() {
   if (hasServicePortOverride) deployPayload.service_port = servicePort;
   if (hasPublicHostOverride) deployPayload.public_host = publicHost;
   if (args["force-drain"] === "true") deployPayload.force_drain = true;
+  if (args.variant && args.variant !== "true") {
+    deployPayload.variant = String(args.variant);
+    if (args["variant-description"]) deployPayload.variant_description = String(args["variant-description"]);
+  }
+  if (args.weight !== undefined) {
+    const weight = Number(args.weight);
+    if (!Number.isFinite(weight) || weight < 0 || weight > 100) die("--weight must be a percent between 0 and 100");
+    deployPayload.variant_weight = weight;
+  }
+  if (args.replicas !== undefined) {
+    const replicas = parseInt(args.replicas, 10);
+    if (!Number.isInteger(replicas) || replicas < 1 || replicas > 16) die("--replicas must be between 1 and 16");
+    deployPayload.replicas = replicas;
+  }
   const deploy = await apiJSON(
     transport,
     "POST",

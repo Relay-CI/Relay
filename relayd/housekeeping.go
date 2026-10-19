@@ -199,6 +199,7 @@ func (s *Server) runHousekeepingWorker() {
 
 func (s *Server) housekeepOnce() {
 	s.pruneDeployLogs()
+	s.pruneAnalyticsEvents()
 	s.pruneDeployImages()
 	s.pruneBuildCache(false)
 	s.pruneAbandonedSyncSessions()
@@ -421,6 +422,9 @@ func (s *Server) pruneDeployImages() {
 		}
 		rows.Close()
 	}
+	for _, image := range s.variantImages("", "", "") {
+		protected[image] = struct{}{}
+	}
 
 	var records []laneImageRecord
 	if rows, err := s.db.Query(
@@ -514,5 +518,42 @@ func (s *Server) reconcileActiveSlots() {
 		} else {
 			fmt.Printf("reconciler: restarted %s\n", slotName)
 		}
+	}
+}
+
+// analyticsRetentionDays is how long per-request analytics rows are kept
+// (RELAY_ANALYTICS_RETENTION_DAYS, default 35 — just past the 30-day view).
+func analyticsRetentionDays() int {
+	if v, err := strconv.Atoi(strings.TrimSpace(os.Getenv("RELAY_ANALYTICS_RETENTION_DAYS"))); err == nil && v > 0 {
+		return v
+	}
+	return 35
+}
+
+// pruneAnalyticsEvents deletes analytics rows past retention in bounded
+// batches so a large backlog never holds the SQLite write lock for long.
+// Without it the table grew by one row per request forever, slowing every
+// analytics query and eventually filling the disk.
+func (s *Server) pruneAnalyticsEvents() {
+	adb := s.analyticsStore()
+	if adb == nil {
+		return
+	}
+	cutoff := time.Now().AddDate(0, 0, -analyticsRetentionDays()).Unix()
+	total := int64(0)
+	for i := 0; i < 200; i++ {
+		res, err := adb.Exec(`DELETE FROM analytics_events WHERE id IN (SELECT id FROM analytics_events WHERE ts < ? LIMIT 20000)`, cutoff)
+		if err != nil {
+			return
+		}
+		n, _ := res.RowsAffected()
+		total += n
+		if n < 20000 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if total > 0 {
+		fmt.Printf("housekeeping: pruned %d analytics event(s) older than %d days\n", total, analyticsRetentionDays())
 	}
 }

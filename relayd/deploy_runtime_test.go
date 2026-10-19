@@ -456,7 +456,7 @@ func TestEnsureGlobalProxyRepairsLegacyHostPortsBeforeWritingConfig(t *testing.T
 		t.Fatalf("read caddyfile: %v", err)
 	}
 	text := string(data)
-	if !strings.Contains(text, "myhltv.example.com {\n\treverse_proxy "+containerName+":3000\n}") {
+	if !strings.Contains(text, "myhltv.example.com {\n"+caddyReverseProxy(containerName+":3000")+"}") {
 		t.Fatalf("expected repaired host route in caddyfile, got:\n%s", text)
 	}
 
@@ -498,10 +498,10 @@ func TestEnsureGlobalProxyWritesAllPublicHostAliases(t *testing.T) {
 	}
 	text := string(data)
 	upstream := appBaseContainerName("myhltv", EnvProd, "main") + ":3000"
-	if !strings.Contains(text, "myhltv.example.com {\n\treverse_proxy "+upstream+"\n}") {
+	if !strings.Contains(text, "myhltv.example.com {\n"+caddyReverseProxy(upstream)+"}") {
 		t.Fatalf("expected primary host route in caddyfile, got:\n%s", text)
 	}
-	if !strings.Contains(text, "www.myhltv.example.com {\n\treverse_proxy "+upstream+"\n}") {
+	if !strings.Contains(text, "www.myhltv.example.com {\n"+caddyReverseProxy(upstream)+"}") {
 		t.Fatalf("expected alias host route in caddyfile, got:\n%s", text)
 	}
 	if !rt.hasNetworkConnection("relay-global-proxy", appNetworkName("myhltv", EnvProd, "main")) {
@@ -585,7 +585,7 @@ func TestEnsureGlobalProxyKeepsStationLaneOnHostPort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read caddyfile: %v", err)
 	}
-	if !strings.Contains(string(data), "desktop.example.com {\n\treverse_proxy host.docker.internal:3010\n}") {
+	if !strings.Contains(string(data), "desktop.example.com {\n"+caddyReverseProxy("host.docker.internal:3010")+"}") {
 		t.Fatalf("expected station host-port route in caddyfile, got:\n%s", data)
 	}
 	if len(rt.networkConnections) != 0 {

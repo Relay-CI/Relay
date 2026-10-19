@@ -23,6 +23,75 @@ var sqliteSchemaMigrations = []schemaMigration{
 	{version: 8, name: "github app installations", up: migrateGitHubAppTables},
 	{version: 9, name: "session activity tracking", up: migrateSessionSecurityColumns},
 	{version: 10, name: "presence and recoverable lane rollouts", up: migratePresenceAndRolloutIntents},
+	{version: 11, name: "replicas variants and lane analytics", up: migrateReplicasVariantsAnalytics},
+}
+
+func migrateReplicasVariantsAnalytics(tx *sql.Tx) error {
+	if err := execSQLiteStatements(tx, []string{
+		`CREATE TABLE IF NOT EXISTS lane_topology (
+			app TEXT NOT NULL,
+			env TEXT NOT NULL,
+			branch TEXT NOT NULL,
+			replicas INTEGER NOT NULL DEFAULT 1,
+			slot_pools TEXT NOT NULL DEFAULT '{}',
+			variant_seed INTEGER NOT NULL DEFAULT 1,
+			updated_at INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (app, env, branch)
+		)`,
+		`CREATE TABLE IF NOT EXISTS lane_variants (
+			app TEXT NOT NULL,
+			env TEXT NOT NULL,
+			branch TEXT NOT NULL,
+			name TEXT NOT NULL,
+			image TEXT NOT NULL DEFAULT '',
+			weight REAL NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT 'running',
+			deploy_id TEXT NOT NULL DEFAULT '',
+			commit_sha TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			generation INTEGER NOT NULL DEFAULT 1,
+			replicas INTEGER NOT NULL DEFAULT 1,
+			created_at INTEGER NOT NULL DEFAULT 0,
+			updated_at INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (app, env, branch, name)
+		)`,
+		`CREATE TABLE IF NOT EXISTS variant_feedback (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			ts INTEGER NOT NULL,
+			app TEXT NOT NULL,
+			env TEXT NOT NULL,
+			branch TEXT NOT NULL,
+			variant TEXT NOT NULL DEFAULT 'control',
+			vote INTEGER NOT NULL DEFAULT 0,
+			rating INTEGER NOT NULL DEFAULT 0,
+			comment TEXT NOT NULL DEFAULT '',
+			page TEXT NOT NULL DEFAULT '',
+			visitor TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_variant_feedback_lane ON variant_feedback(app, env, branch, variant, ts)`,
+	}); err != nil {
+		return err
+	}
+	for _, column := range []sqliteColumn{
+		{table: "analytics_events", name: "app", definition: "TEXT NOT NULL DEFAULT ''"},
+		{table: "analytics_events", name: "env", definition: "TEXT NOT NULL DEFAULT ''"},
+		{table: "analytics_events", name: "branch", definition: "TEXT NOT NULL DEFAULT ''"},
+		{table: "analytics_events", name: "slot", definition: "TEXT NOT NULL DEFAULT ''"},
+		{table: "analytics_events", name: "variant", definition: "TEXT NOT NULL DEFAULT ''"},
+		{table: "analytics_events", name: "duration_ms", definition: "INTEGER NOT NULL DEFAULT 0"},
+		{table: "analytics_events", name: "kind", definition: "TEXT NOT NULL DEFAULT ''"},
+		{table: "analytics_events", name: "visitor", definition: "TEXT NOT NULL DEFAULT ''"},
+		{table: "analytics_events", name: "referrer", definition: "TEXT NOT NULL DEFAULT ''"},
+		{table: "analytics_events", name: "source", definition: "TEXT NOT NULL DEFAULT 'caddy'"},
+	} {
+		if err := ensureSQLiteColumn(tx, column); err != nil {
+			return err
+		}
+	}
+	return execSQLiteStatements(tx, []string{
+		`CREATE INDEX IF NOT EXISTS idx_analytics_lane_ts ON analytics_events(app, env, branch, ts)`,
+		`CREATE INDEX IF NOT EXISTS idx_analytics_host_ts ON analytics_events(host, ts)`,
+	})
 }
 
 func migratePresenceAndRolloutIntents(tx *sql.Tx) error {

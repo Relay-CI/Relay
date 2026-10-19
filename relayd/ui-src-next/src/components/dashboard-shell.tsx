@@ -13,6 +13,7 @@ import { BuildLogsPage } from "@/components/pages/build-logs";
 import { RuntimeLogsPage } from "@/components/pages/runtime-logs";
 import { SettingsPage } from "@/components/pages/settings";
 import { AnalyticsPage } from "@/components/pages/analytics";
+import { VariantsPage } from "@/components/pages/variants";
 import { ResourcesPage } from "@/components/pages/resources";
 import { AppearancePage } from "@/components/pages/appearance";
 import { AdminPanel } from "@/components/pages/admin-panel";
@@ -378,6 +379,8 @@ export default function DashboardShell() {
         );
       case "analytics":
         return <AnalyticsPage selectedEnv={selectedEnv} />;
+      case "variants":
+        return <VariantsPage selectedEnv={selectedEnv} isDeployer={isDeployer} />;
       case "resources":
         return (
           <ResourcesPage

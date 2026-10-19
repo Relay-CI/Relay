@@ -51,9 +51,10 @@ func (s *Server) runtimeForEngine(engine string) ContainerRuntime {
 }
 
 func (s *Server) stopDockerAppLane(app string, env DeployEnv, branch string) {
+	s.stopLaneVariants(app, env, branch, false)
 	s.runtime.Remove(appBaseContainerName(app, env, branch))
-	s.runtime.Remove(appSlotContainerName(app, env, branch, "blue"))
-	s.runtime.Remove(appSlotContainerName(app, env, branch, "green"))
+	s.removeSlotContainers(s.runtime, app, env, branch, "blue")
+	s.removeSlotContainers(s.runtime, app, env, branch, "green")
 }
 
 func (s *Server) stopLaneServices(app string, env DeployEnv, branch string) {

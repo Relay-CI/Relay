@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { cn } from "@/lib/utils";
-import { saveAppConfig } from "@/lib/api";
+import { saveAppConfig, scaleLane } from "@/lib/api";
 import type { EnvInfo } from "@/lib/api";
 import type { NormalizedProject } from "@/lib/relay-utils";
 
@@ -98,6 +98,8 @@ function ResourceCard({
           <span className="text-xs text-white/40">{env.stopped ? "stopped" : "running"}</span>
         </div>
       </div>
+
+      <ReplicaControl env={env} onUpdated={onUpdated} />
 
       {/* Mode toggle */}
       <div>
@@ -221,6 +223,81 @@ function ResourceCard({
       >
         {busy ? "Saving…" : "Save resource config"}
       </button>
+    </div>
+  );
+}
+
+function ReplicaControl({ env, onUpdated }: { env: EnvInfo; onUpdated: () => void }) {
+  const saved = env.replicas ?? 1;
+  const [replicas, setReplicas] = useState(saved);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<{ tone: "ok" | "err"; text: string } | null>(null);
+  const docker = (env.engine ?? "docker") === "docker";
+  const running = env.running_replicas || (env.stopped ? 0 : 1);
+
+  async function apply() {
+    setBusy(true);
+    setNotice(null);
+    try {
+      const res = await scaleLane({ app: env.app, env: env.env, branch: env.branch }, replicas);
+      setNotice({
+        tone: "ok",
+        text: res.deploy_id
+          ? `Rolling out ${res.replicas} replica(s) with zero downtime — the new pool takes traffic once every replica is ready.`
+          : `Saved ${res.replicas} replica(s); applies on the next deploy.`,
+      });
+      onUpdated();
+    } catch (err) {
+      setNotice({ tone: "err", text: err instanceof Error ? err.message : "Scale failed" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-xs text-white/40">Replicas</div>
+        <div className="text-[11px] text-white/30">{env.stopped ? "lane stopped" : `${running} running now`}</div>
+      </div>
+      {!docker ? (
+        <p className="text-xs text-white/35">Replicas are available on the Docker engine.</p>
+      ) : (
+        <>
+          <div className="flex items-center gap-2">
+            <div className="flex items-center rounded border border-white/[0.08] overflow-hidden">
+              <button type="button" className="px-3 py-1.5 text-sm text-white/60 hover:text-white hover:bg-white/[0.06] disabled:opacity-30" disabled={replicas <= 1} onClick={() => setReplicas((n) => Math.max(1, n - 1))} aria-label="Fewer replicas">
+                −
+              </button>
+              <span className="px-3 py-1.5 text-sm text-white font-mono min-w-[2.5rem] text-center">{replicas}</span>
+              <button type="button" className="px-3 py-1.5 text-sm text-white/60 hover:text-white hover:bg-white/[0.06] disabled:opacity-30" disabled={replicas >= 16} onClick={() => setReplicas((n) => Math.min(16, n + 1))} aria-label="More replicas">
+                +
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={apply}
+              disabled={busy || replicas === saved}
+              className={cn(
+                "text-xs px-3 py-1.5 rounded font-semibold transition-colors",
+                replicas !== saved ? "bg-white text-black hover:bg-white/90" : "bg-white/[0.06] text-white/30 cursor-not-allowed",
+              )}
+            >
+              {busy ? "Applying…" : "Apply"}
+            </button>
+          </div>
+          <p className="text-[11px] text-white/30 mt-1.5 leading-relaxed">
+            Identical containers behind the lane&apos;s edge proxy, load-balanced with automatic retry when one is restarting. Use more than one
+            to survive a crashed container and to use more CPU cores (Node, Python and Ruby apps run on a single core per process). Each
+            replica gets its own memory cap.
+          </p>
+          {notice && (
+            <div className={cn("mt-2 rounded px-3 py-2 text-xs border", notice.tone === "ok" ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300" : "bg-red-500/10 border-red-500/30 text-red-300")}>
+              {notice.text}
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

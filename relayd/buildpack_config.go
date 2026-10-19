@@ -21,10 +21,11 @@ type RelayConfig struct {
 	InstallCmd    string   `json:"install_cmd"`
 	BuildCmd      string   `json:"build_cmd"`
 	StartCmd      string   `json:"start_cmd"`
-	ProjectRoot   string   `json:"project_root"`      // repo-relative app root for monorepos
-	BuildContext  string   `json:"build_context"`     // repo-relative docker build context
-	Dockerfile    string   `json:"dockerfile"`        // repo-relative dockerfile path
-	Volumes       []string `json:"volumes,omitempty"` // persistent volume mounts e.g. ["/data"]
+	ProjectRoot   string   `json:"project_root"`       // repo-relative app root for monorepos
+	BuildContext  string   `json:"build_context"`      // repo-relative docker build context
+	Dockerfile    string   `json:"dockerfile"`         // repo-relative dockerfile path
+	Volumes       []string `json:"volumes,omitempty"`  // persistent volume mounts e.g. ["/data"]
+	Replicas      int      `json:"replicas,omitempty"` // containers per release; the edge load-balances across them
 }
 
 func cleanRepoRelativePath(value string) (string, error) {

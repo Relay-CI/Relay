@@ -248,6 +248,68 @@ Relay preserves the site's Content Security Policy. Responses larger than
 4 MiB are not rewritten; sites serving such HTML should include the script
 themselves. The presence endpoint is `/__relay/presence`.
 
+### Replicas and load balancing
+
+A Docker lane can run several identical containers per release. Every
+replica joins the lane network under one pool alias; the lane's edge proxy
+round-robins across them and retries the next replica (up to 3 tries) when one
+refuses a connection or returns 502/503/504, so a crashed or restarting
+container no longer becomes a visitor-facing error. Requests that already
+streamed a body upstream are never retried.
+
+```bash
+relay scale 3                    # zero-downtime: new pool starts, passes readiness, then takes traffic
+relay deploy prod --replicas 4   # or set it on any deploy
+```
+
+`relay.config.json` accepts `"replicas": 3`. Replicas also let single-threaded
+runtimes (Node, Python, Ruby) use more than one CPU core. Each replica gets its
+own memory cap, and the host-wide default cap is divided across all running
+replicas so scaling up never overcommits a small server. Scaling redeploys the
+current image without changing the lane's rollback target.
+
+### Production variants (A/B experiments)
+
+Variants run extra builds of a production lane *alongside* the live release
+(the "control") and serve each one to a weighted share of new visitors. This
+is separate from lanes and from blue/green: normal deploys keep updating the
+control, and variants are untouched by them.
+
+```bash
+relay deploy prod --variant checkout-v2 --weight 10   # 10% of new visitors
+relay variants                                        # visitors, page views, 5xx rate, p95, feedback per variant
+relay variants weight checkout-v2 50
+relay variants promote checkout-v2                    # becomes the live release (blue/green), then retires
+relay variants rm checkout-v2                         # its visitors fall back to the control
+relay variants reshuffle                              # reassign everyone under the current weights
+```
+
+How assignment works: a visitor's first request is bucketed by a hash of
+client IP and user agent (so every parallel request of that first page load
+gets the same build), then pinned with a cookie, so a visitor keeps seeing one
+version across refreshes. `?__relay_variant=<name>` previews any variant;
+a weight of `0` makes a variant preview-only. Your app receives an
+`X-Relay-Variant` request header (always set by the edge, so it can't be
+spoofed) and a `RELAY_VARIANT` env var.
+
+Collect feedback from any page; Relay files it under the variant that visitor
+is actually being served:
+
+```js
+fetch("/__relay/feedback", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ vote: "up", rating: 5, comment: "Love the new layout", page: location.pathname }),
+});
+```
+
+`vote` is `"up"`/`"down"`, `rating` is 1-5 and `comment` is free text (each
+optional, max 10 per minute per visitor). Results are on the **Variants** page.
+Variants require the Docker engine and the Edge traffic mode. Assets whose
+content differs between variants but whose URL doesn't (e.g. an unhashed
+`/logo.png`) may be cached by a CDN in front of Relay; hashed build assets
+(Next.js, Vite) are unaffected.
+
 ---
 
 ## Auth
@@ -341,12 +403,22 @@ The dashboard also exposes a manual deploy flow with a target lane picker. You c
 
 ## Admin Operations
 
-Owner accounts now get an **Operations** tab in the admin UI. It aggregates:
+Owner accounts now get an **Operations** tab in the admin UI. It refreshes every
+10 seconds and aggregates:
 
-- live CPU and memory usage
+- live CPU and memory usage (every replica and variant container)
 - runtime storage usage
+- the last 15 minutes of traffic per lane: requests per minute, 5xx rate, p95 latency
 - per-app and per-lane container breakdowns
 - latest deploy versus previous deploy deltas for build duration, request volume, bandwidth, and server error rate
+
+Traffic comes from each lane's edge proxy log, so it covers every request —
+including port-mode lanes and sites fronted directly by Cloudflare, which the
+global Caddy proxy never sees. The **Analytics** page shows visitors (a
+cookieless, daily-rotating hash), page views, latency percentiles, top pages,
+referrers, countries (from Cloudflare's `CF-IPCountry` when present), paths
+returning 5xx, and a per-variant breakdown. Rows older than
+`RELAY_ANALYTICS_RETENTION_DAYS` (default 35) are pruned.
 
 Current limitation: live usage metrics are available for Docker-backed lanes. Station lanes show state, but not fake resource telemetry.
 

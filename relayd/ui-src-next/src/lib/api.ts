@@ -182,6 +182,9 @@ export interface EnvInfo {
   standby_slot?: string;
   drain_until?: number;
   buildpack_kind?: string;
+  replicas?: number;
+  running_replicas?: number;
+  variants?: number;
   latestDeploy?: Deploy;
   previewURL?: string;
 }
@@ -291,6 +294,81 @@ export async function restartApp(target: AppTarget): Promise<void> {
   await apiFetch("/api/apps/restart", {
     method: "POST",
     body: JSON.stringify(target),
+  });
+}
+
+// ── Replicas & variants ───────────────────────────────────────────────────
+
+export async function scaleLane(
+  target: AppTarget,
+  replicas: number,
+): Promise<{ ok: boolean; replicas: number; deploy_id?: string }> {
+  return apiFetch("/api/apps/scale", {
+    method: "POST",
+    body: JSON.stringify({ ...target, replicas }),
+  });
+}
+
+export interface VariantMetrics {
+  requests: number;
+  server_errors: number;
+  error_rate: number;
+  page_views: number;
+  visitors: number;
+  p50_ms: number;
+  p95_ms: number;
+  feedback: number;
+  thumbs_up: number;
+  thumbs_down: number;
+  avg_rating: number;
+}
+
+export interface LaneVariant {
+  name: string;
+  image: string;
+  weight: number;
+  status: string;
+  commit_sha?: string;
+  description?: string;
+  generation: number;
+  replicas: number;
+  created_at: number;
+  updated_at: number;
+  metrics: VariantMetrics;
+}
+
+export interface VariantFeedback {
+  ts: number;
+  variant: string;
+  vote: number;
+  rating: number;
+  comment: string;
+  page: string;
+}
+
+export interface VariantsReport {
+  control: { name: "control"; weight: number; image?: string; metrics: VariantMetrics };
+  variants: LaneVariant[];
+  feedback: VariantFeedback[];
+  supported: boolean;
+  unsupported?: string;
+  seed: number;
+}
+
+export async function getVariants(target: AppTarget, period = "7d"): Promise<VariantsReport> {
+  const params = new URLSearchParams({ app: target.app, env: target.env, branch: target.branch, period });
+  return apiFetch(`/api/variants?${params}`);
+}
+
+export async function variantAction(
+  target: AppTarget,
+  action: "weight" | "remove" | "promote" | "reshuffle",
+  name?: string,
+  weight?: number,
+): Promise<VariantsReport & { deploy_id?: string }> {
+  return apiFetch("/api/variants", {
+    method: "POST",
+    body: JSON.stringify({ ...target, action, name, weight }),
   });
 }
 
@@ -861,6 +939,15 @@ export interface AdminOpsLane {
   previous_image?: string;
   usage: AdminOpsLaneUsage;
   latest?: AdminOpsDeployDelta;
+  replicas?: number;
+  variants?: number;
+  live?: {
+    window_seconds: number;
+    requests: number;
+    requests_per_min: number;
+    server_error_rate: number;
+    p95_ms: number;
+  };
 }
 
 export interface AdminOpsApp {

@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -75,10 +76,19 @@ func (s *Server) startLogTailer() {
 			continue
 		}
 
-		scanner := bufio.NewScanner(f)
+		reader := bufio.NewReaderSize(f, 64<<10)
+		managed := s.edgeManagedHosts()
 		var newEvents []caddyLogEntry
-		for scanner.Scan() {
-			line := scanner.Text()
+		newOffset := offset
+		for {
+			raw, readErr := reader.ReadBytes('\n')
+			if readErr != nil {
+				// No trailing newline yet: Caddy is still writing this line.
+				// Leave it for the next pass instead of dropping it.
+				break
+			}
+			newOffset += int64(len(raw))
+			line := strings.TrimSpace(string(raw))
 			if line == "" {
 				continue
 			}
@@ -90,10 +100,12 @@ func (s *Server) startLogTailer() {
 			if entry.Ts == 0 || entry.Request.Host == "" {
 				continue
 			}
+			// Lanes behind an edge proxy are counted from the edge's own log.
+			if managed[strings.ToLower(strings.Split(entry.Request.Host, ":")[0])] {
+				continue
+			}
 			newEvents = append(newEvents, entry)
 		}
-
-		newOffset, _ := f.Seek(0, io.SeekCurrent)
 		f.Close()
 
 		if len(newEvents) > 0 {
@@ -246,12 +258,41 @@ func (s *Server) resolveAnalyticsCountries() {
 }
 
 type analyticsResponse struct {
-	TotalRequests int64              `json:"total_requests"`
-	PeriodLabel   string             `json:"period"`
-	ByCountry     []analyticsCountry `json:"by_country"`
-	ByStatus      []analyticsStatus  `json:"by_status"`
-	ByHour        []analyticsHour    `json:"by_hour"`
-	ByHost        []analyticsHost    `json:"by_host"`
+	TotalRequests   int64              `json:"total_requests"`
+	PageViews       int64              `json:"page_views"`
+	Visitors        int64              `json:"visitors"`
+	ServerErrors    int64              `json:"server_errors"`
+	ServerErrorRate float64            `json:"server_error_rate"`
+	Bandwidth       int64              `json:"bandwidth_bytes"`
+	BotRequests     int64              `json:"bot_requests"`
+	Latency         analyticsLatency   `json:"latency"`
+	PeriodLabel     string             `json:"period"`
+	ByCountry       []analyticsCountry `json:"by_country"`
+	ByStatus        []analyticsStatus  `json:"by_status"`
+	ByHour          []analyticsHour    `json:"by_hour"`
+	ByHost          []analyticsHost    `json:"by_host"`
+	TopPages        []analyticsCount   `json:"top_pages"`
+	TopReferrers    []analyticsCount   `json:"top_referrers"`
+	ErrorPaths      []analyticsCount   `json:"error_paths"`
+	ByKind          []analyticsCount   `json:"by_kind"`
+	ByVariant       []analyticsVariant `json:"by_variant"`
+}
+type analyticsLatency struct {
+	Samples int64 `json:"samples"`
+	P50MS   int64 `json:"p50_ms"`
+	P95MS   int64 `json:"p95_ms"`
+	P99MS   int64 `json:"p99_ms"`
+}
+type analyticsCount struct {
+	Key   string `json:"key"`
+	Count int64  `json:"count"`
+}
+type analyticsVariant struct {
+	Variant      string `json:"variant"`
+	Requests     int64  `json:"requests"`
+	ServerErrors int64  `json:"server_errors"`
+	PageViews    int64  `json:"page_views"`
+	Visitors     int64  `json:"visitors"`
 }
 type analyticsCountry struct {
 	Code  string `json:"code"`
@@ -263,8 +304,10 @@ type analyticsStatus struct {
 	Count  int64 `json:"count"`
 }
 type analyticsHour struct {
-	Ts    int64 `json:"ts"`
-	Count int64 `json:"count"`
+	Ts        int64 `json:"ts"`
+	Count     int64 `json:"count"`
+	PageViews int64 `json:"page_views"`
+	Errors    int64 `json:"errors"`
 }
 type analyticsHost struct {
 	Host  string `json:"host"`
@@ -360,6 +403,19 @@ type adminOpsLane struct {
 	PreviousImage string               `json:"previous_image,omitempty"`
 	Usage         adminOpsLaneUsage    `json:"usage"`
 	Latest        *adminOpsDeployDelta `json:"latest,omitempty"`
+	Replicas      int                  `json:"replicas"`
+	Variants      int                  `json:"variants"`
+	Live          *adminOpsLiveTraffic `json:"live,omitempty"`
+}
+
+// adminOpsLiveTraffic is the lane's last 15 minutes of edge traffic — the
+// "is it healthy right now" signal next to resource usage.
+type adminOpsLiveTraffic struct {
+	WindowSeconds  int64   `json:"window_seconds"`
+	Requests       int64   `json:"requests"`
+	RequestsPerMin float64 `json:"requests_per_min"`
+	ServerErrRate  float64 `json:"server_error_rate"`
+	P95MS          int64   `json:"p95_ms"`
 }
 
 type adminOpsApp struct {
@@ -418,8 +474,16 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 		periodLabel = "7d"
 	}
 
-	hostFilter := ""
-	hostArgs := []any{since}
+	// filter scopes every query below. With an app selected it matches the
+	// lane identity edge rows carry, plus host-only rows recorded before edge
+	// analytics existed. The all-apps view is limited to owners/admins so a
+	// user scoped to one app can't read every other app's traffic.
+	filter := ""
+	filterArgs := []any{}
+	if app == "" && sess != nil && !roleAtLeast(sess.Role, "admin") {
+		httpError(w, 403, "select an app to view its analytics")
+		return
+	}
 	if app != "" {
 		if sess != nil {
 			allowed := false
@@ -448,113 +512,183 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 500, err.Error())
 			return
 		}
-		if len(hosts) == 0 {
-			writeJSON(w, 200, analyticsResponse{PeriodLabel: periodLabel})
-			return
+		lane := `app=?`
+		filterArgs = append(filterArgs, app)
+		if env != "" {
+			lane += ` AND env=?`
+			filterArgs = append(filterArgs, string(env))
 		}
-		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(hosts)), ",")
-		hostFilter = ` AND host IN (` + placeholders + `)`
-		for _, host := range hosts {
-			hostArgs = append(hostArgs, host)
+		if branch != "" {
+			lane += ` AND branch=?`
+			filterArgs = append(filterArgs, branch)
+		}
+		filter = ` AND ((` + lane + `)`
+		if len(hosts) > 0 {
+			filter += ` OR (app='' AND host IN (` + strings.TrimSuffix(strings.Repeat("?,", len(hosts)), ",") + `))`
+			for _, host := range hosts {
+				filterArgs = append(filterArgs, host)
+			}
+		}
+		filter += `)`
+	}
+	if variant := strings.TrimSpace(r.URL.Query().Get("variant")); variant != "" {
+		if variant == "control" {
+			filter += ` AND variant IN ('', 'control')`
+		} else {
+			filter += ` AND variant=?`
+			filterArgs = append(filterArgs, variant)
 		}
 	}
+	where := `ts>=?` + filter
+	args := append([]any{since}, filterArgs...)
 
-	// Total requests.
-	var total int64
-	_ = adb.QueryRow(`SELECT COUNT(*) FROM analytics_events WHERE ts>=?`+hostFilter, hostArgs...).Scan(&total)
+	resp := analyticsResponse{PeriodLabel: periodLabel}
+	_ = adb.QueryRow(
+		`SELECT COUNT(*),
+		        COALESCE(SUM(CASE WHEN kind='page' AND status<400 THEN 1 ELSE 0 END),0),
+		        COUNT(DISTINCT CASE WHEN kind='page' THEN NULLIF(visitor,'') END),
+		        COALESCE(SUM(CASE WHEN status>=500 THEN 1 ELSE 0 END),0),
+		        COALESCE(SUM(bytes),0),
+		        COALESCE(SUM(CASE WHEN kind='bot' THEN 1 ELSE 0 END),0)
+		   FROM analytics_events WHERE `+where, args...,
+	).Scan(&resp.TotalRequests, &resp.PageViews, &resp.Visitors, &resp.ServerErrors, &resp.Bandwidth, &resp.BotRequests)
+	if resp.TotalRequests > 0 {
+		resp.ServerErrorRate = float64(resp.ServerErrors) / float64(resp.TotalRequests) * 100
+	}
 
-	// By country.
-	countryRows, _ := adb.Query(
+	// Latency of what users wait on (documents and API calls, not cached
+	// static assets) — only edge rows have a duration.
+	latencyWhere := where + ` AND source='edge' AND kind IN ('page','api','other')`
+	var latencyCount int64
+	_ = adb.QueryRow(`SELECT COUNT(*) FROM analytics_events WHERE `+latencyWhere, args...).Scan(&latencyCount)
+	resp.Latency = analyticsLatency{
+		Samples: latencyCount,
+		P50MS:   durationPercentile(adb, latencyWhere, args, latencyCount, 0.50),
+		P95MS:   durationPercentile(adb, latencyWhere, args, latencyCount, 0.95),
+		P99MS:   durationPercentile(adb, latencyWhere, args, latencyCount, 0.99),
+	}
+
+	scanCounts := func(query string, qargs ...any) []analyticsCount {
+		out := []analyticsCount{}
+		rows, err := adb.Query(query, qargs...)
+		if err != nil {
+			return out
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var c analyticsCount
+			if rows.Scan(&c.Key, &c.Count) == nil {
+				out = append(out, c)
+			}
+		}
+		return out
+	}
+
+	resp.ByCountry = []analyticsCountry{}
+	if rows, err := adb.Query(
 		`SELECT COALESCE(NULLIF(country_code,''),'??') AS cc,
-		        COALESCE(NULLIF(country_name,''),'Unknown') AS cn,
+		        COALESCE(NULLIF(MAX(country_name),''),'') AS cn,
 		        COUNT(*) AS cnt
-		 FROM analytics_events WHERE ts>=?`+hostFilter+`
-		 GROUP BY cc ORDER BY cnt DESC LIMIT 30`,
-		hostArgs...)
-	var byCountry []analyticsCountry
-	if countryRows != nil {
-		for countryRows.Next() {
+		 FROM analytics_events WHERE `+where+`
+		 GROUP BY cc ORDER BY cnt DESC LIMIT 30`, args...); err == nil {
+		for rows.Next() {
 			var c analyticsCountry
-			_ = countryRows.Scan(&c.Code, &c.Name, &c.Count)
-			byCountry = append(byCountry, c)
+			if rows.Scan(&c.Code, &c.Name, &c.Count) == nil {
+				if c.Name == "" {
+					c.Name = countryDisplayName(c.Code)
+				}
+				resp.ByCountry = append(resp.ByCountry, c)
+			}
 		}
-		countryRows.Close()
+		rows.Close()
 	}
 
-	// By status class (group into 2xx, 3xx, 4xx, 5xx).
-	statusRows, _ := adb.Query(
+	resp.ByStatus = []analyticsStatus{}
+	if rows, err := adb.Query(
 		`SELECT (status/100)*100 AS sc, COUNT(*) AS cnt
-		 FROM analytics_events WHERE ts>=?`+hostFilter+`
-		 GROUP BY sc ORDER BY sc`,
-		hostArgs...)
-	var byStatus []analyticsStatus
-	if statusRows != nil {
-		for statusRows.Next() {
+		 FROM analytics_events WHERE `+where+`
+		 GROUP BY sc ORDER BY sc`, args...); err == nil {
+		for rows.Next() {
 			var st analyticsStatus
-			_ = statusRows.Scan(&st.Status, &st.Count)
-			byStatus = append(byStatus, st)
+			if rows.Scan(&st.Status, &st.Count) == nil {
+				resp.ByStatus = append(resp.ByStatus, st)
+			}
 		}
-		statusRows.Close()
+		rows.Close()
 	}
 
-	// By hour (bucket ts to nearest hour).
 	bucketSize := int64(3600)
 	if period == "30d" {
 		bucketSize = 86400 // daily buckets for 30-day view
 	}
-	hourRows, _ := adb.Query(
-		`SELECT (ts/?)*? AS bucket, COUNT(*) AS cnt
-		 FROM analytics_events WHERE ts>=?`+hostFilter+`
+	resp.ByHour = []analyticsHour{}
+	if rows, err := adb.Query(
+		`SELECT (ts/?)*? AS bucket, COUNT(*),
+		        COALESCE(SUM(CASE WHEN kind='page' AND status<400 THEN 1 ELSE 0 END),0),
+		        COALESCE(SUM(CASE WHEN status>=500 THEN 1 ELSE 0 END),0)
+		 FROM analytics_events WHERE `+where+`
 		 GROUP BY bucket ORDER BY bucket`,
-		append([]any{bucketSize, bucketSize}, hostArgs...)...)
-	var byHour []analyticsHour
-	if hourRows != nil {
-		for hourRows.Next() {
+		append([]any{bucketSize, bucketSize}, args...)...); err == nil {
+		for rows.Next() {
 			var h analyticsHour
-			_ = hourRows.Scan(&h.Ts, &h.Count)
-			byHour = append(byHour, h)
+			if rows.Scan(&h.Ts, &h.Count, &h.PageViews, &h.Errors) == nil {
+				resp.ByHour = append(resp.ByHour, h)
+			}
 		}
-		hourRows.Close()
+		rows.Close()
 	}
 
-	// By host.
-	hostRows, _ := adb.Query(
-		`SELECT host, COUNT(*) AS cnt
-		 FROM analytics_events WHERE ts>=?`+hostFilter+`
-		 GROUP BY host ORDER BY cnt DESC LIMIT 20`,
-		hostArgs...)
-	var byHost []analyticsHost
-	if hostRows != nil {
-		for hostRows.Next() {
-			var h analyticsHost
-			_ = hostRows.Scan(&h.Host, &h.Count)
-			byHost = append(byHost, h)
-		}
-		hostRows.Close()
+	resp.ByHost = []analyticsHost{}
+	for _, c := range scanCounts(`SELECT host, COUNT(*) AS cnt FROM analytics_events WHERE `+where+` GROUP BY host ORDER BY cnt DESC LIMIT 20`, args...) {
+		resp.ByHost = append(resp.ByHost, analyticsHost{Host: c.Key, Count: c.Count})
 	}
+	resp.TopPages = scanCounts(`SELECT CASE WHEN instr(path,'?')>0 THEN substr(path,1,instr(path,'?')-1) ELSE path END AS p, COUNT(*) AS cnt
+		FROM analytics_events WHERE `+where+` AND kind='page' AND status<400 GROUP BY p ORDER BY cnt DESC LIMIT 15`, args...)
+	resp.TopReferrers = scanCounts(`SELECT referrer, COUNT(*) AS cnt FROM analytics_events WHERE `+where+` AND kind='page' AND referrer!='' GROUP BY referrer ORDER BY cnt DESC LIMIT 15`, args...)
+	resp.ErrorPaths = scanCounts(`SELECT CASE WHEN instr(path,'?')>0 THEN substr(path,1,instr(path,'?')-1) ELSE path END AS p, COUNT(*) AS cnt
+		FROM analytics_events WHERE `+where+` AND status>=500 GROUP BY p ORDER BY cnt DESC LIMIT 10`, args...)
+	resp.ByKind = scanCounts(`SELECT COALESCE(NULLIF(kind,''),'unknown') AS k, COUNT(*) AS cnt FROM analytics_events WHERE `+where+` GROUP BY k ORDER BY cnt DESC`, args...)
 
-	resp := analyticsResponse{
-		TotalRequests: total,
-		PeriodLabel:   periodLabel,
-		ByCountry:     byCountry,
-		ByStatus:      byStatus,
-		ByHour:        byHour,
-		ByHost:        byHost,
+	resp.ByVariant = []analyticsVariant{}
+	if app != "" {
+		if rows, err := adb.Query(
+			`SELECT COALESCE(NULLIF(variant,''),'control') AS v, COUNT(*),
+			        COALESCE(SUM(CASE WHEN status>=500 THEN 1 ELSE 0 END),0),
+			        COALESCE(SUM(CASE WHEN kind='page' AND status<400 THEN 1 ELSE 0 END),0),
+			        COUNT(DISTINCT CASE WHEN kind='page' THEN NULLIF(visitor,'') END)
+			 FROM analytics_events WHERE `+where+` AND source='edge'
+			 GROUP BY v ORDER BY v`, args...); err == nil {
+			for rows.Next() {
+				var v analyticsVariant
+				if rows.Scan(&v.Variant, &v.Requests, &v.ServerErrors, &v.PageViews, &v.Visitors) == nil {
+					resp.ByVariant = append(resp.ByVariant, v)
+				}
+			}
+			rows.Close()
+		}
 	}
-	if resp.ByCountry == nil {
-		resp.ByCountry = []analyticsCountry{}
+	writeJSON(w, 200, resp)
+}
+
+// countryDisplayName covers rows whose country came from Cloudflare's
+// CF-IPCountry header, which carries only the ISO code.
+func countryDisplayName(code string) string {
+	names := map[string]string{
+		"US": "United States", "GB": "United Kingdom", "DE": "Germany", "FR": "France", "IN": "India",
+		"SG": "Singapore", "MY": "Malaysia", "ID": "Indonesia", "AE": "United Arab Emirates", "AU": "Australia",
+		"CA": "Canada", "JP": "Japan", "CN": "China", "BR": "Brazil", "NL": "Netherlands", "SE": "Sweden",
+		"ES": "Spain", "IT": "Italy", "KR": "South Korea", "PH": "Philippines", "TH": "Thailand", "VN": "Vietnam",
+		"HK": "Hong Kong", "TW": "Taiwan", "PK": "Pakistan", "BD": "Bangladesh", "LK": "Sri Lanka", "NZ": "New Zealand",
+		"IE": "Ireland", "PL": "Poland", "RU": "Russia", "TR": "Turkey", "SA": "Saudi Arabia", "QA": "Qatar",
+		"ZA": "South Africa", "NG": "Nigeria", "EG": "Egypt", "MX": "Mexico", "AR": "Argentina", "CH": "Switzerland",
 	}
-	if resp.ByStatus == nil {
-		resp.ByStatus = []analyticsStatus{}
+	if name, ok := names[code]; ok {
+		return name
 	}
-	if resp.ByHour == nil {
-		resp.ByHour = []analyticsHour{}
+	if code == "??" || code == "" {
+		return "Unknown"
 	}
-	if resp.ByHost == nil {
-		resp.ByHost = []analyticsHost{}
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+	return code
 }
 
 type dockerStatsRow struct {
@@ -637,10 +771,10 @@ func collectDockerStats(containers []string) map[string]dockerStatsRow {
 	}
 	args = append(args, containers...)
 	cmd := exec.Command("docker", args...)
-	data, err := cmd.Output()
-	if err != nil {
-		return out
-	}
+	// One missing container makes docker exit non-zero, but it still prints
+	// rows for every container it found — parse them instead of discarding
+	// the whole page's numbers (which is why Operations used to show zeros).
+	data, _ := cmd.Output()
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -672,21 +806,42 @@ func collectDockerStats(containers []string) map[string]dockerStatsRow {
 	return out
 }
 
+var dockerStorageCache = struct {
+	sync.Mutex
+	at   time.Time
+	key  string
+	rows map[string]dockerStorageRow
+}{}
+
+// collectDockerStorage is cached for a minute: `docker inspect --size` walks
+// every container's filesystem and was the slowest part of the Operations
+// page, while disk usage barely moves between refreshes.
 func collectDockerStorage(containers []string) map[string]dockerStorageRow {
 	out := map[string]dockerStorageRow{}
 	if len(containers) == 0 {
 		return out
 	}
+	key := strings.Join(containers, ",")
+	dockerStorageCache.Lock()
+	if dockerStorageCache.key == key && time.Since(dockerStorageCache.at) < time.Minute {
+		cached := dockerStorageCache.rows
+		dockerStorageCache.Unlock()
+		return cached
+	}
+	dockerStorageCache.Unlock()
+	defer func() {
+		dockerStorageCache.Lock()
+		dockerStorageCache.key, dockerStorageCache.at, dockerStorageCache.rows = key, time.Now(), out
+		dockerStorageCache.Unlock()
+	}()
 	args := []string{
 		"inspect", "--size",
 		"--format", "{{.Name}}\t{{.State.Running}}\t{{.SizeRw}}\t{{.SizeRootFs}}",
 	}
 	args = append(args, containers...)
 	cmd := exec.Command("docker", args...)
-	data, err := cmd.Output()
-	if err != nil {
-		return out
-	}
+	// Partial output on a missing container is still valid for the rest.
+	data, _ := cmd.Output()
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -767,24 +922,34 @@ func analyticsWindowHost(host string, hostPort int) []string {
 	return candidates
 }
 
-func analyticsWindowStats(adb *sql.DB, hosts []string, from int64, to int64) (*adminOpsTrafficWindow, bool) {
-	if adb == nil || len(hosts) == 0 || to <= from {
+// laneAnalyticsFilter matches a lane's traffic: edge rows carry the lane
+// identity directly; rows from before edge analytics (or from Caddy-only
+// routes) only have a host, so those still match by host.
+func laneAnalyticsFilter(app string, env DeployEnv, branch string, hosts []string) (string, []any) {
+	clause := `(app=? AND env=? AND branch=?)`
+	args := []any{app, string(env), branch}
+	if len(hosts) > 0 {
+		clause = `(` + clause + ` OR (app='' AND host IN (` + strings.TrimSuffix(strings.Repeat("?,", len(hosts)), ",") + `)))`
+		for _, h := range hosts {
+			args = append(args, h)
+		}
+	}
+	return clause, args
+}
+
+func analyticsWindowStats(adb *sql.DB, app string, env DeployEnv, branch string, hosts []string, from int64, to int64) (*adminOpsTrafficWindow, bool) {
+	if adb == nil || to <= from {
 		return nil, false
 	}
-	placeholders := make([]string, len(hosts))
-	args := make([]any, 0, len(hosts)+2)
-	args = append(args, from, to)
-	for i, host := range hosts {
-		placeholders[i] = "?"
-		args = append(args, host)
-	}
+	laneClause, laneArgs := laneAnalyticsFilter(app, env, branch, hosts)
+	args := append([]any{from, to}, laneArgs...)
 	row := adb.QueryRow(
 		`SELECT COUNT(*),
 		        COALESCE(SUM(CASE WHEN status>=500 THEN 1 ELSE 0 END),0),
 		        COALESCE(SUM(CASE WHEN status>=400 AND status<500 THEN 1 ELSE 0 END),0),
 		        COALESCE(SUM(bytes),0)
 		   FROM analytics_events
-		  WHERE ts>=? AND ts<? AND host IN (`+strings.Join(placeholders, ",")+`)`,
+		  WHERE ts>=? AND ts<? AND `+laneClause,
 		args...,
 	)
 	var reqs, serverErrors, clientErrors, bytesSent int64
@@ -869,6 +1034,7 @@ func (s *Server) buildAdminOpsResponse() adminOpsResponse {
 	}
 	bundles := map[string]laneBundle{}
 	containerNames := []string{}
+	runningNames := []string{}
 	seenContainers := map[string]struct{}{}
 	for _, ref := range laneRefs {
 		st, err := s.getAppState(ref.App, ref.Env, ref.Branch)
@@ -880,7 +1046,7 @@ func (s *Server) buildAdminOpsResponse() adminOpsResponse {
 		key := ref.App + "__" + string(ref.Env) + "__" + ref.Branch
 		bundles[key] = laneBundle{state: st, targets: targets, laneData: laneData, services: services}
 		for _, target := range targets {
-			if target.Container == "" {
+			if target.Container == "" || !target.Available {
 				continue
 			}
 			if _, ok := seenContainers[target.Container]; ok {
@@ -888,10 +1054,15 @@ func (s *Server) buildAdminOpsResponse() adminOpsResponse {
 			}
 			seenContainers[target.Container] = struct{}{}
 			containerNames = append(containerNames, target.Container)
+			if target.Running {
+				runningNames = append(runningNames, target.Container)
+			}
 		}
 	}
 
-	statsByContainer := collectDockerStats(containerNames)
+	// Only existing containers are passed to docker; asking `docker stats`
+	// about a removed one makes it fail for the whole batch.
+	statsByContainer := collectDockerStats(runningNames)
 	storageByContainer := collectDockerStorage(containerNames)
 
 	apps := map[string]*adminOpsApp{}
@@ -988,9 +1159,12 @@ func (s *Server) buildAdminOpsResponse() adminOpsResponse {
 				if windowSec >= 300 {
 					delta.Window.Seconds = windowSec
 					hosts := analyticsWindowHost(bundle.state.PublicHost, bundle.state.HostPort)
-					currentTraffic, currentOK := analyticsWindowStats(adb, hosts, latestAnchor, latestAnchor+windowSec)
-					previousTraffic, prevOK := analyticsWindowStats(adb, hosts, prevAnchor, prevAnchor+windowSec)
-					if currentOK && prevOK {
+					hosts = append(hosts, bundle.state.PublicHosts...)
+					currentTraffic, currentOK := analyticsWindowStats(adb, ref.App, ref.Env, ref.Branch, hosts, latestAnchor, latestAnchor+windowSec)
+					previousTraffic, prevOK := analyticsWindowStats(adb, ref.App, ref.Env, ref.Branch, hosts, prevAnchor, prevAnchor+windowSec)
+					if currentOK && prevOK && currentTraffic.Requests == 0 && previousTraffic.Requests == 0 {
+						delta.AnalyticsNote = "No requests were recorded for this lane in either window yet."
+					} else if currentOK && prevOK {
 						delta.CurrentTraffic = currentTraffic
 						delta.PreviousTraffic = previousTraffic
 						delta.ServerErrRateDelta = currentTraffic.ServerErrRate - previousTraffic.ServerErrRate
@@ -1022,7 +1196,28 @@ func (s *Server) buildAdminOpsResponse() adminOpsResponse {
 			PreviousImage: bundle.state.PreviousImage,
 			Usage:         laneUsage,
 			Latest:        latestDelta,
+			Replicas:      s.laneReplicas(ref.App, ref.Env, ref.Branch),
 		}
+		if variants, err := s.listLaneVariants(ref.App, ref.Env, ref.Branch); err == nil {
+			for _, v := range variants {
+				if v.Status == "running" {
+					lane.Variants++
+				}
+			}
+		}
+		const liveWindow = int64(15 * 60)
+		laneClause, laneArgs := laneAnalyticsFilter(ref.App, ref.Env, ref.Branch, nil)
+		liveWhere := `ts>=? AND ` + laneClause
+		liveArgs := append([]any{nowSec - liveWindow}, laneArgs...)
+		live := &adminOpsLiveTraffic{WindowSeconds: liveWindow}
+		var liveErrors int64
+		_ = adb.QueryRow(`SELECT COUNT(*), COALESCE(SUM(CASE WHEN status>=500 THEN 1 ELSE 0 END),0) FROM analytics_events WHERE `+liveWhere, liveArgs...).Scan(&live.Requests, &liveErrors)
+		if live.Requests > 0 {
+			live.RequestsPerMin = float64(live.Requests) / float64(liveWindow/60)
+			live.ServerErrRate = float64(liveErrors) / float64(live.Requests) * 100
+			live.P95MS = durationPercentile(adb, liveWhere, liveArgs, live.Requests, 0.95)
+		}
+		lane.Live = live
 		appEntry.Lanes = append(appEntry.Lanes, lane)
 		appEntry.LaneCount++
 		if laneUsage.RunningContainers > 0 && !lane.Stopped {
