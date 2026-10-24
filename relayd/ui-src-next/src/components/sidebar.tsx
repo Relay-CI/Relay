@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useRef, useState } from "react";
 import { cn } from "@/lib/utils";
@@ -7,7 +7,6 @@ import {
   computePreviewURL,
   deployKey,
   engineLabel,
-  formatPercent,
   repoProviderInfo,
   projectRepoURL,
   rolloutStrategy,
@@ -48,10 +47,10 @@ const NAV_ITEMS = [
   { id: "github", label: "GitHub", icon: (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7A5.4 5.4 0 0 0 19.4 4 5 5 0 0 0 19.3.5S18.2.1 15 1.8a13.4 13.4 0 0 0-7 0C4.8.1 3.7.5 3.7.5A5 5 0 0 0 3.6 4a5.4 5.4 0 0 0-1.4 3.7c0 5.3 3.5 6.5 6.8 7A4.8 4.8 0 0 0 8 18v4"/><path d="M8 19c-3 .9-3-1.5-4.2-2"/></svg>
   )},
-  { id: "logs", label: "Build Logs", icon: (
+  { id: "logs", label: "Build logs", icon: (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
   )},
-  { id: "runtime-logs", label: "Runtime Logs", icon: (
+  { id: "runtime-logs", label: "Runtime logs", icon: (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
   )},
   { id: "settings", label: "Environment", icon: (
@@ -155,7 +154,6 @@ export function Sidebar({
   envOptions,
   selectedEnvKey,
   onEnvChange,
-  projectStats,
   isOpen,
   onClose,
 }: SidebarProps) {
@@ -193,20 +191,7 @@ export function Sidebar({
             {repoInfo && (
               <div className="text-[11px] text-white/40 mb-2">{repoInfo.label}</div>
             )}
-            <div className="grid grid-cols-3 gap-1">
-              <div className="text-center bg-white/[0.06] rounded-lg p-1.5">
-                <div className="text-xs font-semibold text-white">{formatPercent(projectStats.successRate)}</div>
-                <div className="text-[10px] text-white/40">success</div>
-              </div>
-              <div className="text-center bg-white/[0.06] rounded-lg p-1.5">
-                <div className="text-xs font-semibold text-white">{projectStats.failures}</div>
-                <div className="text-[10px] text-white/40">failures</div>
-              </div>
-              <div className="text-center bg-white/[0.06] rounded-lg p-1.5">
-                <div className="text-xs font-semibold text-white">{projectStats.total}</div>
-                <div className="text-[10px] text-white/40">deploys</div>
-              </div>
-            </div>
+
           </>
         ) : (
           <div className="text-xs text-white/30 py-1">Select a project above</div>
@@ -215,11 +200,12 @@ export function Sidebar({
 
       {/* Navigation */}
       <div className="px-2 py-3 flex-1">
-        <div className="text-[10px] uppercase tracking-widest text-white/25 px-2 mb-2">Main menu</div>
+        <div className="text-[10px] uppercase tracking-widest text-white/25 px-2 mb-2">Project</div>
         <nav className="flex flex-col gap-0.5">
           {NAV_ITEMS.map(({ id, label, icon }) => (
             <button
               key={id}
+              aria-current={activeTab === id ? "page" : undefined}
               type="button"
               onClick={() => { onTabChange(id); onClose(); }}
               className={`flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-sm text-white/62 hover:text-white hover:bg-white/[0.08] transition-colors w-full text-left ${activeTab === id ? "text-white bg-white/[0.12] shadow-[inset_3px_0_0_rgba(92,211,198,0.9)]" : ""}`}

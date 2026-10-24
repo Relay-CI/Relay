@@ -333,11 +333,6 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
 
   return (
     <div className="space-y-5">
-      <div>
-        <div className="eyebrow mb-0.5">Administration</div>
-        <h1 className="text-xl font-semibold text-white">Server settings</h1>
-      </div>
-
       {versionInfo && (
         <div className="bg-white/[0.02] border border-white/[0.06] rounded-xl p-5">
           <div className="eyebrow mb-1">Server info</div>
@@ -354,7 +349,7 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
             <KVCard label="Build date" value={versionInfo.build_date ?? "—"} />
             <KVCard
               label="OS / Arch"
-              value={`${versionInfo.goos}/${versionInfo.goarch}`}
+              value={[versionInfo.goos, versionInfo.goarch].filter(Boolean).join(" / ") || "—"}
               mono
             />
           </div>
@@ -909,7 +904,7 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
           <div>
             <div className="eyebrow mb-0.5">Guided setup</div>
             <h2 className="text-base font-semibold text-white">
-              DNS / TLS rollout
+              Set up DNS and HTTPS
             </h2>
             <p className="text-xs text-white/40 mt-1">
               Save the host values above, then use these checks to verify DNS,
@@ -1047,11 +1042,10 @@ export function ServerSettingsPage({ currentUser }: ServerSettingsPageProps) {
             </svg>
             <div>
               <div className="text-sm font-medium text-white/70">
-                Appearance settings have moved
+                Appearance
               </div>
               <div className="text-xs text-white/35 mt-0.5">
-                Use the globe icon in the topbar to access themes, fonts, and
-                layout options.
+                Open Appearance in the top bar to change the theme and fonts.
               </div>
             </div>
           </div>

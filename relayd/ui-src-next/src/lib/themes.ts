@@ -13,9 +13,9 @@ export interface ThemePreset {
 export const BUILT_IN_THEMES: ThemePreset[] = [
   {
     id: "default",
-    name: "Relay Dark",
-    description: "Default red-on-black",
-    swatches: ["#000000", "#cc2222", "#f0eaea"],
+    name: "Graphite",
+    description: "Black surfaces, fine borders, and white controls",
+    swatches: ["#0a0a0a", "#e5e5e5", "#fafafa"],
     css: "", // no overrides — uses base globals.css
   },
   {

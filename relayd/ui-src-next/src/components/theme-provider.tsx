@@ -21,8 +21,8 @@ interface ThemeContextValue {
 const ThemeContext = createContext<ThemeContextValue>({
   themeName: "default",
   customCSS: "",
-  mode: "system",
-  resolvedMode: "light",
+  mode: "dark",
+  resolvedMode: "dark",
   setMode: () => {},
   previewTheme: () => {},
   clearPreview: () => {},
@@ -37,8 +37,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [serverCustomCSS, setServerCustomCSS] = useState("");
   const [previewName, setPreviewName] = useState<string | null>(null);
   const [previewCSS, setPreviewCSS] = useState<string | null>(null);
-  const [mode, setModeState] = useState<ColorMode>("system");
-  const [resolvedMode, setResolvedMode] = useState<"light" | "dark">("light");
+  const [mode, setModeState] = useState<ColorMode>("dark");
+  const [resolvedMode, setResolvedMode] = useState<"light" | "dark">("dark");
   const styleRef = useRef<HTMLStyleElement | null>(null);
 
   // Fetch theme from server once on mount

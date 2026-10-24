@@ -95,7 +95,8 @@ export function Topbar({
         <Search size={14} className="text-slate-400 shrink-0" />
         <input
           className="min-w-0 flex-1 bg-transparent text-xs text-slate-700 placeholder:text-slate-400 outline-none"
-          placeholder="Search projects, deploys, logs..."
+          aria-label="Search projects"
+          placeholder="Search projects…"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           onKeyDown={(event) => {

@@ -1,12 +1,13 @@
 "use client";
 
 import { useState } from "react";
+import dynamic from "next/dynamic";
 import { cn } from "@/lib/utils";
-import { ServerSettingsPage } from "@/components/pages/server-settings";
-import { UsersPage } from "@/components/pages/users";
-import { AuditPage } from "@/components/pages/audit";
-import { PluginsPage } from "@/components/pages/plugins";
-import { OperationsPage } from "@/components/pages/operations";
+const ServerSettingsPage = dynamic(() => import("@/components/pages/server-settings").then((module) => module.ServerSettingsPage), { loading: () => <div role="status" className="dashboard-page-loading">Loading…</div> });
+const UsersPage = dynamic(() => import("@/components/pages/users").then((module) => module.UsersPage), { loading: () => <div role="status" className="dashboard-page-loading">Loading…</div> });
+const AuditPage = dynamic(() => import("@/components/pages/audit").then((module) => module.AuditPage), { loading: () => <div role="status" className="dashboard-page-loading">Loading…</div> });
+const PluginsPage = dynamic(() => import("@/components/pages/plugins").then((module) => module.PluginsPage), { loading: () => <div role="status" className="dashboard-page-loading">Loading…</div> });
+const OperationsPage = dynamic(() => import("@/components/pages/operations").then((module) => module.OperationsPage), { loading: () => <div role="status" className="dashboard-page-loading">Loading…</div> });
 
 type CurrentUser = { username: string; role: string } | null;
 
@@ -105,8 +106,8 @@ export function AdminPanel({ currentUser }: AdminPanelProps) {
       <header className="flex flex-col gap-4 border-b border-white/[0.07] pb-5 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <div className="eyebrow mb-1">Administration</div>
-          <h1 className="text-2xl font-semibold tracking-[-0.035em] text-white">Server control</h1>
-          <p className="mt-1 max-w-2xl text-sm leading-6 text-white/40">Configure Relay, inspect host health, and control who can deploy.</p>
+          <h1 className="text-2xl font-semibold tracking-[-0.035em] text-white">Server settings</h1>
+          <p className="mt-1 max-w-2xl text-sm leading-6 text-white/40">Manage domains, server health, users, and plugins.</p>
         </div>
         <div className="inline-flex w-fit items-center gap-2 rounded-xl border border-emerald-500/20 bg-emerald-500/[0.07] px-3 py-2 text-xs font-medium text-emerald-500">
           <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
@@ -114,10 +115,10 @@ export function AdminPanel({ currentUser }: AdminPanelProps) {
         </div>
       </header>
 
-      <div className="grid items-start gap-5 lg:grid-cols-[15rem_minmax(0,1fr)]">
-        <aside className="rounded-2xl border border-white/[0.08] bg-white/[0.025] p-2 lg:sticky lg:top-0" aria-label="Admin sections">
-          <div className="px-3 pb-2 pt-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-white/25">Control groups</div>
-          <nav className="grid grid-cols-1 gap-1 sm:grid-cols-2 lg:grid-cols-1">
+      <div className="admin-section-layout">
+        <aside className="admin-section-navigation" aria-label="Admin sections">
+          <div className="px-3 pb-2 pt-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-white/25">Settings</div>
+          <nav className="admin-section-tabs">
             {ADMIN_TABS.map((tab) => (
               <button
                 key={tab.id}
@@ -141,7 +142,7 @@ export function AdminPanel({ currentUser }: AdminPanelProps) {
           </nav>
         </aside>
 
-        <div className="min-w-0 rounded-2xl border border-white/[0.08] bg-white/[0.018] p-4 sm:p-6">
+        <div className="admin-section-content">
           <div className="mb-5 flex items-center gap-2 border-b border-white/[0.06] pb-3 lg:hidden">
             <span className="text-relay-accent-bright">{active.icon}</span>
             <span className="text-sm font-semibold text-white">{active.label}</span>

@@ -1,33 +1,34 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
 import { useAuth } from "@/hooks/use-auth";
 import { useDashboardData } from "@/hooks/use-dashboard-data";
 import { LoginPage, SetupPage } from "@/components/auth-screens";
 import { Topbar } from "@/components/topbar";
 import { Sidebar } from "@/components/sidebar";
 import { OverviewPage } from "@/components/pages/overview";
-import { DeploymentsPage } from "@/components/pages/deployments";
-import { GitHubPage } from "@/components/pages/github";
-import { BuildLogsPage } from "@/components/pages/build-logs";
-import { RuntimeLogsPage } from "@/components/pages/runtime-logs";
-import { SettingsPage } from "@/components/pages/settings";
-import { AnalyticsPage } from "@/components/pages/analytics";
-import { VariantsPage } from "@/components/pages/variants";
-import { ResourcesPage } from "@/components/pages/resources";
-import { AppearancePage } from "@/components/pages/appearance";
-import { AdminPanel } from "@/components/pages/admin-panel";
-import { LanesPage } from "@/components/pages/lanes";
-import { DeployDetailDialog } from "@/components/deploy-detail-dialog";
 import {
   computeProjectStats,
   deployKey,
   computePreviewURL,
-  normalizeProjects,
   type NormalizedProject,
 } from "@/lib/relay-utils";
 import type { Deploy, EnvInfo } from "@/lib/api";
 import { cancelDeploy, cliStart, saveAppConfig } from "@/lib/api";
+
+const DeploymentsPage = dynamic(() => import("@/components/pages/deployments").then((module) => module.DeploymentsPage), { loading: () => <div className="dashboard-page-loading" role="status">Loading…</div> });
+const GitHubPage = dynamic(() => import("@/components/pages/github").then((module) => module.GitHubPage), { loading: () => <div className="dashboard-page-loading" role="status">Loading…</div> });
+const BuildLogsPage = dynamic(() => import("@/components/pages/build-logs").then((module) => module.BuildLogsPage), { loading: () => <div className="dashboard-page-loading" role="status">Loading…</div> });
+const RuntimeLogsPage = dynamic(() => import("@/components/pages/runtime-logs").then((module) => module.RuntimeLogsPage), { loading: () => <div className="dashboard-page-loading" role="status">Loading…</div> });
+const SettingsPage = dynamic(() => import("@/components/pages/settings").then((module) => module.SettingsPage), { loading: () => <div className="dashboard-page-loading" role="status">Loading…</div> });
+const AnalyticsPage = dynamic(() => import("@/components/pages/analytics").then((module) => module.AnalyticsPage), { loading: () => <div className="dashboard-page-loading" role="status">Loading…</div> });
+const VariantsPage = dynamic(() => import("@/components/pages/variants").then((module) => module.VariantsPage), { loading: () => <div className="dashboard-page-loading" role="status">Loading…</div> });
+const ResourcesPage = dynamic(() => import("@/components/pages/resources").then((module) => module.ResourcesPage), { loading: () => <div className="dashboard-page-loading" role="status">Loading…</div> });
+const AppearancePage = dynamic(() => import("@/components/pages/appearance").then((module) => module.AppearancePage), { loading: () => <div className="dashboard-page-loading" role="status">Loading…</div> });
+const AdminPanel = dynamic(() => import("@/components/pages/admin-panel").then((module) => module.AdminPanel), { loading: () => <div className="dashboard-page-loading" role="status">Loading…</div> });
+const LanesPage = dynamic(() => import("@/components/pages/lanes").then((module) => module.LanesPage), { loading: () => <div className="dashboard-page-loading" role="status">Loading…</div> });
+const DeployDetailDialog = dynamic(() => import("@/components/deploy-detail-dialog").then((module) => module.DeployDetailDialog), { loading: () => <div className="dashboard-page-loading" role="status">Loading…</div> });
 
 interface SelectedEnvMeta extends EnvInfo {
   app: string;
@@ -62,7 +63,7 @@ export default function DashboardShell() {
   }, [dashboard.deploys]);
 
   const projectOptions = useMemo<NormalizedProject[]>(() => {
-    return normalizeProjects(dashboard.projects);
+    return dashboard.projects;
   }, [dashboard.projects]);
 
   const envMap = useMemo(() => {
@@ -240,10 +241,10 @@ export default function DashboardShell() {
 
   if (auth.loading) {
     return (
-      <div className="min-h-screen bg-[#eaf5fb] flex items-center justify-center">
+      <div className="min-h-screen bg-background flex items-center justify-center">
         <div className="text-center">
           <div className="w-8 h-8 border-2 border-relay-accent border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-          <div className="eyebrow">Relayd Control Room</div>
+          <div className="eyebrow">Relay</div>
           <div className="text-sm text-white/50 mt-1">Checking session…</div>
         </div>
       </div>
@@ -255,7 +256,7 @@ export default function DashboardShell() {
   if (auth.authed && cliHandoff !== "idle") {
     const failed = cliHandoff === "failed";
     return (
-      <div className="min-h-screen bg-[#eaf5fb] flex items-center justify-center p-4">
+      <div className="min-h-screen bg-background flex items-center justify-center p-4">
         <div className="text-center max-w-sm">
           {failed ? (
             <>
@@ -276,7 +277,7 @@ export default function DashboardShell() {
           ) : (
             <>
               <div className="w-8 h-8 border-2 border-relay-accent border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-              <div className="eyebrow">Relayd Control Room</div>
+              <div className="eyebrow">Relay</div>
               <div className="text-sm text-white/50 mt-1">Returning you to the Relay CLI…</div>
             </>
           )}
@@ -449,13 +450,12 @@ export default function DashboardShell() {
         <main className="relay-workspace flex-1 min-w-0 overflow-y-auto p-4 md:p-5">
           {!selectedProject && !dashboard.loading && !showsGlobalPanel ? (
             <div className="flex flex-col items-center justify-center h-full text-center gap-3">
-              <div className="eyebrow">No Projects Yet</div>
+              <div className="eyebrow">No projects yet</div>
               <h2 className="text-xl font-semibold text-white/70">
-                Deploy an app to populate the admin.
+                Deploy your first app
               </h2>
               <p className="text-sm text-white/40 max-w-sm">
-                Projects appear as soon as Relay has app state. Trigger a deploy
-                from the CLI to get started, or create a project shell here.
+                Run relay init and relay deploy in your app folder. You can also create a project here before deploying.
               </p>
               <button
                 type="button"

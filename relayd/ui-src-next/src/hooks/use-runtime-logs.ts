@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getRuntimeTargets, type RuntimeTarget } from "@/lib/api";
+import { getRuntimeTargets, type EnvInfo, type RuntimeTarget } from "@/lib/api";
 import {
   EMPTY_RUNTIME_LANE_STATE,
   humanizeRuntimeStreamError,
@@ -14,6 +14,7 @@ import {
 } from "@/lib/relay-utils";
 
 interface RuntimeLogsState {
+  targetScope: string;
   loading: boolean;
   targets: RuntimeTarget[];
   defaultTarget: string;
@@ -24,12 +25,7 @@ interface RuntimeLogsState {
   error: string;
 }
 
-interface SelectedEnv {
-  app: string;
-  env: string;
-  branch: string;
-  stopped?: boolean;
-}
+type SelectedEnv = Pick<EnvInfo, "app" | "env" | "branch" | "stopped" | "engine" | "active_slot" | "standby_slot" | "replicas" | "running_replicas" | "latestDeploy">;
 
 export function useRuntimeLogs(
   selectedEnv: SelectedEnv | null | undefined,
@@ -37,6 +33,7 @@ export function useRuntimeLogs(
   windowFilter: string,
 ): RuntimeLogsState {
   const [state, setState] = useState<RuntimeLogsState>({
+    targetScope: "",
     loading: false,
     targets: [],
     defaultTarget: "",
@@ -47,10 +44,23 @@ export function useRuntimeLogs(
     error: "",
   });
 
-  // Fetch available targets when env changes
+  const app = selectedEnv?.app;
+  const env = selectedEnv?.env;
+  const branch = selectedEnv?.branch;
+  const stopped = selectedEnv?.stopped;
+  // Refresh targets when runtime identity changes, while ignoring identical snapshots.
+  const targetScope = JSON.stringify([
+    app, env, branch, stopped, selectedEnv?.engine,
+    selectedEnv?.active_slot, selectedEnv?.standby_slot,
+    selectedEnv?.replicas, selectedEnv?.running_replicas,
+    selectedEnv?.latestDeploy?.id, selectedEnv?.latestDeploy?.status,
+  ]);
+
+  // Fetch available targets when the lane changes, not on every SSE snapshot.
   useEffect(() => {
-    if (!selectedEnv?.app || !selectedEnv?.env || !selectedEnv?.branch) {
+    if (!app || !env || !branch) {
       setState({
+        targetScope: "",
         loading: false, targets: [], defaultTarget: "", lines: [],
         status: "idle", targetMeta: null, lane: EMPTY_RUNTIME_LANE_STATE, error: "",
       });
@@ -58,15 +68,16 @@ export function useRuntimeLogs(
     }
 
     let cancelled = false;
-    setState((prev) => ({ ...prev, loading: true, error: "" }));
+    setState((prev) => ({ ...prev, targetScope: "", loading: true, error: "" }));
 
-    getRuntimeTargets(selectedEnv.app, selectedEnv.env, selectedEnv.branch)
+    getRuntimeTargets(app, env, branch)
       .then((data) => {
         if (cancelled) return;
-        const lane = normalizeRuntimeLaneState(data?.lane, selectedEnv);
+        const lane = normalizeRuntimeLaneState(data?.lane, { app, env, branch, stopped });
         const defaultTarget = data?.default_target ?? "";
         setState((prev) => ({
           ...prev,
+          targetScope,
           loading: false,
           targets: data?.targets ?? [],
           defaultTarget,
@@ -81,23 +92,24 @@ export function useRuntimeLogs(
         if (cancelled) return;
         setState((prev) => ({
           ...prev,
+          targetScope,
           loading: false,
           targets: [],
           defaultTarget: "",
           lines: [],
           status: "error",
           targetMeta: null,
-          lane: normalizeRuntimeLaneState(null, selectedEnv),
+          lane: normalizeRuntimeLaneState(null, { app, env, branch, stopped }),
           error: err.message,
         }));
       });
 
     return () => { cancelled = true; };
-  }, [selectedEnv]);
+  }, [app, env, branch, stopped, targetScope]);
 
   // Stream logs when target changes
   useEffect(() => {
-    if (!selectedEnv?.app || !selectedEnv?.env || !selectedEnv?.branch) return undefined;
+    if (!app || !env || !branch || state.targetScope !== targetScope) return undefined;
     const selectedTargetMeta = state.targets.find((t) => t.id === selectedTarget) ?? null;
     const effectiveTarget = selectedTargetMeta ? selectedTarget : state.defaultTarget;
     const effectiveTargetMeta = state.targets.find((t) => t.id === effectiveTarget) ?? null;
@@ -132,9 +144,9 @@ export function useRuntimeLogs(
     async function run() {
       try {
         const params = new URLSearchParams({
-          app: selectedEnv!.app,
-          env: selectedEnv!.env,
-          branch: selectedEnv!.branch,
+          app: app!,
+          env: env!,
+          branch: branch!,
           target: effectiveTarget,
           tail: "300",
           since: sinceISO(windowFilter),
@@ -226,7 +238,7 @@ export function useRuntimeLogs(
       cancelled = true;
       controller.abort();
     };
-  }, [selectedEnv, selectedTarget, state.defaultTarget, state.lane, state.targets, windowFilter]);
+  }, [app, env, branch, selectedTarget, state.defaultTarget, state.lane, state.targets, state.targetScope, targetScope, windowFilter]);
 
   return state;
 }

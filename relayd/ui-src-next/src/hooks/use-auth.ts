@@ -13,7 +13,7 @@ interface AuthState {
 }
 
 const INITIAL: AuthState = {
-  loading: false,
+  loading: true,
   authed: false,
   user: null,
   setupAvailable: false,
