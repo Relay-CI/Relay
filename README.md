@@ -10,6 +10,18 @@ Self-hosted deployment platform — sync changed files, auto-detect buildpacks, 
 
 ---
 
+## Start here
+
+New to Relay? Read the [first deployment guide](docs/getting-started.md). It separates the commands you run on the server from those you run in your app folder.
+
+- [Documentation index](docs/README.md): choose a guide by task.
+- [Configuration files](docs/configuration.md): understand `.relay.json`, `relay.config.json`, `relay.json`, and `.relayignore`.
+- [Troubleshooting](docs/troubleshooting.md): connection, build, routing, and login checks.
+- [CLI reference](relay-client/README.md) and [agent reference](relayd/README.md): detailed commands and server settings.
+- [Docs website](site/README.md): run and maintain the `/site` documentation locally.
+
+A **lane** is an isolated deployment target identified by project, environment, and branch. For example, `my-app / staging / main` and `my-app / prod / main` are separate lanes.
+
 ## Install
 
 ### CLI
@@ -121,6 +133,8 @@ Add more without rebuilding `relayd` — see [Server-Side Buildpack Plugins](#se
 | ------------------- | ----------------------------------------------------------- |
 | `.relay.json`       | CLI connection defaults — url, token, app, env, branch      |
 | `relay.config.json` | Build command overrides — install_cmd, build_cmd, start_cmd |
+| `relay.json` | Databases and companion services for the app lane |
+| `.relayignore` | Additional paths to exclude from file synchronization |
 
 Common flags (all commands): `--url` `--token` `--app` `--env` `--branch` `--dir` `--host-port` `--mode port|traefik` `--public-host`
 

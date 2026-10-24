@@ -49,6 +49,15 @@ relay status                       Latest deploy status
 relay logs <id>                    Stream build logs
 relay list                         Recent deploys
 relay projects                     All projects and environments
+relay scale <1-16>                 Resize a Docker lane's replica pool
+relay deploy --replicas <n>        Choose replicas for a release
+relay deploy --variant <name> --weight <percent>
+                                   Deploy a variant beside control
+relay variants list/feedback       Read variant metrics and visitor feedback
+relay variants weight <name> <n>  Set the share of new visitors
+relay variants promote <name>     Make a variant the normal release
+relay variants rm <name>          Remove a variant; visitors return to control
+relay variants reshuffle          Reset visitor assignments
 relay login --url <server>         Save a browser login for one server
 relay logout                       Clear the current server's saved login
 relay rollback                     Roll back to previous image
@@ -65,6 +74,22 @@ relay agent status                 Show installed/latest versions and outdated s
 ```
 
 ## Usage
+
+### Variants, replicas, and readiness
+
+Variants require a running Docker lane in edge traffic mode. Replica counts range from 1 to 16 on the same host. Use explicit `--app`, `--env`, and `--branch` flags when operating a production lane.
+
+```sh
+relay deploy --app my-app --env prod --branch main --variant checkout --weight 10
+relay variants list --app my-app --env prod --branch main --period 24h
+relay scale 3 --app my-app --env prod --branch main
+```
+
+Variant weights affect new assignments; a cookie preserves existing assignments. The control gets the share left over after running variant weights. Promoting a variant queues an image deployment and retires the variant after success. Creating another variant or scaling adds app containers, not database replicas or new servers.
+
+Set `replicas` and `readiness_path` in `relay.config.json` to keep those deployment settings in source. A configured readiness endpoint must return HTTP 2xx from each replacement replica before traffic switches.
+
+See [variants and feedback](../docs/variants.md) and [scaling and operations](../docs/scaling-and-operations.md) for the full workflows, limits, and API/MCP equivalents.
 
 ### `deploy`
 

@@ -14,6 +14,9 @@
 - **GitHub Webhooks**: Native support for triggering redeployments on push events.
 - **Zero External Dependencies**: Works purely with Docker and Git (optional).
 - **Server-side buildpack plugins**: Install new framework support without recompiling the agent.
+- **Variants and feedback**: Run alternate builds beside control, assign visitor weights, compare metrics and feedback, and promote or remove a variant. See [the variants guide](../docs/variants.md).
+- **Replicas and readiness**: Run 1–16 Docker replicas per release, load-balance their traffic, and require application readiness before switching. See [scaling and operations](../docs/scaling-and-operations.md).
+- **Operations**: Inspect runtime-log targets, lane analytics, and owner-only container/daemon usage. The source map in [the docs](../docs/source-map.md) identifies the handlers behind each guide.
 
 ## What it does
 
