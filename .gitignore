@@ -17,8 +17,7 @@ station/nativec_linux
 # Next.js / Node.js
 .next/
 node_modules/
-# hide site from git so site folder won't be pushed
-site/
+# Separate cloud application
 cloud-site/
 
 
@@ -30,6 +29,9 @@ relayd/ui-src/node_modules
 __pycache__/
 */__pycache__/
 **/__pycache__/
+*.tsbuildinfo
+/smoke-apps/**/obj/
+/smoke-apps/**/bin/
 
 # Root-level duplicate Go files (real code lives in relayd/ and station/)
 /*.go

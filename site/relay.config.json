@@ -1,0 +1,4 @@
+{
+  "install_cmd": "npm ci --prefer-offline --no-audit --no-fund --ignore-scripts",
+  "service_port": 3000
+}

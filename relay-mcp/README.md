@@ -145,7 +145,7 @@ npm pack --dry-run
 
 To use unpublished local changes, set the client's command to `node` and its arguments to the absolute path of this checkout's `relay-mcp/index.js`. Keep the same connection environment variables. Tests use a temporary mock agent and exercise the real stdio handshake, tool discovery, request routing, timeouts, and error recovery.
 
-`docs:sync` discovers the local server's tools without calling an agent. It regenerates this README's tool table and `../site/src/lib/mcp-tools.json`. `docs:check` fails if either reference is stale. Keep the generated site file in that repository as well as reviewing changes here.
+`docs:sync` discovers the local server's tools without calling an agent. It regenerates this README's tool table and `../site/src/lib/mcp-tools.json`. `docs:check` fails if either reference is stale. Commit the generated site file with the corresponding MCP changes in the Relay repository.
 
 ## Publishing (maintainers)
 

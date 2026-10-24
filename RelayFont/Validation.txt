@@ -1,0 +1,33 @@
+RELAY FORM BOLD — VALIDATION
+
+TTF: PASS — 135,140 bytes; tables, character map, rendering and shaping.
+OTF: PASS — 55,968 bytes; tables, character map, rendering and shaping.
+WOFF: PASS — 51,736 bytes; tables, character map, rendering and shaping.
+WOFF2: PASS — 33,160 bytes; tables, character map, rendering and shaping.
+TTF: PASS — Windows accepted the font in a temporary, process-private load.
+OTF: PASS — Windows accepted the font in a temporary, process-private load.
+PASS — Printable ASCII, Latin-1 Supplement and Latin Extended-A coverage.
+PASS — All four formats contain matching character maps.
+PASS — Font family/style, bold flags and embedding metadata.
+PASS — All glyphs fit the Windows ascent/descent bounds.
+PASS — Kerning changes the spacing of the reference word.
+PASS — tnum produces equal-width digits.
+PASS — Composed and decomposed common accented text shape identically.
+PASS — Combining marks have zero advance widths.
+PASS — Every encoded visible character rasterizes in FreeType.
+NOT TESTED — Premiere application integration; desktop font loading was checked through Windows.
+
+BROWSER VALIDATION (MICROSOFT EDGE / CHROMIUM)
+TTF: PASS — browser font sanitizer and FontFace loading; sample width 1824.5999px.
+OTF: PASS — browser font sanitizer and FontFace loading; sample width 1824.5999px.
+WOFF: PASS — browser font sanitizer and FontFace loading; sample width 1824.5999px.
+WOFF2: PASS — browser font sanitizer and FontFace loading; sample width 1824.5999px.
+PASS — All four formats have matching browser text metrics.
+PASS — Preview text presets and size controls.
+PASS — Preview fits a 390px mobile viewport without horizontal overflow.
+PASS — No browser page-script errors.
+
+VISUAL REVIEW
+Reviewed the font-rendered specimen and character contact sheets.
+The five source letters retain the reference outlines and spacing.
+Other characters are extrapolated designs.

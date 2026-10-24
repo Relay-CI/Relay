@@ -26,6 +26,6 @@ npm run docs:check
 
 The sync command starts the local stdio MCP server and discovers its actual tools without making agent requests. It updates the README table and `site/src/lib/mcp-tools.json`, which the site uses for its MCP reference and count. Do not edit the generated tool table or JSON directly.
 
-The site is a separate Git repository ignored by the parent repository. Review its generated catalog and content changes there too. Run `npm run docs:check` from this checkout before release; it fails if the generated references are stale.
+The site is tracked in the main Relay repository. Commit its generated catalog with the corresponding MCP changes. Run `npm run docs:check` from this checkout before release; it fails if the generated references are stale.
 
 For each new guide, update `site/src/components/docs-config.ts`, the `/docs` index, and the sitemap. Check that guide search terms and section links reach the actual headings. Add a feature-page or homepage link when the capability should be discoverable before opening the docs.

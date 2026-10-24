@@ -1,0 +1,22 @@
+@font-face {
+  font-family: "Relay Form";
+  src: url("./fonts/RelayForm-Bold.woff2") format("woff2"),
+       url("./fonts/RelayForm-Bold.woff") format("woff");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+.relay-form {
+  font-family: "Relay Form", Arial, sans-serif;
+  font-weight: 700;
+  font-style: normal;
+  font-size-adjust: 0.5;
+  font-kerning: normal;
+  line-height: 1.28;
+}
+
+/* For aligned numbers in pricing, tables or counters: */
+.relay-form-tabular {
+  font-variant-numeric: tabular-nums;
+}

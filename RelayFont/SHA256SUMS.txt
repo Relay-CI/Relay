@@ -1,0 +1,4 @@
+e4ebfd8cbe0339db5dff4cb4adc7f621782b04924c0122681b2e9b7c7f7ebf35  fonts/RelayForm-Bold.otf
+f054ac0b14335d240a00b16a652bdc3d980bb27837a7e031eee6ea05f11f539b  fonts/RelayForm-Bold.ttf
+75aec2a0a3e142b118eb5657d2d77cf48ed3d9fa2a35ab055ff8b89d09c35cef  fonts/RelayForm-Bold.woff
+861ddba867ed80101a661a9e0b715ec8d538f2871030b88c28647a12b5c8d8cb  fonts/RelayForm-Bold.woff2

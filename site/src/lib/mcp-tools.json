@@ -1,0 +1,217 @@
+[
+  {
+    "name": "get_doctor",
+    "description": "Check agent setup and diagnostics, including Docker, persistent storage, DNS, TLS, and proxy health. Read-only; does not change server settings.",
+    "readOnly": true
+  },
+  {
+    "name": "list_projects",
+    "description": "List all projects and their environments known to the Relay agent.",
+    "readOnly": true
+  },
+  {
+    "name": "list_deploys",
+    "description": "List recent deploys. Filter by app, env, and/or branch. Returns build numbers, statuses, deployed_by, commit messages, and timestamps.",
+    "readOnly": true
+  },
+  {
+    "name": "get_deploy",
+    "description": "Get a single deploy record by ID including status, logs reference, image tag, and commit info.",
+    "readOnly": true
+  },
+  {
+    "name": "get_deploy_logs",
+    "description": "Fetch the stored build and deploy logs for a given deploy ID.",
+    "readOnly": true
+  },
+  {
+    "name": "cancel_deploy",
+    "description": "Cancel an in-progress deploy by ID.",
+    "readOnly": false
+  },
+  {
+    "name": "rollback",
+    "description": "Roll back the most recent deploy to the previous image for an app/env/branch.",
+    "readOnly": false
+  },
+  {
+    "name": "start_app",
+    "description": "Start a stopped app container without triggering a new build.",
+    "readOnly": false
+  },
+  {
+    "name": "stop_app",
+    "description": "Stop a running app container.",
+    "readOnly": false
+  },
+  {
+    "name": "restart_app",
+    "description": "Restart a running app container in place without a new build.",
+    "readOnly": false
+  },
+  {
+    "name": "delete_lane",
+    "description": "Delete a lane and remove its container, workspace, and state from the agent.",
+    "readOnly": false
+  },
+  {
+    "name": "get_app_config",
+    "description": "Get the current lane configuration for an app including access_policy, public_host, engine, host_port, service_port, and rollout settings.",
+    "readOnly": true
+  },
+  {
+    "name": "set_app_config",
+    "description": "Update lane configuration for an app. Only supply the fields you want to change.",
+    "readOnly": false
+  },
+  {
+    "name": "list_secrets",
+    "description": "List secret key names (not values) for an app/env/branch.",
+    "readOnly": true
+  },
+  {
+    "name": "add_secret",
+    "description": "Add or update a secret value for an app/env/branch. The value is encrypted at rest if RELAY_SECRET_KEY is configured on the agent.",
+    "readOnly": false
+  },
+  {
+    "name": "remove_secret",
+    "description": "Delete a secret by key for an app/env/branch.",
+    "readOnly": false
+  },
+  {
+    "name": "list_promotions",
+    "description": "List promotion requests. Shows source/target lane, image, approval state, and post-promote health status.",
+    "readOnly": true
+  },
+  {
+    "name": "approve_promotion",
+    "description": "Approve a queued promotion request by ID. Requires owner role.",
+    "readOnly": false
+  },
+  {
+    "name": "list_users",
+    "description": "List all user accounts with their roles. Requires owner role.",
+    "readOnly": true
+  },
+  {
+    "name": "get_audit_log",
+    "description": "Fetch recent audit log entries showing actor, action, target, and timestamp. Requires owner role.",
+    "readOnly": true
+  },
+  {
+    "name": "get_server_config",
+    "description": "Get server-level config: base_domain, dashboard_host, ACME settings, and active theme. Requires owner role.",
+    "readOnly": true
+  },
+  {
+    "name": "set_server_config",
+    "description": "Update server-level config. Supply only the fields to change. Requires owner role.",
+    "readOnly": false
+  },
+  {
+    "name": "list_buildpack_plugins",
+    "description": "List installed buildpack plugins on the agent.",
+    "readOnly": true
+  },
+  {
+    "name": "remove_buildpack_plugin",
+    "description": "Remove an installed buildpack plugin by name. Requires RELAY_ENABLE_PLUGIN_MUTATIONS=true on the agent.",
+    "readOnly": false
+  },
+  {
+    "name": "get_version",
+    "description": "Get relayd build metadata and Station runtime version details.",
+    "readOnly": true
+  },
+  {
+    "name": "create_signed_link",
+    "description": "Generate a time-bounded signed share URL for a lane that uses access_policy=signed-link.",
+    "readOnly": false
+  },
+  {
+    "name": "list_companions",
+    "description": "List managed companion services (databases, caches, etc.) attached to an app lane.",
+    "readOnly": true
+  },
+  {
+    "name": "restart_companion",
+    "description": "Restart a named companion service in place.",
+    "readOnly": false
+  },
+  {
+    "name": "list_variants",
+    "description": "Read a lane's control release, variants, traffic weights, request/error/latency metrics, and latest 50 feedback entries for 24h, 7d, or 30d. Includes support limitations.",
+    "readOnly": true
+  },
+  {
+    "name": "set_variant_weight",
+    "description": "Change a variant's share of new visitors (0-100 percent). Existing visitor assignments remain sticky. All running variant weights must total at most 100; control receives the remainder.",
+    "readOnly": false
+  },
+  {
+    "name": "promote_variant",
+    "description": "Queue a deployment of a variant's existing image as the lane's control release. Returns deploy_id; the variant is retired after that deployment succeeds. This is separate from cross-lane promotion approvals.",
+    "readOnly": false
+  },
+  {
+    "name": "remove_variant",
+    "description": "Remove a variant's route and containers. Visitors assigned to it fall back to control. Does not remove the lane's control release.",
+    "readOnly": false
+  },
+  {
+    "name": "reshuffle_variants",
+    "description": "Reset visitor assignments for a lane under its current variant weights. Every visitor is assigned again on a subsequent request.",
+    "readOnly": false
+  },
+  {
+    "name": "scale_app",
+    "description": "Set 1-16 replicas for an existing Docker lane. With apply=true, queues an image redeployment when a running lane needs resizing. With apply=false, saves the size for a later deployment. Returns deploy_id when queued.",
+    "readOnly": false
+  },
+  {
+    "name": "get_analytics",
+    "description": "Read lane traffic, errors, latency, bandwidth, and runtime resource data, optionally filtered to one variant (or control). HTTP/HTTPS only; scoped viewer access is required.",
+    "readOnly": true
+  },
+  {
+    "name": "abort_rollout",
+    "description": "Abort a canary rollout that is currently monitoring and restore its previous slot. Requires an active standby slot. HTTP/HTTPS only.",
+    "readOnly": false
+  },
+  {
+    "name": "request_promotion",
+    "description": "Request promotion of a healthy lane's current image to a different lane. Requires deployer access to both lanes. Production requests by non-owners wait for owner approval when user accounts are enabled.",
+    "readOnly": false
+  },
+  {
+    "name": "get_runtime_targets",
+    "description": "List available app, replica, variant, proxy, and companion runtime log targets for a lane, plus the default target and offline state. Use the dashboard Runtime logs page to follow a target's live output.",
+    "readOnly": true
+  },
+  {
+    "name": "get_admin_ops",
+    "description": "Read the owner-only operations snapshot: container CPU, memory, storage, lane health, daemon memory, and deployment comparisons.",
+    "readOnly": true
+  },
+  {
+    "name": "get_status",
+    "description": "Read the agent's runtime health inventory, including edge and active-slot state, stopped lanes, exit codes, and out-of-memory indicators.",
+    "readOnly": true
+  },
+  {
+    "name": "list_buildpack_catalog",
+    "description": "Read the built-in buildpack plugin catalog. Requires owner role.",
+    "readOnly": true
+  },
+  {
+    "name": "install_buildpack_from_catalog",
+    "description": "Install a named plugin from the agent's built-in catalog. Requires owner role and plugin mutations enabled on the agent.",
+    "readOnly": false
+  },
+  {
+    "name": "install_buildpack_from_url",
+    "description": "Install buildpack plugin JSON from an HTTPS URL, optionally pinned to a SHA256 digest. Requires owner role and plugin mutations enabled. The agent validates and fetches the URL.",
+    "readOnly": false
+  }
+]

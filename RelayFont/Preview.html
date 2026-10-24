@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Relay Form — Font Preview</title>
+  <link rel="stylesheet" href="./relay-form.css">
+  <style>
+    :root { color-scheme: dark; --paper: #191a19; --ink: #fbfaf6; --muted: #a5a99f; --line: #42453c; --accent: #d2f76b; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: clamp(22px, 5vw, 80px); background: var(--paper); color: var(--ink); font: 15px/1.5 Arial, sans-serif; }
+    main { max-width: 1500px; margin: auto; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 24px; flex-wrap: wrap; border-bottom: 1px solid var(--line); padding-bottom: 23px; }
+    h1 { margin: 0; font: inherit; font-weight: 700; letter-spacing: .06em; }
+    header p { margin: 0; color: var(--muted); }
+    .intro { margin: 32px 0 12px; color: var(--muted); }
+    textarea { display: block; width: 100%; min-height: 325px; resize: vertical; padding: 10px 0; background: transparent; color: var(--ink); border: 0; border-radius: 0; font-size: clamp(65px, 15vw, 180px); letter-spacing: 0; overflow-wrap: anywhere; }
+    textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 8px; }
+    .controls { display: flex; gap: 35px; flex-wrap: wrap; align-items: end; padding: 20px 0 30px; border-bottom: 1px solid var(--line); }
+    label { display: grid; gap: 10px; min-width: 200px; }
+    input { accent-color: var(--accent); width: 200px; }
+    output { color: var(--accent); }
+    .buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+    button { background: transparent; color: var(--ink); border: 1px solid var(--line); padding: 11px 16px; font: inherit; cursor: pointer; }
+    button:hover { border-color: var(--accent); }
+    button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    section { padding-top: 35px; }
+    h2 { font: inherit; color: var(--muted); font-size: 13px; letter-spacing: .07em; text-transform: uppercase; }
+    .alphabet { font-size: clamp(25px, 3.9vw, 58px); overflow-wrap: anywhere; margin: 12px 0; }
+    .statement { font-size: clamp(36px, 6vw, 92px); color: var(--accent); margin: 30px 0; }
+    .downloads { display: flex; gap: 20px; flex-wrap: wrap; margin: 30px 0; }
+    a { color: var(--ink); text-underline-offset: 5px; }
+    footer { margin-top: 50px; padding-top: 22px; border-top: 1px solid var(--line); color: var(--muted); }
+    footer p { max-width: 800px; }
+  </style>
+</head>
+<body>
+<main>
+  <header><h1>RELAY FORM / BOLD</h1><p id="status" role="status">Loading font…</p></header>
+  <p class="intro" id="hint">Type directly below to try your own words.</p>
+  <textarea id="sample" class="relay-form" aria-label="Your font preview text" aria-describedby="hint" spellcheck="false">Relay</textarea>
+  <div class="controls">
+    <label for="size"><span>Size <output id="sizeValue" for="size">180 px</output></span><input type="range" id="size" min="20" max="240" value="180"></label>
+    <label for="spacing"><span>Letter spacing <output id="spacingValue" for="spacing">0 em</output></span><input type="range" id="spacing" min="-3" max="15" value="0"></label>
+    <div class="buttons" aria-label="Text examples">
+      <button type="button" data-text="Relay">Reference</button>
+      <button type="button" data-text="Make your next move.">Headline</button>
+      <button type="button" data-text="Café, déjà vu. Voilà!">Accents</button>
+    </div>
+  </div>
+  <section aria-labelledby="alphabet-title">
+    <h2 id="alphabet-title">The character of the type</h2>
+    <p class="relay-form alphabet">ABCDEFGHIJKLMNOPQRSTUVWXYZ</p>
+    <p class="relay-form alphabet">abcdefghijklmnopqrstuvwxyz</p>
+    <p class="relay-form alphabet">0123456789 &amp; @ # % ! ? $ € £ ¥</p>
+    <p class="relay-form alphabet">ÀÉÎÖÜ àéîöü ñç øæœ ß Łł Čč Şş</p>
+    <p class="relay-form statement">A complete voice.</p>
+  </section>
+  <section aria-labelledby="download-title">
+    <h2 id="download-title">Font files</h2>
+    <div class="downloads">
+      <a href="./fonts/RelayForm-Bold.ttf" download>TTF · Desktop</a>
+      <a href="./fonts/RelayForm-Bold.otf" download>OTF · Desktop</a>
+      <a href="./fonts/RelayForm-Bold.woff" download>WOFF · Web</a>
+      <a href="./fonts/RelayForm-Bold.woff2" download>WOFF2 · Web</a>
+      <a href="./README.txt">Installation &amp; use</a>
+    </div>
+  </section>
+  <footer>
+    <p>A custom geometric bold font drawn from the supplied five-letter image. Includes uppercase, lowercase, numbers, punctuation, Latin accents, kerning and tabular figures. One weight: Bold (700).</p>
+  </footer>
+</main>
+<script>
+  const sample = document.getElementById('sample');
+  const size = document.getElementById('size');
+  const spacing = document.getElementById('spacing');
+  size.value = Math.min(180, Math.round(innerWidth * .15));
+  function update() {
+    sample.style.fontSize = size.value + 'px';
+    sample.style.letterSpacing = (spacing.value / 100) + 'em';
+    document.getElementById('sizeValue').value = size.value + ' px';
+    document.getElementById('spacingValue').value = (spacing.value / 100) + ' em';
+  }
+  size.addEventListener('input', update);
+  spacing.addEventListener('input', update);
+  document.querySelectorAll('[data-text]').forEach(button => button.addEventListener('click', () => {
+    sample.value = button.dataset.text;
+    sample.focus();
+  }));
+  update();
+  document.fonts.load('700 32px "Relay Form"').then(faces => {
+    document.getElementById('status').textContent = faces.length ? 'Font loaded · 525 characters · 4 formats' : 'Font unavailable — keep the fonts folder beside this page.';
+  }).catch(() => { document.getElementById('status').textContent = 'Font unavailable — keep the fonts folder beside this page.'; });
+</script>
+</body>
+</html>
